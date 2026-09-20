@@ -222,31 +222,38 @@ def parse_realsense_timestamps(path: str, cfg: dict) -> List[FrameRecord]:
     The published format packs the timestamp into each filename as a leading integer
     (microseconds), with columns for depth-in-rgb, depth-in-event and rgb filenames.
 
+    Two on-disk layouts exist and both are handled: the real CEAR file lists ONE filename
+    per line, cycling depth_rgb / depth_event / rgb (3 lines per frame); the synthetic
+    fixture puts the three on one line. We flatten ALL whitespace-separated tokens across
+    the file, classify each by filename suffix, and pair the i-th pure-RGB token with the
+    i-th depth-aligned-to-RGB token.
+
     TRAP 7: RGB and depth timestamps are NOT the same — auto-exposure varies the RGB
-    exposure and timestamps sit at mid-exposure, so the RGB↔depth gap ranges 0-8.33 ms.
-    We read BOTH columns' timestamps and apply the RealSense offset to each; downstream,
-    each stream is posed at its own timestamp (RGB frames for training, depth frames for
-    fusion). The exact column order is a Phase-1 VERIFY; this parser finds columns by
-    filename suffix, falling back to positional order.
+    exposure and timestamps sit at mid-exposure (RGB↔depth gap 0-8.33 ms). We keep each
+    token's own timestamp (+ the RealSense offset) so each stream is posed at its own time.
     """
     off = _offset(cfg, "rgb")     # RealSense clock -> event clock (same sensor, both cols)
-    records: List[FrameRecord] = []
+    toks = []
     with open(path) as f:
         for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
+            if line.lstrip().startswith("#"):
                 continue
-            toks = line.split()
-            # pure RGB frame: has 'rgb', not 'depth', not 'event'
-            rgb_tok = _pick_token(toks, wants=("rgb",), exclude=("depth", "event"),
-                                  fallback_idx=-1)
-            # depth aligned to RGB: has both 'depth' and 'rgb', not 'event'
-            depth_tok = _pick_token(toks, wants=("depth", "rgb"), exclude=("event",),
-                                    fallback_idx=0)
-            t_rgb = _leading_int(rgb_tok) / 1e6 + off
-            t_depth = _leading_int(depth_tok) / 1e6 + off
-            records.append(FrameRecord(t=t_rgb, rgb_name=rgb_tok,
-                                       depth_name=depth_tok, t_depth=t_depth))
+            toks.extend(t for t in line.split() if t.endswith(".png"))
+    rgb_toks, depth_toks = [], []
+    for t in toks:
+        b = os.path.basename(t)
+        if "event" in b:
+            continue
+        if "depth" in b and "rgb" in b:          # depth aligned to RGB
+            depth_toks.append(t)
+        elif "rgb" in b and "depth" not in b:    # pure RGB frame
+            rgb_toks.append(t)
+    if len(rgb_toks) != len(depth_toks):
+        n = min(len(rgb_toks), len(depth_toks))
+        rgb_toks, depth_toks = rgb_toks[:n], depth_toks[:n]
+    records = [FrameRecord(t=_leading_int(r) / 1e6 + off, rgb_name=r,
+                           depth_name=d, t_depth=_leading_int(d) / 1e6 + off)
+               for r, d in zip(rgb_toks, depth_toks)]
     records.sort(key=lambda r: r.t)
     return records
 
