@@ -18,7 +18,7 @@
 set -euo pipefail
 
 SEQ="${1:-mocap1_well-lit_trot}"
-RGB_DIR="${RGB_DIR:-raw_rgb}"                       # TRAP-5 A/B: try raw_rgb then rgb
+RGB_DIR="${RGB_DIR:-rgb}"                           # CEAR indoor download ships only rgb/ (no raw_rgb)
 : "${CEAR_OUT:?source env/cear_env.sh first}"
 : "${THREEDGRUT_DIR:?set THREEDGRUT_DIR to your cloned github.com/nv-tlabs/3dgrut}"
 
