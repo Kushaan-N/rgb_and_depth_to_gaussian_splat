@@ -20,8 +20,10 @@ SIF="$CEAR_WS/isaac-sim-5.1.0.sif"
 OUT="$CEAR_OUT/$SEQ"
 FLOORZ="$(python3 -c "import json;print(json.load(open('$OUT/collider/collider_meta.json'))['floor_z_m'])")"
 
-# writable dir for the container HOME (/root under fakeroot) so omni caches/extensions persist
-CHOME="$CEAR_WS/isaac-chome"; mkdir -p "$CHOME"
+# writable dirs: the SIF is read-only, but Isaac writes to $HOME (/root under fakeroot) and
+# to /isaac-sim/kit/{cache,data} (shader DB, material cache, documents). Bind those to
+# scratch (persist across runs) and add --writable-tmpfs as a catch-all for any other path.
+CHOME="$CEAR_WS/isaac-chome"; mkdir -p "$CHOME" "$CHOME/kit-cache" "$CHOME/kit-data"
 export APPTAINERENV_OMNI_KIT_ACCEPT_EULA=YES APPTAINERENV_ACCEPT_EULA=Y APPTAINERENV_PRIVACY_CONSENT=N
 export APPTAINERENV_HOME=/root
 echo "SIF=$SIF  seq=$SEQ mode=$MODE floor_z=$FLOORZ"
@@ -34,7 +36,9 @@ ARGS="--collider $OUT/collider/collider.obj --mode $MODE --floor-z $FLOORZ --out
 # REQUIRED: compute nodes run apptainer rootless, and the container's /isaac-sim is 0750
 # owned by a non-root uid -> only a root-mapped (fakeroot) namespace can chdir into it.
 cp "$REPO/scripts/compose_stage.py" "$CEAR_WS/compose_stage.py"
-apptainer exec --nv --fakeroot --pwd /isaac-sim \
+apptainer exec --nv --fakeroot --writable-tmpfs --pwd /isaac-sim \
   --bind "$CEAR_WS:$CEAR_WS" --bind "$CHOME:/root" \
+  --bind "$CHOME/kit-cache:/isaac-sim/kit/cache" \
+  --bind "$CHOME/kit-data:/isaac-sim/kit/data" \
   "$SIF" /isaac-sim/python.sh "$CEAR_WS/compose_stage.py" $ARGS
 echo "ISAAC_CONTAINER_DONE $SEQ $MODE"
