@@ -206,9 +206,14 @@ def parse_vectornav(path: str, cfg: dict) -> ImuTrack:
 
 @dataclass
 class FrameRecord:
-    t: float           # seconds, event clock (from RGB timestamp + rgb offset)
+    t: float           # RGB timestamp, seconds, event clock (rgb_us + rgb offset)
     rgb_name: str      # filename in the rgb/ (or raw_rgb/) directory
     depth_name: str    # filename in the depth/ directory (aligned to RGB)
+    t_depth: float = None   # DEPTH timestamp, seconds, event clock (TRAP 7)
+
+    def __post_init__(self):
+        if self.t_depth is None:
+            self.t_depth = self.t
 
 
 def parse_realsense_timestamps(path: str, cfg: dict) -> List[FrameRecord]:
@@ -216,11 +221,15 @@ def parse_realsense_timestamps(path: str, cfg: dict) -> List[FrameRecord]:
 
     The published format packs the timestamp into each filename as a leading integer
     (microseconds), with columns for depth-in-rgb, depth-in-event and rgb filenames.
-    We read the RGB column's timestamp, convert us->s, and apply the RealSense offset.
-    The exact column order is a Phase-1 VERIFY; this parser is tolerant (it finds the
-    columns by their filename suffix, falling back to positional order).
+
+    TRAP 7: RGB and depth timestamps are NOT the same — auto-exposure varies the RGB
+    exposure and timestamps sit at mid-exposure, so the RGB↔depth gap ranges 0-8.33 ms.
+    We read BOTH columns' timestamps and apply the RealSense offset to each; downstream,
+    each stream is posed at its own timestamp (RGB frames for training, depth frames for
+    fusion). The exact column order is a Phase-1 VERIFY; this parser finds columns by
+    filename suffix, falling back to positional order.
     """
-    off = _offset(cfg, "rgb")
+    off = _offset(cfg, "rgb")     # RealSense clock -> event clock (same sensor, both cols)
     records: List[FrameRecord] = []
     with open(path) as f:
         for line in f:
@@ -234,9 +243,10 @@ def parse_realsense_timestamps(path: str, cfg: dict) -> List[FrameRecord]:
             # depth aligned to RGB: has both 'depth' and 'rgb', not 'event'
             depth_tok = _pick_token(toks, wants=("depth", "rgb"), exclude=("event",),
                                     fallback_idx=0)
-            ts_us = _leading_int(rgb_tok)
-            records.append(FrameRecord(t=ts_us / 1e6 + off,
-                                       rgb_name=rgb_tok, depth_name=depth_tok))
+            t_rgb = _leading_int(rgb_tok) / 1e6 + off
+            t_depth = _leading_int(depth_tok) / 1e6 + off
+            records.append(FrameRecord(t=t_rgb, rgb_name=rgb_tok,
+                                       depth_name=depth_tok, t_depth=t_depth))
     records.sort(key=lambda r: r.t)
     return records
 
@@ -370,7 +380,18 @@ def marker_pose_to_world_cam(T_world_body: np.ndarray, calib: Calibration,
         T_body_cam = calib.T_robot_cam
     else:
         raise ValueError(f"unknown pose_frame {frame!r}")
-    return T_world_body @ T_body_cam
+    # §5.3: optional constant-extrinsic correction ΔT (one rigid transform for the whole
+    # sequence) that soaks up the small CAD/factory-default error the chain can carry.
+    return T_world_body @ T_body_cam @ delta_extrinsic(cfg)
+
+
+def delta_extrinsic(cfg: dict) -> np.ndarray:
+    """The ΔT correction transform (§5.3), or identity if unset. Stored in
+    cfg.frames.extrinsic.delta_T as a 16-element row-major list."""
+    dt = cfg.get("frames", {}).get("extrinsic", {}).get("delta_T")
+    if dt is None:
+        return np.eye(4)
+    return np.asarray(dt, dtype=np.float64).reshape(4, 4)
 
 
 def build_world_to_cam_track(mocap: PoseTrack, interp: PoseInterpolator,
