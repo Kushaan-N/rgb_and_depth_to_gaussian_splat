@@ -39,8 +39,10 @@ def compute_world_cam(cfg: dict):
     calib = pu.load_calibration(cfg["intrinsics"]["calib_file"], cfg)
     frames = pu.parse_realsense_timestamps(os.path.join(root, seq["timestamp_table"]), cfg)
 
-    ts_all = np.array([f.t for f in frames])
-    in_rng = interp.in_range(ts_all)
+    # require BOTH the RGB and depth timestamps in range (TRAP 7 — they differ by up to
+    # ~8 ms, so an edge frame can have one in range and the other just outside)
+    in_rng = interp.in_range(np.array([f.t for f in frames])) & \
+        interp.in_range(np.array([f.t_depth for f in frames]))
     kept = [f for f, ok in zip(frames, in_rng) if ok]
     n_dropped = int((~in_rng).sum())
     if not kept:
@@ -48,6 +50,16 @@ def compute_world_cam(cfg: dict):
                            "(units/offsets); the streams may be misaligned by 1e6 or an offset sign")
     Twc = pu.build_world_to_cam_track(mocap, interp, calib, cfg, [f.t for f in kept])
     return kept, Twc, calib, interp, mocap, n_dropped
+
+
+def depth_poses(cfg: dict, kept, mocap, interp, calib) -> np.ndarray:
+    """Camera-to-world (Z-up) poses for each frame at its DEPTH timestamp (TRAP 7).
+
+    Depth is stored in the RGB optical frame, so the same extrinsic chain applies — only
+    the interpolation time differs (t_depth, not t). Used by depth fusion (Phase 3) and
+    the Gate-2 warp source so geometry is posed at the instant the depth was captured.
+    """
+    return pu.build_world_to_cam_track(mocap, interp, calib, cfg, [f.t_depth for f in kept])
 
 
 def build(cfg: dict) -> dict:
