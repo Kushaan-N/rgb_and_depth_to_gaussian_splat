@@ -50,6 +50,12 @@ def inventory(cfg: dict) -> dict:
             continue
         files = _count_images(path)
         entry = {"path": path, "exists": True, "count": len(files)}
+        if label == "depth":
+            # the aligned depth dir holds BOTH depth-in-rgb and depth-in-event projections;
+            # only the *_depth_rgb* files are used, so count those separately
+            aligned = [f for f in files if "depth_rgb" in os.path.basename(f)]
+            entry["aligned_depth_rgb_count"] = len(aligned)
+            files = aligned or files
         if files:
             if "depth" in label:
                 d = iu.read_depth_raw(files[0])
@@ -128,16 +134,17 @@ def inventory(cfg: dict) -> dict:
         report["issues"].append(f"sync diagnostics: {e}")
 
     # --- Gate 1 consistency ---
-    counts = {k: v.get("count") for k, v in report["dirs"].items()
-              if v.get("exists") and "count" in v}
+    # n_frames = paired (rgb, depth_rgb) records parsed from realsense_timestamp.txt.
     n_ts = report["streams"].get("rgb_frames", {}).get("n")
+    rgb_count = report["dirs"].get("rgb", {}).get("count")
+    aligned_depth = report["dirs"].get("depth", {}).get("aligned_depth_rgb_count")
     consistent = True
-    if "rgb" in counts and "depth" in counts and counts["rgb"] != counts["depth"]:
+    if n_ts is not None and rgb_count is not None and abs(n_ts - rgb_count) > 1:
         consistent = False
-        report["issues"].append(f"rgb count {counts['rgb']} != depth count {counts['depth']}")
-    if n_ts is not None and "rgb" in counts and abs(n_ts - counts["rgb"]) > 1:
+        report["issues"].append(f"parsed frames {n_ts} != rgb count {rgb_count}")
+    if n_ts is not None and aligned_depth is not None and abs(n_ts - aligned_depth) > 1:
         consistent = False
-        report["issues"].append(f"timestamp rows {n_ts} != rgb count {counts['rgb']}")
+        report["issues"].append(f"parsed frames {n_ts} != aligned depth_rgb count {aligned_depth}")
     report["gate1_consistent"] = consistent
     return report
 
@@ -151,7 +158,9 @@ def print_table(r: dict) -> None:
             print(f"  {k:10s} MISSING ({v['path']})"); continue
         extra = ""
         if "min_nonzero_m" in v:
-            extra = f" depth {v['dtype']} range≈[{v.get('min_nonzero_m')},{v.get('max_m')}]m invalid={v.get('pct_invalid'):.1f}%"
+            aligned = v.get("aligned_depth_rgb_count")
+            algn = f" (depth_rgb={aligned})" if aligned is not None else ""
+            extra = f"{algn} {v['dtype']} range≈[{v.get('min_nonzero_m')},{v.get('max_m')}]m invalid={v.get('pct_invalid'):.1f}%"
         elif "dtype" in v:
             extra = f" {v['dtype']} {v.get('shape')}"
         print(f"  {k:10s} n={v['count']:<6d}{extra}")
