@@ -25,3 +25,13 @@ def synthetic(tmp_path_factory):
     cfg = pu.load_config(paths["config"])
     gt = json.load(open(paths["ground_truth"]))
     return dict(paths=paths, cfg=cfg, gt=gt, seq_dir=paths["seq_dir"], out=out)
+
+
+@pytest.fixture(scope="session")
+def synthetic_preamble(tmp_path_factory):
+    """A sequence WITH a 2 s sync preamble (pitch swing), for TRAP-8 exclusion tests."""
+    out = str(tmp_path_factory.mktemp("cear_synth_pre"))
+    paths = make_synthetic_sequence(out, "synthetic", n_frames=48, seed=1, preamble_s=2.0)
+    cfg = pu.load_config(paths["config"])
+    gt = json.load(open(paths["ground_truth"]))
+    return dict(paths=paths, cfg=cfg, gt=gt, seq_dir=paths["seq_dir"], out=out)
