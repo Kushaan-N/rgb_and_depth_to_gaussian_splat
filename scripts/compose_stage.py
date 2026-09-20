@@ -103,11 +103,12 @@ def main():
     # would apply — that helper isn't in the pip distribution, but the 5.1 RTX renderer has
     # NuRec built in, so we set them via launch args): keep gaussian tonemapping on, and
     # single-GPU (NuRec volume path requires multiGpu off).
+    # plain NuRec Volume assets (ours) do NOT need omni.rtx.spg (that's only for SPG/PPISP
+    # assets, and it isn't in the registry anyway — enabling it aborts the app). The RTX
+    # renderer already has NuRec; these settings + nurec_utils.setup_for_rendering do it.
     nurec_args = ["--/renderer/multiGpu/enabled=false",
-                  "--/rtx/spg/enabled=true",
                   "--/omni/rtx/nre/compositing/disableNuRecPostProcessings=true",
-                  "--/rtx/rtpt/gaussian/skipTonemapping/enabled=false",
-                  "--enable", "omni.rtx.spg"]
+                  "--/rtx/rtpt/gaussian/skipTonemapping/enabled=false"]
     app = SimulationApp({"headless": not args.gui, "renderer": "RayTracedLighting",
                          "extra_args": nurec_args if args.mode == "nav" else []})
 
