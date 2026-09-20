@@ -13,7 +13,7 @@
 set -euo pipefail
 SEQ="${1:-mocap1_well-lit_trot}"
 MODE="${2:-drop}"
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
+REPO="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 source "$REPO/env/cear_env.sh"
 
 OUT="$CEAR_OUT/$SEQ"

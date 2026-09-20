@@ -13,7 +13,8 @@
 
 set -euo pipefail
 SEQ="${1:-mocap1_well-lit_trot}"
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# SLURM copies the batch script to a spool dir, so $0 is NOT the repo. Use the submit dir.
+REPO="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 source "$REPO/env/cear_env.sh"            # sets CEAR_DATA / CEAR_OUT (also activates CPU venv)
 deactivate 2>/dev/null || true            # ...but training uses the 3dgrut .venv, not the CPU one
 
