@@ -22,6 +22,10 @@ unset UV_EXCLUDE_NEWER 2>/dev/null || true
 export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"
 # build for A100 (8.0), L40S (8.9), H100 (9.0) so the env runs on any of our GPUs
 export TORCH_CUDA_ARCH_LIST="8.0;8.9;9.0"
+# tiny-cuda-nn links against the CUDA *driver* lib (libcuda.so), which lives on GPU nodes.
+# On this CPU build node, point the linker at the toolkit's stub libcuda so linking succeeds
+# (the real driver lib is used at runtime on the GPU node).
+export LIBRARY_PATH="$CUDA_HOME/lib64/stubs:${LIBRARY_PATH:-}"
 
 echo "CUDA_HOME=$CUDA_HOME"; nvcc --version | tail -1
 cd "$THREEDGRUT_DIR"
