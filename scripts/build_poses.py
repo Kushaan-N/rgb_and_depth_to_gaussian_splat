@@ -128,8 +128,11 @@ def main():
     print(f"[build_poses] trajectory extent (m): "
           f"{[round(x,3) for x in t['extent_m']]}  path_len={t['path_length_m']:.2f} m")
     print(f"[build_poses] view-dir std: {[round(x,3) for x in t['view_dir_std']]}")
-    if max(t["extent_m"]) > 0 and min(t["extent_m"]) / max(t["extent_m"]) < 0.05:
-        print("[build_poses] WARNING: trajectory is nearly 1-D — see §2.6 (caps novel views)")
+    # 1-D check compares the two LARGEST extents (the smallest is the near-constant camera
+    # height and is expected to be tiny for a ground robot — not a sign of 1-D motion).
+    ex = sorted(t["extent_m"], reverse=True)
+    if ex[0] > 0 and ex[1] / ex[0] < 0.05:
+        print("[build_poses] WARNING: trajectory is nearly 1-D in-plane — see §2.6 (caps novel views)")
 
 
 if __name__ == "__main__":
