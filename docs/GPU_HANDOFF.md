@@ -38,10 +38,15 @@ scipy 1.17.1, opencv 5.0.0, open3d 0.20.0, pycolmap 4.2.0.
 | Gate 2b (COLMAP round-trip) | PASS — reloaded-model pose drift 7e-10 |
 | Gate 3 (depth map) | PASS — floor z=-0.006 m, thickness 3 mm, split-half Δz 0.4 mm, C2C median 2.3 mm, reproj 99.4% |
 | Gate 5 (collider, CPU drop-test proxy) | PASS — 100% ray hits (no holes), floor contact err p95 3.5 mm |
+| TRAP 7 (separate depth timestamps) | PASS — 4 ms RGB↔depth gap parsed + fused at the depth timestamp |
+| TRAP 8 (sync-preamble exclusion) | PASS — 2 s pitch-swing preamble detected + excluded from training + fusion |
+| TRAP 3 (clock-drift check) | PASS — residual IMU↔pose lag ~0 on the clean fixture |
+| §5.3 (ΔT extrinsic refinement) | PASS — on a correct extrinsic, ΔT is negligible and flagged not-significant |
 
 The synthetic generator (`tests/make_synthetic_sequence.py`) writes files in CEAR's exact
-on-disk format using the exact conventions the plan documents, so the same scripts run
-unchanged on real data.
+on-disk format using the exact conventions the plan documents (v3.1: distinct RGB/depth
+timestamps, optional sync preamble), so the same scripts run unchanged on real data.
+20 pytest tests, all green.
 
 ## Running on REAL data (still CPU, still no GPU)
 
@@ -60,13 +65,25 @@ to differ from the plan's assumptions):
 2. **TRAP 4 pose frame** — confirm `MoCap.txt` is the *marker* frame and the RGB-Marker
    extrinsic direction. If Gate 2 shows a consistent directional offset, flip
    `frames.extrinsic.rgb_marker_direction` or `frames.pose_frame`.
-3. **TRAP 3 offset signs** — if Gate 2 shows a motion-scaling smear, flip the sign of
-   `timestamps.offsets_s.rgb`.
+3. **TRAP 3 offset signs + drift** — if Gate 2 shows a motion-scaling smear, flip the sign of
+   `timestamps.offsets_s.rgb`. Also check `inventory.py`'s `[sync]` block: whether offsets are
+   per-sequence vs global, and whether the reported clock drift exceeds `sync.drift_tolerance_ms`.
 4. **Up-axis** — OptiTrack is assumed Y-up; if the fused floor doesn't land near z=0,
    check `frames.world_up`.
 5. **§2.7 truncation** — tune `depth.max_range_m` (3-5 m) from the Gate 3 coverage map.
 6. **TRAP 5 A/B** — run `rgb/` vs `raw_rgb/` (config `sequence.rgb_dir`); both are
    undistorted by `precondition_frames.py`.
+7. **TRAP 7 depth timestamps** — the parser reads separate RGB/depth timestamp columns; if
+   `realsense_timestamp.txt`'s column order differs from the assumed suffix rule, verify at
+   Gate 1 (the parser falls back to positional order).
+8. **TRAP 8 preamble** — `inventory.py` auto-detects the pitch-swing preamble; eyeball the
+   detected `preamble_end_s` and set `gating.preamble_end_s` manually if it's wrong (the ball
+   must not enter training/fusion).
+9. **Auto-exposure (RESOLVED: ON)** — `precondition_frames.py` quantifies the drift; if
+   significant, take the exposure-compensation / appearance-embedding trainer swap (§7.2).
+10. **§5.3 soft splat** — if Gate 2 passes but Gates 3-4 look soft, run
+    `scripts/refine_extrinsic.py`; apply the printed `frames.extrinsic.delta_T` only if it
+    reports a significant (>10%) warp-error gain.
 
 **Gate 2 is mandatory. Do not proceed to a GPU if it fails** — the fix is a config/convention
 change, not a training problem.
@@ -116,6 +133,8 @@ Decisions waiting here:
 3. Has anyone attempted event-camera sim already?
 4. Mini Cheetah URDF/USD ready for Isaac?
 5. Which environments matter most?
-6. Was RealSense AE/WB fixed or automatic during capture? (feeds §7.2)
-7. Does no-LiDAR forbid LiDAR *offline for validation only*? (would restore a true sensor
-   cross-check at Gate 3 at zero pipeline cost)
+6. **Resolved by the paper: auto-exposure was ON.** Remaining: was auto *white balance* also
+   on, and is the RealSense driver config archived?
+7. No-LiDAR scope, two fronts: (a) LiDAR *offline for validation only* (would restore a true
+   sensor cross-check at Gate 3 for free)? (b) **every non-mocap sequence's GT poses are
+   Faster-LIO = LiDAR-derived** — if barred, this is a mocap-only project (ladder 4-5 drop).
