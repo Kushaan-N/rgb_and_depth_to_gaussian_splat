@@ -136,11 +136,21 @@ Consistent across all three (same rig/room, different object arrangements):
 - Each sequence is a distinct scene → train separately; do not joint-train across mocap1/2/3.
 - Drop-test floor height error: TODO.
 
-## Phase 6 — Isaac Sim (Gate 6) — TODO(GPU)
+## Phase 6 — Isaac Sim (mocap1) — Gate 5 REAL: PASS
 
-- ParticleField vs NuRec in-sim comparison + chosen export: TODO(GPU).
-- Walking video (≥ 5 m, no penetration): TODO(GPU).
-- FPS at 640×480 on L40S: TODO(GPU).
+- Env: Isaac Sim **5.0.0** via pip (needs the `isaacsim-extscache-{kit,kit-sdk,physics}`
+  packages — `isaacsim[all]` alone omits them and the online-registry fallback pulls a
+  conflicting physx version). Splat exported to **NuRec USDZ** (149 MB, Isaac 5.0 format) +
+  ParticleField (297 MB). Compose: collider `.obj` → UsdGeom.Mesh + MeshCollisionAPI(none);
+  physics scene Z-up, default gravity.
+- **Gate 5 (real drop test): PASS** — Isaac booted clean (0 errors), 4/5 rigid spheres rest
+  on the reconstructed floor at **0.0657 m = floor+radius, err ~2e-8 m**; 1/5 fell through a
+  collider gap the floor-patch missed (coverage artifact, not physics). Job 3:52 on L40S.
+  Result: `$CEAR_OUT/mocap1_well-lit_trot/isaac/drop_result.json`.
+- Robot: switched from quadruped to a **wheeled robot** (no locomotion policy / no Mini
+  Cheetah USD needed) to serve the "navigate a robot in the splat world" goal directly.
+- Nav (drive wheeled robot in the splat + render) : IN PROGRESS.
+- ParticleField vs NuRec in-sim comparison + FPS: TODO.
 
 ## What does not work (the most valuable section)
 
