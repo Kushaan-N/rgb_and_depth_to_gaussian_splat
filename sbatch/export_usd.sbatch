@@ -29,9 +29,12 @@ echo "checkpoint: $CKPT"
 cd "$THREEDGRUT_DIR"
 
 echo "=== NuRec USDZ (Isaac Sim 5.0) ==="
+# --no-transform: keep the splat in the reconstruction (COLMAP) frame so our recorded
+# camera poses line up with it in Isaac (default applies a normalizing transform that
+# shifts the frame and makes on-path cameras render garbage).
 python -m threedgrut.export.scripts.export_usd \
     --checkpoint "$CKPT" --output "$OUT/usd/scene_nurec.usdz" \
-    --dataset "$DATASET" --format nurec
+    --dataset "$DATASET" --format nurec --no-transform
 
 echo "=== ParticleField USD (Isaac 6.0 forward-compat) ==="
 python -m threedgrut.export.scripts.export_usd \
