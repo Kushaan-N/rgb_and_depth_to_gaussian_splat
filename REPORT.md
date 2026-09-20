@@ -84,6 +84,24 @@ those are run._
 - **Gate 5 CPU drop-test proxy: PASS** — 100% ray hits (no holes), floor contact err
   p95 **16.3 mm** (< 30 mm). Real physics drop test is Phase 6 (Isaac, L40S).
 - USD collider written in Phase 6 (no pxr in the CPU env).
+
+## Multi-sequence CPU summary (all real, all gates PASS)
+
+| Seq | Gate1 | Gate2/2b | Gate3 split-Δz / C2C / cov | Gate5 floor p95 | train/val | preamble | AE range |
+|---|---|---|---|---|---|---|---|
+| mocap1 | PASS | PASS | 1.2 mm / 7.9 mm / 46% | 16.3 mm | 408/59 | ~16 s | 64.8 |
+| mocap2 | PASS | PASS | 1.6 mm / 7.0 mm / 36% | 10.9 mm | 370/53 | ~15 s | 42.7 |
+| mocap3 | PASS | PASS | 2.6 mm / 7.4 mm / 39% | 7.1 mm | 445/64 | ~17 s | 52.3 |
+
+Consistent across all three (same rig/room, different object arrangements):
+- Pose/sync are excellent everywhere (split-half floor Δz ≤ 2.6 mm) — Phase 2 is solid.
+- **Floor coverage is low in every sequence (36–46% within 4 m)** — a robust property of a
+  low ground-robot in a large room, not a per-sequence fluke. Colliders are heavily
+  hole-patched; splats will be sparse on far floor. This is the main thing to weigh before
+  spending GPU time, and a genuine finding about the dataset's fitness for a *drivable* sim.
+- **Auto-exposure drift is significant in all three** → exposure compensation / appearance
+  embeddings are required for training (not optional).
+- Each sequence is a distinct scene → train separately; do not joint-train across mocap1/2/3.
 - Drop-test floor height error: TODO.
 
 ## Phase 6 — Isaac Sim (Gate 6) — TODO(GPU)
