@@ -103,8 +103,11 @@ def main():
     # would apply — that helper isn't in the pip distribution, but the 5.1 RTX renderer has
     # NuRec built in, so we set them via launch args): keep gaussian tonemapping on, and
     # single-GPU (NuRec volume path requires multiGpu off).
-    nurec_args = ["--/rtx/rtpt/gaussian/skipTonemapping/enabled=false",
-                  "--/renderer/multiGpu/enabled=false"]
+    nurec_args = ["--/renderer/multiGpu/enabled=false",
+                  "--/rtx/spg/enabled=true",
+                  "--/omni/rtx/nre/compositing/disableNuRecPostProcessings=true",
+                  "--/rtx/rtpt/gaussian/skipTonemapping/enabled=false",
+                  "--enable", "omni.rtx.spg"]
     app = SimulationApp({"headless": not args.gui, "renderer": "RayTracedLighting",
                          "extra_args": nurec_args if args.mode == "nav" else []})
 
@@ -141,7 +144,18 @@ def main():
         if args.splat_usd:
             add_reference_to_stage(usd_path=args.splat_usd, prim_path="/World/splat")
             print(f"[compose] referenced splat: {args.splat_usd}")
+            # NuRec render setup (wires the SPG/gaussian render path) — present in the full
+            # Isaac Sim container; absent from pip Isaac (there we fall back to launch args).
+            try:
+                from isaacsim.replicator.nurec_utils import setup_for_rendering
+                setup_for_rendering(stage)
+                print("[compose] nurec_utils.setup_for_rendering applied")
+                result_setup = "nurec_utils"
+            except Exception as e:  # noqa: BLE001
+                print(f"[compose] nurec_utils unavailable ({type(e).__name__}: {e}); using launch args only")
+                result_setup = "launch_args_only"
         result = nav_rover(world, app, args, cx, cy)
+        result["nurec_setup"] = result_setup if args.splat_usd else "no_splat"
 
     json.dump(result, open(os.path.join(args.out_dir, f"{args.mode}_result.json"), "w"), indent=2)
     print("[compose] result:", json.dumps(result))
@@ -191,18 +205,15 @@ def nav_rover(world, app, args, cx, cy):
     z0 = args.floor_z + 0.08
 
     # --- decide camera + rover start/drive ---
+    # Spawn the rover at the collider bbox centre — a known-open floor point (the Gate-5
+    # drop test rested a body there), so it isn't stuck inside geometry.
     cam_fixed, cam_pos, cam_quat = bool(args.cam_model), None, None
+    rover_start = np.array([cx, cy, z0]); drive = np.array([0.4, 0.0, 0.0])   # 0.4 m/s +x
     if args.cam_model:
-        # camera at a RECORDED pose (on-path -> clean splat); rover crosses its view
+        # camera at a RECORDED pose (on-path -> clean splat)
         Twc = read_cam_pose(args.cam_model)
-        cam_pos = Twc[:3, 3]; fwd = Twc[:3, 2]; right = Twc[:3, 0]
+        cam_pos = Twc[:3, 3]
         cam_quat = _R_to_quat_wxyz(Twc[:3, :3] @ np.diag([1.0, -1.0, -1.0]))  # OpenCV->USD cam basis
-        r0 = cam_pos + fwd * 2.5; rover_start = np.array([r0[0], r0[1], z0])
-        drive = np.array([right[0], right[1], 0.0]); drive /= (np.linalg.norm(drive) + 1e-9)
-        drive *= 0.4                              # 0.4 m/s across the view
-        rover_start -= drive / 0.4 * 1.0          # start ~1 m to one side so it crosses
-    else:
-        rover_start = np.array([cx - 1.0, cy, z0]); drive = np.array([0.4, 0.0, 0.0])
 
     rover = world.scene.add(DynamicCuboid(
         prim_path="/World/rover", name="rover", position=rover_start,
@@ -225,11 +236,15 @@ def nav_rover(world, app, args, cx, cy):
         if cam_fixed:
             cam.set_world_pose(position=cam_pos, orientation=cam_quat)
     import cv2
+    # warm up the renderer (NuRec gaussians need a few seconds / many frames to converge)
+    for _ in range(90):
+        world.step(render=True)
+    vel_err = None
     for i in range(400):
         try:
             rover.set_linear_velocity(drive)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            vel_err = f"{type(e).__name__}: {e}"
         world.step(render=True)
         if i % 40 == 0:
             pos = rover.get_world_pose()[0]
@@ -251,6 +266,8 @@ def nav_rover(world, app, args, cx, cy):
     if info["frames"]:
         d = np.linalg.norm(np.array(info["frames"][-1]["rover_xyz"]) - np.array(info["frames"][0]["rover_xyz"]))
         info["note"] += f"rover drove {d:.2f} m; {len([f for f in info['frames'] if 'frame' in f])} frames rendered"
+    if vel_err:
+        info["note"] += f"; set_linear_velocity failed: {vel_err}"
     return info
 
 
