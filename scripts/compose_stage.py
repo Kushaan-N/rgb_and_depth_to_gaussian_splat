@@ -200,45 +200,43 @@ def nav_rover(world, app, args, cx, cy):
     import os
     import numpy as np
     from isaacsim.core.api.objects import DynamicCuboid
+    from pxr import UsdGeom, Gf
+    import omni.replicator.core as rep
     info = {"robot": "procedural_rover", "frames": [], "note": "", "splat_rendered": None,
             "camera": "onpath" if args.cam_model else "chase"}
     fdir = os.path.join(args.out_dir, "nav_frames"); os.makedirs(fdir, exist_ok=True)
     z0 = args.floor_z + 0.08
-
-    # --- decide camera + rover start/drive ---
-    # Spawn the rover at the collider bbox centre — a known-open floor point (the Gate-5
-    # drop test rested a body there), so it isn't stuck inside geometry.
-    cam_fixed, cam_pos, cam_quat = bool(args.cam_model), None, None
     rover_start = np.array([cx, cy, z0]); drive = np.array([0.4, 0.0, 0.0])   # 0.4 m/s +x
-    if args.cam_model:
-        # camera at a RECORDED pose (on-path -> clean splat)
-        Twc = read_cam_pose(args.cam_model)
-        cam_pos = Twc[:3, 3]
-        cam_quat = _R_to_quat_wxyz(Twc[:3, :3] @ np.diag([1.0, -1.0, -1.0]))  # OpenCV->USD cam basis
 
+    # camera pose: a RECORDED on-path pose (clean splat). OpenCV Twc -> USD camera basis
+    # (USD cam looks down -Z, +Y up) via a Y,Z flip.
+    if args.cam_model:
+        Twc = read_cam_pose(args.cam_model)
+        cpos = Twc[:3, 3]
+        cquat = _R_to_quat_wxyz(Twc[:3, :3] @ np.diag([1.0, -1.0, -1.0]))
+    else:
+        cpos = np.array([cx - 2.0, cy, z0 + 0.5]); cquat = np.array([1.0, 0.0, 0.0, 0.0])
+
+    cam_path = "/World/nav_cam"
+    ucam = UsdGeom.Camera.Define(world.stage, cam_path)
+    xf = UsdGeom.Xformable(ucam.GetPrim()); xf.ClearXformOpOrder()
+    xf.AddTranslateOp().Set(Gf.Vec3d(float(cpos[0]), float(cpos[1]), float(cpos[2])))
+    xf.AddOrientOp().Set(Gf.Quatf(float(cquat[0]), float(cquat[1]), float(cquat[2]), float(cquat[3])))
+
+    # rover at the collider centre — known-open floor (Gate-5 rested a body there)
     rover = world.scene.add(DynamicCuboid(
         prim_path="/World/rover", name="rover", position=rover_start,
         scale=np.array([0.3, 0.2, 0.12]), mass=2.0, color=np.array([0.1, 0.4, 0.9])))
 
-    cam = None
-    try:
-        from isaacsim.sensors.camera import Camera
-        import isaacsim.core.utils.numpy.rotations as rot_utils
-        init_pos = cam_pos if cam_fixed else (rover_start + np.array([-2.0, 0, 0.7]))
-        init_quat = cam_quat if cam_fixed else rot_utils.euler_angles_to_quats(np.array([0, 18, 0]), degrees=True)
-        cam = Camera(prim_path="/World/nav_cam", resolution=(1280, 720),
-                     position=init_pos, orientation=init_quat)
-    except Exception as e:  # noqa: BLE001
-        info["note"] += f"camera unavailable: {type(e).__name__}: {e}; "
+    # headless capture via a replicator render product + annotator (avoids the
+    # isaacsim.sensors.camera.get_rgba overscan bug in 5.1)
+    rp = rep.create.render_product(cam_path, (1280, 720))
+    annot = rep.AnnotatorRegistry.get_annotator("LdrColor")
+    annot.attach([rp])
 
     world.reset()
-    if cam is not None:
-        cam.initialize()
-        if cam_fixed:
-            cam.set_world_pose(position=cam_pos, orientation=cam_quat)
     import cv2
-    # warm up the renderer (NuRec gaussians need a few seconds / many frames to converge)
-    for _ in range(90):
+    for _ in range(90):                        # warm up (NuRec gaussians take frames to converge)
         world.step(render=True)
     vel_err = None
     for i in range(400):
@@ -250,19 +248,15 @@ def nav_rover(world, app, args, cx, cy):
         if i % 40 == 0:
             pos = rover.get_world_pose()[0]
             frame = {"step": i, "rover_xyz": [float(v) for v in pos]}
-            if cam is not None:
-                if not cam_fixed:                 # chase cam follows the rover
-                    import isaacsim.core.utils.numpy.rotations as rot_utils
-                    cam.set_world_pose(position=np.array([pos[0] - 2.0, pos[1], args.floor_z + 0.35]),
-                                       orientation=rot_utils.euler_angles_to_quats(
-                                           np.array([0, 12, 0]), degrees=True))
-                world.step(render=True)
-                rgba = cam.get_rgba()
-                if rgba is not None and rgba.size > 0:
+            try:
+                arr = np.asarray(annot.get_data())
+                if arr.ndim >= 3 and arr.shape[0] > 1 and arr.shape[1] > 1:
                     fp = os.path.join(fdir, f"nav_{i:04d}.png")
-                    cv2.imwrite(fp, cv2.cvtColor(rgba[..., :3].astype("uint8"), cv2.COLOR_RGB2BGR))
+                    cv2.imwrite(fp, cv2.cvtColor(arr[..., :3].astype("uint8"), cv2.COLOR_RGB2BGR))
                     frame["frame"] = fp
-                    info["splat_rendered"] = bool(rgba[..., :3].std() > 3)
+                    info["splat_rendered"] = bool(arr[..., :3].std() > 3)
+            except Exception as e:  # noqa: BLE001
+                frame["capture_err"] = f"{type(e).__name__}: {e}"
             info["frames"].append(frame)
     if info["frames"]:
         d = np.linalg.norm(np.array(info["frames"][-1]["rover_xyz"]) - np.array(info["frames"][0]["rover_xyz"]))
