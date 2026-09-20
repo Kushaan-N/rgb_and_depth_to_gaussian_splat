@@ -1,0 +1,130 @@
+# Config for the primary target sequence (plan §2.5).
+#
+# This file is the SINGLE SOURCE OF TRUTH for every convention that the plan's
+# TRAPs warn about (quaternion order, timestamp units, sensor offsets, frame
+# directions, up-axis). Scripts must read conventions from here, never hardcode.
+#
+# Fields marked "VERIFY" are the working assumptions from the plan/paper; they
+# must be confirmed against the actual download in Phase 1 (inventory.py) and
+# the Gate 2 reprojection check before they are trusted.
+
+sequence:
+  name: mocap2_well-lit_trot
+  # data_root resolves ${CEAR_DATA} from env/cear_env.sh.
+  data_root: "${CEAR_DATA}/mocap2_well-lit_trot"
+  pose_file: MoCap.txt          # OptiTrack ground truth (this sequence). SLAM seqs: FasterLIO.txt
+  rgb_dir: rgb                 # this download ships ONLY rgb/ (no raw_rgb/), so TRAP-5 A/B
+                               #   is moot here; rgb/ is the processed stream.
+  depth_dir: depth             # holds BOTH *_depth_rgb (used) and *_depth_event projections;
+                               #   the pipeline reads the depth_rgb file named per frame (§6.1).
+  raw_depth_dir: raw_depth     # depth in the DEPTH camera frame (not used by default).
+  timestamp_table: realsense_timestamp.txt
+  imu_file: vectornav.txt
+  joint_file: mini_cheetah_joint.txt
+
+# --- timestamps -----------------------------------------------------------
+# Everything is converted to float SECONDS on the EVENT-camera clock.
+timestamps:
+  units:                       # TRAP 2: units differ between files
+    rgb: microseconds
+    imu: microseconds
+    joints: microseconds
+    pose: seconds
+  # TRAP 3: per-sensor offsets (seconds). t_event = t_sensor + offset. No hardware sync —
+  # these are per-sequence pitch-swing cross-correlation estimates, so they may be
+  # per-sequence (not global) and may drift within a sequence (see `sync:` and TRAP 3).
+  # Sign convention VERIFY at Gate 2 (a wrong sign shows as a directional smear that scales
+  # with motion). The rgb offset applies to BOTH the RGB and depth columns of
+  # realsense_timestamp.txt (same RealSense clock); the two columns' raw timestamps still
+  # differ by up to 8.33 ms (TRAP 7) and each stream is posed at its own timestamp.
+  offsets_s:
+    event: 0.0                 # reference clock
+    rgb: 0.004611              # RealSense (RGB + depth) — CRITICAL
+    imu: -0.004012             # VectorNav
+    joints: 0.004611
+    # velodyne: 0.003044       # LiDAR — NOT USED (project constraint)
+
+# --- rotation conventions -------------------------------------------------
+quaternions:                   # TRAP 1 / 1b
+  pose_order: xyzw             # MoCap.txt / FasterLIO.txt: scalar-LAST
+  imu_order: wxyz              # vectornav.txt: scalar-FIRST
+  colmap_order: wxyz           # COLMAP images.txt: scalar-FIRST, world-to-camera
+
+# --- coordinate frames ----------------------------------------------------
+frames:
+  world_up: y                  # OptiTrack world is Y-up (§5.4). VERIFY.
+  target_up: z                 # pipeline converts everything to Z-up (USD/Isaac, floor z=0)
+  pose_frame: marker           # TRAP 4: MoCap reports the MARKER frame, not the RGB optical
+                               #         frame. VERIFY (marker | robot).
+  # Extrinsic direction of each stored calibration transform. CONFIRMED from the CEAR
+  # calibration headers (2026-09-20): T_rgb_marker/T_rgb_robot "take a point FROM the
+  # marker/robot frame TO the RGB frame", i.e. marker→rgb / robot→rgb == marker_to_cam.
+  extrinsic:
+    rgb_marker_direction: marker_to_cam
+    rgb_robot_direction: robot_to_cam
+    # §5.3 constant-extrinsic correction ΔT (16-elem row-major 4x4), applied as
+    # T_world_cam = T_world_marker @ T_marker_cam @ ΔT. Left unset (identity); populate
+    # from scripts/refine_extrinsic.py ONLY if Gate 2 passes but Gates 3-4 show systematic
+    # geometric softness (CAD/factory extrinsic error). A large ΔT means something else is
+    # wrong — go back to TRAP 4.
+    delta_T: null
+
+# --- photometric (Phase 4, §7.2) -----------------------------------------
+photometric:
+  # Auto-exposure was CONFIRMED ON in the paper — brightness varies along the trajectory
+  # by construction. Plan on a trainer with per-image exposure compensation / appearance
+  # embeddings; precondition_frames.py quantifies the drift to decide if the swap is needed.
+  auto_exposure_confirmed: true
+
+# --- camera intrinsics ----------------------------------------------------
+intrinsics:
+  # Populated from the calibration release by inventory.py; undistortion (§7.2)
+  # then writes a plain PINHOLE camera for the trainer.
+  calib_file: "${CEAR_DATA}/mocap2_well-lit_trot/calibration/rgb_intrinsics.yaml"
+  image_width: 640             # VERIFY at Gate 1
+  image_height: 480
+
+# --- depth ----------------------------------------------------------------
+depth:
+  units_per_meter: 1000.0      # 16-bit, 1 mm/unit (typical RealSense) — VERIFY at Gate 1
+  invalid_value: 0             # 0 = invalid/no-return — VERIFY
+  min_range_m: 0.2
+  max_range_m: 4.0             # §2.7 range truncation to bound D455 noise growth; tune 3-5
+
+# --- depth fusion (Phase 3) ----------------------------------------------
+fusion:
+  voxel_size_m: 0.025          # TSDF voxel (2-3 cm)
+  sdf_trunc_m: 0.10
+  seed_downsample_m: 0.03      # voxel-downsample for points3D.txt seed
+
+# --- blur / motion gating (Phase 4) --------------------------------------
+gating:
+  omega_percentile_keep: 50    # keep the sharpest ~50% by |omega|; then tune
+  laplacian_min: 50.0          # variance-of-Laplacian floor (sharpness); tune
+  spatial_min_sep_m: 0.03      # drop near-duplicate viewpoints
+  holdout_every: 8             # §7.4: hold out every 8th GATED frame (split after gating)
+  # TRAP 8: every sequence starts with a pitch-swing + thrown-ball sync preamble; exclude
+  # it from training and fusion. Auto-detected from the IMU pitch signature; set
+  # preamble_end_s (event-clock seconds) to override if detection is wrong (VERIFY).
+  exclude_preamble: true
+  preamble_end_s: null
+  preamble_swing_factor: 2.0
+
+# --- clock sync / drift (TRAP 3) ------------------------------------------
+sync:
+  # Offsets have no hardware sync — they come from a per-sequence pitch-swing cross-
+  # correlation, so free-running clocks may drift. Re-estimate IMU<->pose lag on the
+  # first/last windows; warn/correct if it drifts beyond tolerance. VERIFY whether the
+  # published offsets are global constants or per-sequence in the actual download.
+  drift_check: true
+  drift_tolerance_ms: 2.0
+
+# --- collider (Phase 5) ---------------------------------------------------
+collider:
+  method: tsdf_marching_cubes  # tsdf_marching_cubes | poisson (nvblox is Option B, external)
+  max_triangles: 50000
+  floor_patch: true            # patch unobserved floor holes with the RANSAC plane (§8)
+
+# --- outputs --------------------------------------------------------------
+paths:
+  out_root: "${CEAR_OUT}/mocap2_well-lit_trot"
