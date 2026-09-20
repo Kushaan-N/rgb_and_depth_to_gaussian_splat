@@ -124,6 +124,8 @@ collider:
   method: tsdf_marching_cubes  # tsdf_marching_cubes | poisson (nvblox is Option B, external)
   max_triangles: 50000
   floor_patch: true            # patch unobserved floor holes with the RANSAC plane (§8)
+  flatten_floor: true          # snap near-floor vertices to the RANSAC plane (clean foot-contact
+  flatten_floor_band_m: 0.04   #   surface; real-depth floor noise makes the drop test marginal)
 
 # --- outputs --------------------------------------------------------------
 paths:
