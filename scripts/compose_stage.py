@@ -93,6 +93,10 @@ def main():
                     help="COLMAP sparse dir; place the nav camera at a RECORDED pose (on-path"
                          " -> clean splat) instead of a chase cam")
     ap.add_argument("--out-dir", default="/tmp/isaac_out")
+    ap.add_argument("--show-collider", action="store_true",
+                    help="render the collider mesh (debug/geometry view). Default: when a splat"
+                         " is loaded the collider is an INVISIBLE physics proxy so it doesn't"
+                         " occlude the photoreal NuRec volume.")
     ap.add_argument("--gui", action="store_true")
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
@@ -137,7 +141,10 @@ def main():
     UsdPhysics.CollisionAPI.Apply(m.GetPrim())
     mc = UsdPhysics.MeshCollisionAPI.Apply(m.GetPrim())
     mc.CreateApproximationAttr().Set(UsdPhysics.Tokens.none)   # exact static triangle mesh
-    if args.mode == "drop":
+    # collider is a physics proxy: hide it in drop mode, and in nav-with-splat (so the opaque
+    # gray mesh doesn't occlude the photoreal Gaussian volume). Keep it visible for a pure
+    # geometry nav (no splat) or when explicitly requested with --show-collider.
+    if args.mode == "drop" or (args.splat_usd is not None and not args.show_collider):
         UsdGeom.Imageable(m).MakeInvisible()
     vmin = np.array(verts).min(0); vmax = np.array(verts).max(0)
     cx, cy = float((vmin[0] + vmax[0]) / 2), float((vmin[1] + vmax[1]) / 2)
@@ -148,9 +155,9 @@ def main():
     if args.mode == "drop":
         result = gate5_drop(world, DynamicSphere, np, cx, cy, args.floor_z)
     else:
-        # a dome light so the reconstructed geometry (collider + rover) is visible under RTX
-        # even if the NuRec volume fails to render — a lit navigation is still real evidence,
-        # strictly better than the all-black frames from no-light + no-splat.
+        # a dome light so the rover (and, on 5.1, the reconstructed geometry) is lit. The NuRec
+        # volume carries its own baked radiance, so this mainly lights the rover cuboid; it also
+        # rescues the 5.1 geometry fallback from the all-black frames of no-light + no-splat.
         from pxr import UsdLux
         UsdLux.DomeLight.Define(stage, "/World/domeLight").CreateIntensityAttr(1000.0)
 
@@ -158,16 +165,16 @@ def main():
         if args.splat_usd:
             add_reference_to_stage(usd_path=args.splat_usd, prim_path="/World/splat")
             print(f"[compose] referenced splat: {args.splat_usd}", flush=True)
-            # ensure the registry-downloaded exts are enabled (idempotent if --enable already
-            # did it at launch), then apply the official NuRec render setup.
+            # Enable the NuRec helper (bundled in Isaac 6.x; absent on 5.1 -> fails gracefully).
+            # A plain NuRec volume does NOT need omni.rtx.spg. enable_extension is synchronous
+            # for a bundled ext, so DON'T app.update() here — that would trigger the first Hydra
+            # sync before setup_for_rendering, which must run before the first render update.
             from isaacsim.core.utils.extensions import enable_extension
-            for ext in ("omni.rtx.spg", "isaacsim.replicator.nurec_utils"):
-                try:
-                    enable_extension(ext)
-                except Exception as e:  # noqa: BLE001
-                    setup_err = f"enable {ext}: {type(e).__name__}: {e}"
-                    print(f"[compose] {setup_err}", flush=True)
-            app.update()   # let the extension manager resolve/download before importing
+            try:
+                enable_extension("isaacsim.replicator.nurec_utils")
+            except Exception as e:  # noqa: BLE001
+                setup_err = f"enable nurec_utils: {type(e).__name__}: {e}"
+                print(f"[compose] {setup_err}", flush=True)
             try:
                 from isaacsim.replicator.nurec_utils import setup_for_rendering
                 setup_for_rendering(stage)
