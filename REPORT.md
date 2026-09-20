@@ -51,12 +51,18 @@ those are run._
 - Trajectory: extent [5.54, 3.66, 0.056] m, path 31.2 m — healthy 2-D floor coverage
   (the tiny 3rd axis is the near-constant camera height, not 1-D motion).
 
-## Phase 3 — depth map (Gate 3)
+## Phase 3 — depth map (Gate 3) — REAL DATA: PASS
 
-- Truncation range used: TODO.
-- Split-half fusion agreement (floor-height diff, C2C on shared surfaces): TODO.
-- Reprojection overlays: TODO.
-- Coverage / holes map (unobserved-within-range fraction): TODO.
+- Truncation range 0.2–4.0 m; voxel 2.5 cm (Open3D tensor VoxelBlockGrid TSDF).
+- Gated 467/5789 depth frames (‖ω‖ ≤ 0.28 rad/s + spatial spread; 3 more excluded as sync
+  preamble — the ‖ω‖ gate already removes the fast swing, TRAP 8 catches the stationary
+  ball-region frames that slip through). Fused ~447k points, ~824k mesh triangles.
+- **Split-half fusion: floor Δz 0.4 mm, C2C median 7.9 mm (p95 39 mm)** — poses/sync are
+  consistent (this is the LiDAR-cross-check substitute; a wrong pose/sync would blow it up).
+- Floor plane at z≈0.02 m, thickness (std) ~11 mm (thin — real depth noise).
+- Reprojection consistency 84% (real depth has more floaters than the 99% synthetic).
+- Floor coverage within 4 m ≈ 46% (honest — 7.5×5.5 m room, 0.3 m camera; far floor is
+  only fused when the trajectory passes near it). Coverage map in `$CEAR_OUT/.../gate3/`.
 
 ## Phase 4 — training (Gate 4) — TODO(GPU)
 
