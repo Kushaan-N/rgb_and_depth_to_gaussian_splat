@@ -65,6 +65,7 @@ def build(cfg: dict) -> dict:
                                 omega_percentile_keep=float(g["omega_percentile_keep"]),
                                 min_sep=float(g["spatial_min_sep_m"]),
                                 laplacian=lap, laplacian_min=float(g["laplacian_min"]))
+    keep, n_preamble = gu.apply_preamble_exclusion(cfg, ts, keep)   # TRAP 8: drop the ball
     gated = list(np.where(keep)[0])
     if len(gated) < 4:
         raise RuntimeError(f"only {len(gated)} frames survived gating — loosen thresholds "
@@ -102,6 +103,7 @@ def build(cfg: dict) -> dict:
     meta = {
         "n_frames_in": len(kept),
         "n_gated": len(gated),
+        "n_excluded_preamble": int(n_preamble),
         "n_train": len(train), "n_val": len(val),
         "omega_threshold_rad_s": info["omega_threshold"],
         "laplacian_min": float(g["laplacian_min"]),
