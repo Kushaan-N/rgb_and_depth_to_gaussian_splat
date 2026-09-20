@@ -142,12 +142,16 @@ def main():
         _cams, imgs, _pts = pu.read_colmap_model(model_dir)
         by_name = {im.name: im.T_world_cam for im in imgs}
         Twc_loaded = np.stack([by_name[f.rgb_name] for f in kept])
-        errs_b = run_gate2(cfg, kept, Twc_loaded, calib, k, min(args.pairs, 8),
+        # Definitive test: poses reconstructed from the WRITTEN model must match the
+        # in-memory poses (catches TRAP 1b). Re-run the SAME pairs from the loaded model;
+        # with identical poses the warp errors are identical too.
+        errs_b = run_gate2(cfg, kept, Twc_loaded, calib, k, args.pairs,
                            out_dir, "gate2b", save=True, Twc_src=Twc_depth)
         mb = float(np.nanmean(errs_b))
         drift = float(np.max(np.abs(Twc - Twc_loaded)))
-        print(f"[Gate 2b] reloaded-model mean err={mb:.3f}  |Twc-Twc_loaded|max={drift:.2e}")
-        gate2b_pass = (abs(mb - m) < 1.0) and (drift < 1e-5)
+        print(f"[Gate 2b] reloaded-model mean err={mb:.3f} (in-memory {m:.3f})  "
+              f"|Twc-Twc_loaded|max={drift:.2e}")
+        gate2b_pass = drift < 1e-5 and abs(mb - m) < 0.5
 
     traj_png = os.path.join(out_dir, "trajectory.png")
     plot_trajectory(Twc, traj_png)
