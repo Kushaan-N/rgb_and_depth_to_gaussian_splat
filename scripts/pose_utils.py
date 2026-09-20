@@ -447,6 +447,22 @@ def write_colmap_model(out_dir: str, camera: ColmapCamera,
                         f"{int(c[0])} {int(c[1])} {int(c[2])} 0\n")
 
 
+def write_points3D_txt(model_dir: str, points: np.ndarray,
+                       colors: Optional[np.ndarray] = None) -> None:
+    """Overwrite ONLY points3D.txt in an existing COLMAP model (Phase 3 seed, §6.2).
+
+    Leaves cameras.txt / images.txt untouched. Track fields are minimal (3DGS
+    initializers consume positions + colors only).
+    """
+    cols = (colors if colors is not None
+            else np.full((len(points), 3), 128, dtype=np.int64))
+    with open(os.path.join(model_dir, "points3D.txt"), "w") as f:
+        f.write("# 3D point list\n# POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[]\n")
+        for i, (p, c) in enumerate(zip(points, cols), start=1):
+            f.write(f"{i} {p[0]:.6f} {p[1]:.6f} {p[2]:.6f} "
+                    f"{int(c[0])} {int(c[1])} {int(c[2])} 0\n")
+
+
 def read_colmap_model(model_dir: str) -> Tuple[Dict[int, ColmapCamera],
                                                List[ColmapImage],
                                                np.ndarray]:
