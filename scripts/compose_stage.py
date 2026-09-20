@@ -100,19 +100,19 @@ def main():
     from isaacsim import SimulationApp
     # nav needs rendering (RTX); drop is physics-only and can run truly headless.
     #
-    # NuRec (neural Gaussian volume) rendering is NOT bundled in the base isaac-sim:5.1.0
-    # image: the render feature lives in the extension `omni.rtx.spg` and the setup helper in
-    # `isaacsim.replicator.nurec_utils`, both of which are pulled from NVIDIA's extension
-    # registry on demand. Unity compute nodes have outbound HTTPS, so we turn the registry ON
-    # (`registryEnabled=true`) and `--enable` the extensions at launch; Kit downloads them into
-    # the scratch-bound kit data dir (persists across runs). Then the official recipe is
-    # `/rtx/spg/enabled=true` + nurec carb settings + nurec_utils.setup_for_rendering(stage).
+    # NuRec (neural Gaussian volume) rendering was ADDED IN ISAAC SIM 6.0.0 — the base
+    # isaac-sim:5.1.0 image has NO NuRec support at all (verified: no NuRec USD schema, no
+    # render feature, no isaacsim.replicator.nurec_utils; none of it in its registry either).
+    # So this script is written to work on BOTH images:
+    #   * 6.0.x  -> nurec_utils.setup_for_rendering renders the photoreal Gaussian volume.
+    #   * 5.1.0  -> that import fails gracefully; the dome light (added below) still renders the
+    #               reconstructed geometry (collider + rover) so we get a real navigation.
+    # We do NOT `--enable` the exts at launch (a missing ext aborts Kit before it boots); we
+    # enable them at runtime in a try/except instead. Our asset is a PLAIN NuRec volume, which
+    # per the docs does NOT need omni.rtx.spg (that's only for SPG/PPISP assets) — only the
+    # setup step + these carb settings (gaussian tonemapping on, single-GPU).
     nurec_args = ["--/renderer/multiGpu/enabled=false",
                   "--/app/extensions/registryEnabled=true",
-                  "--/app/extensions/installUncertifiedExts=true",
-                  "--enable", "omni.rtx.spg",
-                  "--enable", "isaacsim.replicator.nurec_utils",
-                  "--/rtx/spg/enabled=true",
                   "--/omni/rtx/nre/compositing/disableNuRecPostProcessings=true",
                   "--/rtx/rtpt/gaussian/skipTonemapping/enabled=false"]
     app = SimulationApp({"headless": not args.gui, "renderer": "RayTracedLighting",
