@@ -427,15 +427,7 @@ def write_colmap_model(out_dir: str, camera: ColmapCamera,
         f.write(f"{camera.id} {camera.model} {camera.width} {camera.height} "
                 + " ".join(f"{p:.10g}" for p in camera.params) + "\n")
 
-    with open(os.path.join(out_dir, "images.txt"), "w") as f:
-        f.write("# Image list\n# IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n"
-                "# (a second, empty line per image: no 2D points)\n")
-        for im in images:
-            T_cam_world = invert_T(im.T_world_cam)
-            qw, qx, qy, qz = R_to_quat(T_cam_world[:3, :3], "wxyz")
-            tx, ty, tz = T_cam_world[:3, 3]
-            f.write(f"{im.id} {qw:.10g} {qx:.10g} {qy:.10g} {qz:.10g} "
-                    f"{tx:.10g} {ty:.10g} {tz:.10g} {im.camera_id} {im.name}\n\n")
+    write_images_txt(os.path.join(out_dir, "images.txt"), images)
 
     with open(os.path.join(out_dir, "points3D.txt"), "w") as f:
         f.write("# 3D point list\n# POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[]\n")
@@ -445,6 +437,19 @@ def write_colmap_model(out_dir: str, camera: ColmapCamera,
             for i, (p, c) in enumerate(zip(points3D, cols), start=1):
                 f.write(f"{i} {p[0]:.6f} {p[1]:.6f} {p[2]:.6f} "
                         f"{int(c[0])} {int(c[1])} {int(c[2])} 0\n")
+
+
+def write_images_txt(path: str, images: List[ColmapImage]) -> None:
+    """Write a COLMAP images.txt (world-to-camera, scalar-first quats, TRAP 1b)."""
+    with open(path, "w") as f:
+        f.write("# Image list\n# IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n"
+                "# (a second, empty line per image: no 2D points)\n")
+        for im in images:
+            T_cam_world = invert_T(im.T_world_cam)
+            qw, qx, qy, qz = R_to_quat(T_cam_world[:3, :3], "wxyz")
+            tx, ty, tz = T_cam_world[:3, 3]
+            f.write(f"{im.id} {qw:.10g} {qx:.10g} {qy:.10g} {qz:.10g} "
+                    f"{tx:.10g} {ty:.10g} {tz:.10g} {im.camera_id} {im.name}\n\n")
 
 
 def write_points3D_txt(model_dir: str, points: np.ndarray,
