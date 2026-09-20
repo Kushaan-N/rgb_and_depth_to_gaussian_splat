@@ -28,6 +28,48 @@ import os
 # --------------------------------------------------------------------------- #
 # pure-python OBJ reader (avoids trimesh/open3d in the Isaac venv)
 # --------------------------------------------------------------------------- #
+def _quat_wxyz_to_R(q):
+    import numpy as np
+    w, x, y, z = q / (np.linalg.norm(q) + 1e-12)
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                     [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                     [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+
+
+def _R_to_quat_wxyz(R):
+    import numpy as np
+    t = np.trace(R)
+    if t > 0:
+        s = np.sqrt(t + 1.0) * 2; w = 0.25 * s
+        x = (R[2, 1] - R[1, 2]) / s; y = (R[0, 2] - R[2, 0]) / s; z = (R[1, 0] - R[0, 1]) / s
+    else:
+        i = int(np.argmax([R[0, 0], R[1, 1], R[2, 2]]))
+        if i == 0:
+            s = np.sqrt(1 + R[0, 0] - R[1, 1] - R[2, 2]) * 2
+            w = (R[2, 1] - R[1, 2]) / s; x = 0.25 * s; y = (R[0, 1] + R[1, 0]) / s; z = (R[0, 2] + R[2, 0]) / s
+        elif i == 1:
+            s = np.sqrt(1 + R[1, 1] - R[0, 0] - R[2, 2]) * 2
+            w = (R[0, 2] - R[2, 0]) / s; x = (R[0, 1] + R[1, 0]) / s; y = 0.25 * s; z = (R[1, 2] + R[2, 1]) / s
+        else:
+            s = np.sqrt(1 + R[2, 2] - R[0, 0] - R[1, 1]) * 2
+            w = (R[1, 0] - R[0, 1]) / s; x = (R[0, 2] + R[2, 0]) / s; y = (R[1, 2] + R[2, 1]) / s; z = 0.25 * s
+    return np.array([w, x, y, z])
+
+
+def read_cam_pose(model_dir, which="middle"):
+    """Read a recorded camera-to-world pose (Twc, OpenCV convention) from a COLMAP model."""
+    import numpy as np
+    lines = [ln for ln in open(os.path.join(model_dir, "images.txt")) if ln.strip() and not ln.startswith("#")]
+    data = lines[0::2]                              # pose lines (skip the empty points2D lines)
+    ln = data[len(data) // 2 if which == "middle" else 0].split()
+    qw, qx, qy, qz = map(float, ln[1:5]); tx, ty, tz = map(float, ln[5:8])
+    R_cw = _quat_wxyz_to_R(np.array([qw, qx, qy, qz]))
+    t_cw = np.array([tx, ty, tz])
+    R_wc = R_cw.T; C = -R_wc @ t_cw                 # camera-to-world
+    Twc = np.eye(4); Twc[:3, :3] = R_wc; Twc[:3, 3] = C
+    return Twc
+
+
 def read_obj(path):
     verts, faces = [], []
     with open(path) as f:
@@ -47,6 +89,9 @@ def main():
     ap.add_argument("--mode", choices=["drop", "nav"], default="drop")
     ap.add_argument("--floor-z", type=float, default=0.0, help="RANSAC floor height (m)")
     ap.add_argument("--robot", default="jetbot", help="wheeled robot asset (nav mode)")
+    ap.add_argument("--cam-model", default=None,
+                    help="COLMAP sparse dir; place the nav camera at a RECORDED pose (on-path"
+                         " -> clean splat) instead of a chase cam")
     ap.add_argument("--out-dir", default="/tmp/isaac_out")
     ap.add_argument("--gui", action="store_true")
     args = ap.parse_args()
@@ -133,32 +178,49 @@ def nav_rover(world, app, args, cx, cy):
     import os
     import numpy as np
     from isaacsim.core.api.objects import DynamicCuboid
-    info = {"robot": "procedural_rover", "frames": [], "note": "", "splat_rendered": None}
+    info = {"robot": "procedural_rover", "frames": [], "note": "", "splat_rendered": None,
+            "camera": "onpath" if args.cam_model else "chase"}
     fdir = os.path.join(args.out_dir, "nav_frames"); os.makedirs(fdir, exist_ok=True)
-    speed = 0.4                                   # m/s forward (+x)
     z0 = args.floor_z + 0.08
+
+    # --- decide camera + rover start/drive ---
+    cam_fixed, cam_pos, cam_quat = bool(args.cam_model), None, None
+    if args.cam_model:
+        # camera at a RECORDED pose (on-path -> clean splat); rover crosses its view
+        Twc = read_cam_pose(args.cam_model)
+        cam_pos = Twc[:3, 3]; fwd = Twc[:3, 2]; right = Twc[:3, 0]
+        cam_quat = _R_to_quat_wxyz(Twc[:3, :3] @ np.diag([1.0, -1.0, -1.0]))  # OpenCV->USD cam basis
+        r0 = cam_pos + fwd * 2.5; rover_start = np.array([r0[0], r0[1], z0])
+        drive = np.array([right[0], right[1], 0.0]); drive /= (np.linalg.norm(drive) + 1e-9)
+        drive *= 0.4                              # 0.4 m/s across the view
+        rover_start -= drive / 0.4 * 1.0          # start ~1 m to one side so it crosses
+    else:
+        rover_start = np.array([cx - 1.0, cy, z0]); drive = np.array([0.4, 0.0, 0.0])
+
     rover = world.scene.add(DynamicCuboid(
-        prim_path="/World/rover", name="rover", position=np.array([cx - 1.0, cy, z0]),
+        prim_path="/World/rover", name="rover", position=rover_start,
         scale=np.array([0.3, 0.2, 0.12]), mass=2.0, color=np.array([0.1, 0.4, 0.9])))
 
-    # chase camera
     cam = None
     try:
         from isaacsim.sensors.camera import Camera
         import isaacsim.core.utils.numpy.rotations as rot_utils
-        cam = Camera(prim_path="/World/chase_cam", resolution=(1280, 720),
-                     position=np.array([cx - 2.0, cy, z0 + 0.7]),
-                     orientation=rot_utils.euler_angles_to_quats(np.array([0, 20, 0]), degrees=True))
+        init_pos = cam_pos if cam_fixed else (rover_start + np.array([-2.0, 0, 0.7]))
+        init_quat = cam_quat if cam_fixed else rot_utils.euler_angles_to_quats(np.array([0, 18, 0]), degrees=True)
+        cam = Camera(prim_path="/World/nav_cam", resolution=(1280, 720),
+                     position=init_pos, orientation=init_quat)
     except Exception as e:  # noqa: BLE001
         info["note"] += f"camera unavailable: {type(e).__name__}: {e}; "
 
     world.reset()
     if cam is not None:
         cam.initialize()
+        if cam_fixed:
+            cam.set_world_pose(position=cam_pos, orientation=cam_quat)
     import cv2
     for i in range(400):
         try:
-            rover.set_linear_velocity(np.array([speed, 0.0, 0.0]))
+            rover.set_linear_velocity(drive)
         except Exception:  # noqa: BLE001
             pass
         world.step(render=True)
@@ -166,21 +228,22 @@ def nav_rover(world, app, args, cx, cy):
             pos = rover.get_world_pose()[0]
             frame = {"step": i, "rover_xyz": [float(v) for v in pos]}
             if cam is not None:
-                # keep the camera 2 m behind / 0.7 m above the rover, looking forward
-                import isaacsim.core.utils.numpy.rotations as rot_utils
-                cam.set_world_pose(position=np.array([pos[0] - 2.0, pos[1], args.floor_z + 0.8]),
-                                   orientation=rot_utils.euler_angles_to_quats(
-                                       np.array([0, 18, 0]), degrees=True))
+                if not cam_fixed:                 # chase cam follows the rover
+                    import isaacsim.core.utils.numpy.rotations as rot_utils
+                    cam.set_world_pose(position=np.array([pos[0] - 2.0, pos[1], args.floor_z + 0.35]),
+                                       orientation=rot_utils.euler_angles_to_quats(
+                                           np.array([0, 12, 0]), degrees=True))
                 world.step(render=True)
                 rgba = cam.get_rgba()
                 if rgba is not None and rgba.size > 0:
                     fp = os.path.join(fdir, f"nav_{i:04d}.png")
-                    cv2.imwrite(fp, cv2.cvtColor((rgba[..., :3]).astype("uint8"), cv2.COLOR_RGB2BGR))
+                    cv2.imwrite(fp, cv2.cvtColor(rgba[..., :3].astype("uint8"), cv2.COLOR_RGB2BGR))
                     frame["frame"] = fp
-                    info["splat_rendered"] = bool(rgba[..., :3].std() > 3)  # non-blank?
+                    info["splat_rendered"] = bool(rgba[..., :3].std() > 3)
             info["frames"].append(frame)
-    dx = info["frames"][-1]["rover_xyz"][0] - info["frames"][0]["rover_xyz"][0] if info["frames"] else 0
-    info["note"] += f"rover drove {dx:.2f} m in +x; {len([f for f in info['frames'] if 'frame' in f])} frames rendered"
+    if info["frames"]:
+        d = np.linalg.norm(np.array(info["frames"][-1]["rover_xyz"]) - np.array(info["frames"][0]["rover_xyz"]))
+        info["note"] += f"rover drove {d:.2f} m; {len([f for f in info['frames'] if 'frame' in f])} frames rendered"
     return info
 
 

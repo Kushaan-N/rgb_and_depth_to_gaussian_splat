@@ -34,6 +34,6 @@ echo "seq=$SEQ mode=$MODE floor_z=$FLOORZ"
 nvidia-smi --query-gpu=name --format=csv,noheader
 
 ARGS=(--collider "$COLLIDER" --mode "$MODE" --floor-z "$FLOORZ" --out-dir "$OUT/isaac")
-[ "$MODE" = "nav" ] && ARGS+=(--splat-usd "$SPLAT")
+[ "$MODE" = "nav" ] && ARGS+=(--splat-usd "$SPLAT" --cam-model "$OUT/colmap/sparse/0")
 "$ISAAC_PY" "$REPO/scripts/compose_stage.py" "${ARGS[@]}"
 echo "ISAAC_DONE $SEQ $MODE"
