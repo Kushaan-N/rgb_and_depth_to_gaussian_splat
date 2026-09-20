@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pose_utils as pu
 import image_utils as iu
 import gating_utils as gu
-from build_poses import compute_world_cam
+from build_poses import compute_world_cam, depth_poses
 from build_depth_map import fuse
 
 
@@ -116,22 +116,24 @@ def coverage_map(fused_pcd, floor_z, out_path, cell=0.10, band=0.05):
 def build(cfg: dict) -> dict:
     out_dir = os.path.join(cfg["paths"]["out_root"], "gate3")
     os.makedirs(out_dir, exist_ok=True)
-    kept, Twc, calib, *_ = compute_world_cam(cfg)
+    kept, Twc, calib, interp, mocap, _ = compute_world_cam(cfg)
+    Twc_depth = depth_poses(cfg, kept, mocap, interp, calib)   # TRAP 7
     ts = [f.t for f in kept]
     g = cfg["gating"]
     keep, _info = gu.motion_gate(cfg, ts, Twc[:, :3, 3],
                                  omega_percentile_keep=float(g["omega_percentile_keep"]),
                                  min_sep=float(g["spatial_min_sep_m"]))
+    keep, _n_pre = gu.apply_preamble_exclusion(cfg, ts, keep)   # TRAP 8
     gated = list(np.where(keep)[0])
 
-    # full fused cloud (load if present, else fuse)
+    # full fused cloud (load if present, else fuse) — depth-timestamp poses
     cloud_ply = os.path.join(cfg["paths"]["out_root"], "depth_map", "fused_cloud.ply")
-    full = o3d.io.read_point_cloud(cloud_ply) if os.path.exists(cloud_ply) else fuse(cfg, kept, Twc, calib, gated)[0]
+    full = o3d.io.read_point_cloud(cloud_ply) if os.path.exists(cloud_ply) else fuse(cfg, kept, Twc_depth, calib, gated)[0]
 
     # --- split-half fusion (independent odd/even) ---
     even = gated[0::2]; odd = gated[1::2]
-    pcd_e, _ = fuse(cfg, kept, Twc, calib, even)
-    pcd_o, _ = fuse(cfg, kept, Twc, calib, odd)
+    pcd_e, _ = fuse(cfg, kept, Twc_depth, calib, even)
+    pcd_o, _ = fuse(cfg, kept, Twc_depth, calib, odd)
     ze, te, ne = fit_floor_plane(pcd_e)
     zo, to, no = fit_floor_plane(pcd_o)
     floor_dz = abs(ze - zo)
