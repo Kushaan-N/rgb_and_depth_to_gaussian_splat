@@ -1,0 +1,20 @@
+# CPU-only dependencies for Phases 1-5 (pose alignment, depth fusion, gating,
+# collider mesh) and the synthetic-data tests. None of this needs a GPU.
+#
+# Versions below are what the pipeline was developed and CPU-tested against on
+# Unity (Python 3.11.15). Pin these when reproducing; loosen deliberately.
+#
+# The GPU trainer (3DGRUT) and Isaac Sim have their OWN separate environments
+# (see env/README_gpu.md and scripts/train_splat.sh) — do not mix them in here.
+
+numpy==2.4.6
+scipy==1.17.1
+opencv-python-headless==5.0.0
+open3d==0.20.0
+pycolmap==4.2.0
+pillow
+imageio
+tqdm
+matplotlib==3.11.2
+pyyaml
+pytest
