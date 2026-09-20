@@ -124,9 +124,11 @@ def inventory(cfg: dict) -> dict:
     # --- sync diagnostics (TRAP 3 drift + TRAP 8 preamble) ---
     try:
         import sync_utils as su
-        preamble = su.detect_sync_preamble(cfg)
+        preamble = su.detect_sync_preamble(cfg)      # absolute event-clock cutoff
+        rel = (preamble - float(imu.t[0])) if (preamble is not None and imu is not None) else None
         report["sync"] = {
-            "preamble_end_s": preamble,
+            "preamble_end_abs_s": preamble,
+            "preamble_end_rel_s": rel,               # seconds into the IMU stream
             "preamble_detected": preamble is not None,
             "clock_drift": su.clock_drift_check(cfg),
         }
@@ -181,7 +183,8 @@ def print_table(r: dict) -> None:
         print(f"  {k:24s}: {v}")
     if "sync" in r:
         s = r["sync"]; d = s.get("clock_drift", {})
-        pre = f"{s['preamble_end_s']:.2f} s" if s.get("preamble_detected") else "none detected"
+        pre = (f"{s['preamble_end_rel_s']:.1f} s into recording" if s.get("preamble_detected")
+               else "none detected")
         drift = d.get("drift_ms")
         print("\n[sync]  (TRAP 3 / TRAP 8)")
         print(f"  preamble_end            : {pre}")

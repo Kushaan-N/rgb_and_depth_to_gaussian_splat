@@ -76,12 +76,17 @@ def detect_sync_preamble(cfg) -> Optional[float]:
     """
     import os
     g = cfg.get("gating", {})
-    override = g.get("preamble_end_s")
-    if override is not None:
-        return float(override)
-
     imu = pu.parse_vectornav(os.path.join(cfg["sequence"]["data_root"],
                                           cfg["sequence"]["imu_file"]), cfg)
+    # Return an ABSOLUTE event-clock cutoff (same clock as the frame timestamps), so
+    # apply_preamble_exclusion can compare directly. The manual override
+    # `gating.preamble_end_s` is given as seconds INTO the recording (relative to the IMU
+    # stream start); a value already on the absolute Unix scale (>1e6) is used as-is.
+    override = g.get("preamble_end_s")
+    if override is not None:
+        if len(imu.t) == 0:
+            return float(override)
+        return float(override) if override > 1e6 else float(imu.t[0] + override)
     if len(imu.t) < 30:
         return None
     t = imu.t - imu.t[0]
@@ -109,11 +114,12 @@ def detect_sync_preamble(cfg) -> Optional[float]:
         return None                                   # no clear single-axis swing => no preamble
 
     hold = 3
+    t0 = float(imu.t[0])                              # convert relative edges -> absolute
     for i in range(swings[0] + 1, len(edges) - hold):
         # sustained, balanced motion => locomotion has begun
         if all(wmean[i + k] > loco_thr for k in range(hold)) and dom[i] < 0.55:
-            return float(edges[i])
-    return float(edges[min(swings[-1] + 1, len(edges) - 1)])   # fallback: just after the swing
+            return t0 + float(edges[i])
+    return t0 + float(edges[min(swings[-1] + 1, len(edges) - 1)])  # fallback: after the swing
 
 
 # --------------------------------------------------------------------------- #
