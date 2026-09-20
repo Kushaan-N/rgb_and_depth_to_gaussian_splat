@@ -89,7 +89,7 @@ def main():
         if args.splat_usd:
             add_reference_to_stage(usd_path=args.splat_usd, prim_path="/World/splat")
             print(f"[compose] referenced splat: {args.splat_usd}")
-        result = nav_wheeled(world, app, args, cx, cy)
+        result = nav_rover(world, app, args, cx, cy)
 
     json.dump(result, open(os.path.join(args.out_dir, f"{args.mode}_result.json"), "w"), indent=2)
     print("[compose] result:", json.dumps(result))
@@ -121,35 +121,66 @@ def gate5_drop(world, DynamicSphere, np, cx, cy, floor_z, n=5, radius=0.05):
             "n_ok": int(sum(oks)), "drops": rests}
 
 
-def nav_wheeled(world, app, args, cx, cy):
-    """Spawn a wheeled robot and drive it forward through the covered region; save frames."""
+def nav_rover(world, app, args, cx, cy):
+    """Drive a self-contained rigid-body rover through the splat world under velocity control
+    (real collision with the reconstructed collider) and render a chase-camera view each few
+    steps, so we get a video of a robot navigating the photorealistic Gaussian-splat world.
+
+    Self-contained on purpose: the compute node can't reach NVIDIA's S3 asset server, so we
+    build the rover from primitives instead of fetching a Jetbot/Carter USD. Swapping in a
+    real wheeled URDF later (once an asset is available locally) is a drop-in change.
+    """
+    import os
     import numpy as np
-    info = {"robot": args.robot, "frames": [], "note": ""}
+    from isaacsim.core.api.objects import DynamicCuboid
+    info = {"robot": "procedural_rover", "frames": [], "note": "", "splat_rendered": None}
+    fdir = os.path.join(args.out_dir, "nav_frames"); os.makedirs(fdir, exist_ok=True)
+    speed = 0.4                                   # m/s forward (+x)
+    z0 = args.floor_z + 0.08
+    rover = world.scene.add(DynamicCuboid(
+        prim_path="/World/rover", name="rover", position=np.array([cx - 1.0, cy, z0]),
+        scale=np.array([0.3, 0.2, 0.12]), mass=2.0, color=np.array([0.1, 0.4, 0.9])))
+
+    # chase camera
+    cam = None
     try:
-        from isaacsim.storage.native import get_assets_root_path
-        from isaacsim.robot.wheeled_robots.robots import WheeledRobot
-        from isaacsim.robot.wheeled_robots.controllers.differential_controller import DifferentialController
-        assets = get_assets_root_path()
-        if assets is None:
-            info["note"] = "no asset server reachable from compute node; robot skipped"
-            return info
-        asset_path = f"{assets}/Isaac/Robots/Jetbot/jetbot.usd"
-        robot = world.scene.add(WheeledRobot(
-            prim_path="/World/robot", name="robot",
-            wheel_dof_names=["left_wheel_joint", "right_wheel_joint"],
-            create_robot=True, usd_path=asset_path,
-            position=np.array([cx, cy, args.floor_z + 0.05])))
-        ctrl = DifferentialController(name="diff", wheel_radius=0.03, wheel_base=0.1125)
-        world.reset()
-        for i in range(600):
-            robot.apply_wheel_actions(ctrl.forward(command=[0.3, 0.0]))  # 0.3 m/s forward
-            world.step(render=True)
-            if i % 60 == 0:
-                info["frames"].append({"step": i,
-                                       "base_xy": robot.get_world_pose()[0][:2].tolist()})
-        info["note"] = "drove forward 0.3 m/s; base trajectory logged (see frames)"
+        from isaacsim.sensors.camera import Camera
+        import isaacsim.core.utils.numpy.rotations as rot_utils
+        cam = Camera(prim_path="/World/chase_cam", resolution=(1280, 720),
+                     position=np.array([cx - 2.0, cy, z0 + 0.7]),
+                     orientation=rot_utils.euler_angles_to_quats(np.array([0, 20, 0]), degrees=True))
     except Exception as e:  # noqa: BLE001
-        info["note"] = f"nav error: {type(e).__name__}: {e}"
+        info["note"] += f"camera unavailable: {type(e).__name__}: {e}; "
+
+    world.reset()
+    if cam is not None:
+        cam.initialize()
+    import cv2
+    for i in range(400):
+        try:
+            rover.set_linear_velocity(np.array([speed, 0.0, 0.0]))
+        except Exception:  # noqa: BLE001
+            pass
+        world.step(render=True)
+        if i % 40 == 0:
+            pos = rover.get_world_pose()[0]
+            frame = {"step": i, "rover_xyz": [float(v) for v in pos]}
+            if cam is not None:
+                # keep the camera 2 m behind / 0.7 m above the rover, looking forward
+                import isaacsim.core.utils.numpy.rotations as rot_utils
+                cam.set_world_pose(position=np.array([pos[0] - 2.0, pos[1], args.floor_z + 0.8]),
+                                   orientation=rot_utils.euler_angles_to_quats(
+                                       np.array([0, 18, 0]), degrees=True))
+                world.step(render=True)
+                rgba = cam.get_rgba()
+                if rgba is not None and rgba.size > 0:
+                    fp = os.path.join(fdir, f"nav_{i:04d}.png")
+                    cv2.imwrite(fp, cv2.cvtColor((rgba[..., :3]).astype("uint8"), cv2.COLOR_RGB2BGR))
+                    frame["frame"] = fp
+                    info["splat_rendered"] = bool(rgba[..., :3].std() > 3)  # non-blank?
+            info["frames"].append(frame)
+    dx = info["frames"][-1]["rover_xyz"][0] - info["frames"][0]["rover_xyz"][0] if info["frames"] else 0
+    info["note"] += f"rover drove {dx:.2f} m in +x; {len([f for f in info['frames'] if 'frame' in f])} frames rendered"
     return info
 
 
