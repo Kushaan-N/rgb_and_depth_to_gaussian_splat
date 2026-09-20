@@ -90,10 +90,23 @@ those are run._
 - Note: 3DGRUT made its own every-8th val split from the 408 frames I supplied (~51
   held-out); the separate 59-frame val set (`gating/val_frames.json`) is still available
   for an independent eval + the off-trajectory renders.
-- **Off-trajectory renders (lateral 0.5 m / height 0.8 m): TODO** — the real drivability
-  predictor; needs one more short render job from the checkpoint.
-- Next-lever read: not exposure. Candidates = depth-supervised/regularized trainer for the
-  low-coverage far floor, or blur-aware 3DGS (§7.6). Decide after the off-traj renders.
+### Gate 4.5 — off-trajectory renders (drivability) — KEY NEGATIVE RESULT
+
+- On my 59-frame held-out val (independent of 3DGRUT's split), rendered from the checkpoint:
+  **on-path PSNR 28.18 / SSIM 0.888 / LPIPS 0.290** — even better than the internal split.
+- **Off-path (lateral +0.5 m, height 0.8 m) = catastrophic breakdown**: the render is a
+  cloudy, smeared mess with no recognizable structure (no GT to score; qualitative). See
+  `docs/figures/mocap1_onpath_vs_offpath.png` (GT | on-path render | off-path render).
+- **Conclusion: the mocap1 splat is "on-rails"** — photorealistic at/near the recorded
+  trajectory, unusable ~0.5 m off it. This is the §2.6 risk realized: with a near-linear
+  0.35 m-high path and 46% floor coverage, the reconstruction cannot support free-roaming
+  novel views. As a *drivable* photorealistic sim, as-is: no. The metric geometry (collider)
+  is still valid everywhere (depth-fused + patched), so physics/walking is unaffected — only
+  the visual splat degrades off-path.
+- Implication for the goal: appearance can't be conjured for unobserved viewpoints, so the
+  fix is data, not trainer — sequences with more viewpoint diversity, or new captures that
+  deliberately vary height/lateral offset. A depth-regularized trainer sharpens geometry but
+  won't fill unobserved appearance. This is a genuinely useful finding for the lab (§11).
 
 ## Phase 5 — collider (Gate 5) — REAL DATA: PASS
 
