@@ -29,12 +29,16 @@ timestamps:
     imu: microseconds
     joints: microseconds
     pose: seconds
-  # TRAP 3: per-sensor offsets (seconds). t_event = t_sensor + offset.
-  # Sign convention VERIFY at Gate 2 (a wrong sign shows as a directional
-  # smear that scales with motion in the reprojection warp).
+  # TRAP 3: per-sensor offsets (seconds). t_event = t_sensor + offset. No hardware sync —
+  # these are per-sequence pitch-swing cross-correlation estimates, so they may be
+  # per-sequence (not global) and may drift within a sequence (see `sync:` and TRAP 3).
+  # Sign convention VERIFY at Gate 2 (a wrong sign shows as a directional smear that scales
+  # with motion). The rgb offset applies to BOTH the RGB and depth columns of
+  # realsense_timestamp.txt (same RealSense clock); the two columns' raw timestamps still
+  # differ by up to 8.33 ms (TRAP 7) and each stream is posed at its own timestamp.
   offsets_s:
     event: 0.0                 # reference clock
-    rgb: 0.004611              # RealSense (depth) — CRITICAL
+    rgb: 0.004611              # RealSense (RGB + depth) — CRITICAL
     imu: -0.004012             # VectorNav
     joints: 0.004611
     # velodyne: 0.003044       # LiDAR — NOT USED (project constraint)
@@ -57,6 +61,19 @@ frames:
   extrinsic:
     rgb_marker_direction: cam_to_marker
     rgb_robot_direction: cam_to_robot
+    # §5.3 constant-extrinsic correction ΔT (16-elem row-major 4x4), applied as
+    # T_world_cam = T_world_marker @ T_marker_cam @ ΔT. Left unset (identity); populate
+    # from scripts/refine_extrinsic.py ONLY if Gate 2 passes but Gates 3-4 show systematic
+    # geometric softness (CAD/factory extrinsic error). A large ΔT means something else is
+    # wrong — go back to TRAP 4.
+    delta_T: null
+
+# --- photometric (Phase 4, §7.2) -----------------------------------------
+photometric:
+  # Auto-exposure was CONFIRMED ON in the paper — brightness varies along the trajectory
+  # by construction. Plan on a trainer with per-image exposure compensation / appearance
+  # embeddings; precondition_frames.py quantifies the drift to decide if the swap is needed.
+  auto_exposure_confirmed: true
 
 # --- camera intrinsics ----------------------------------------------------
 intrinsics:
@@ -85,6 +102,21 @@ gating:
   laplacian_min: 50.0          # variance-of-Laplacian floor (sharpness); tune
   spatial_min_sep_m: 0.03      # drop near-duplicate viewpoints
   holdout_every: 8             # §7.4: hold out every 8th GATED frame (split after gating)
+  # TRAP 8: every sequence starts with a pitch-swing + thrown-ball sync preamble; exclude
+  # it from training and fusion. Auto-detected from the IMU pitch signature; set
+  # preamble_end_s (event-clock seconds) to override if detection is wrong (VERIFY).
+  exclude_preamble: true
+  preamble_end_s: null
+  preamble_swing_factor: 2.0
+
+# --- clock sync / drift (TRAP 3) ------------------------------------------
+sync:
+  # Offsets have no hardware sync — they come from a per-sequence pitch-swing cross-
+  # correlation, so free-running clocks may drift. Re-estimate IMU<->pose lag on the
+  # first/last windows; warn/correct if it drifts beyond tolerance. VERIFY whether the
+  # published offsets are global constants or per-sequence in the actual download.
+  drift_check: true
+  drift_tolerance_ms: 2.0
 
 # --- collider (Phase 5) ---------------------------------------------------
 collider:
