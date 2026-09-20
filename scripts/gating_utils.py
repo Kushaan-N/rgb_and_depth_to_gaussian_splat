@@ -37,6 +37,25 @@ def greedy_spatial_thin(centers: np.ndarray, min_sep: float) -> np.ndarray:
     return kept
 
 
+def apply_preamble_exclusion(cfg: dict, ts: Sequence[float], keep: np.ndarray):
+    """Drop frames inside the sync preamble (TRAP 8). Returns (new_keep, n_excluded).
+
+    The preamble (pitch swing + thrown ball) is at the very start; the ball is a dynamic
+    object that must not enter training frames or fusion. No-op if disabled or none found.
+    """
+    import sync_utils as su
+    keep = np.asarray(keep, dtype=bool).copy()
+    if not cfg.get("gating", {}).get("exclude_preamble", True):
+        return keep, 0
+    end = su.detect_sync_preamble(cfg)
+    if end is None:
+        return keep, 0
+    excl = np.asarray(ts, dtype=np.float64) <= end
+    n = int((keep & excl).sum())
+    keep[excl] = False
+    return keep, n
+
+
 def motion_gate(cfg: dict, ts: Sequence[float], centers: np.ndarray,
                 omega_percentile_keep: float, min_sep: float,
                 laplacian: np.ndarray = None, laplacian_min: float = None):
