@@ -111,18 +111,61 @@ def offtrajectory_poses(cfg: dict, lateral_m=0.5, height_m=0.8) -> str:
     return model_dir
 
 
+def build_eval_datasets(cfg: dict, lateral=0.5, height=0.8) -> dict:
+    """Write two COLMAP datasets over the held-out val frames, ready for 3DGRUT render.py:
+      eval_ontraj  : the true val poses (compare renders to real GT → honest Gate 4)
+      eval_offtraj : the same views shifted (camera +x by `lateral`, world z=`height`)
+    Both symlink the real (undistorted) val images so render.py's loader has correctly-sized
+    frames; for the off-traj set the 'GT' is just the on-traj real image (ignore its metrics,
+    keep the render — there is no ground truth for a novel viewpoint)."""
+    out_root = cfg["paths"]["out_root"]
+    val = json.load(open(os.path.join(out_root, "gating", "val_frames.json")))
+    calib = pu.load_calibration(cfg["intrinsics"]["calib_file"], cfg)
+    fx, fy, cx, cy = iu.K_params(calib.K)
+    cam = pu.ColmapCamera(id=1, model="PINHOLE", width=calib.width, height=calib.height,
+                          params=[fx, fy, cx, cy])
+    precond = os.path.join(out_root, "precond", cfg["sequence"]["rgb_dir"])
+
+    def _emit(subdir, pose_fn):
+        root = os.path.join(out_root, subdir)
+        imgs, imgdir = [], os.path.join(root, "images")
+        os.makedirs(imgdir, exist_ok=True)
+        for k, fr in enumerate(val):
+            imgs.append(pu.ColmapImage(id=k + 1, T_world_cam=pose_fn(np.array(fr["T_world_cam"])),
+                                       camera_id=1, name=fr["name"]))
+            src, dst = os.path.join(precond, fr["name"]), os.path.join(imgdir, fr["name"])
+            if not os.path.exists(dst) and os.path.exists(src):
+                os.symlink(src, dst)
+        pu.write_colmap_model(os.path.join(root, "sparse", "0"), cam, imgs)
+        return root
+
+    def _shift(T):
+        T2 = T.copy(); T2[:3, 3] = T[:3, 3] + T[:3, 0] * lateral; T2[2, 3] = height
+        return T2
+
+    return {"ontraj": _emit("eval_ontraj", lambda T: T),
+            "offtraj": _emit("eval_offtraj_ds", _shift), "n": len(val)}
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     p1 = sub.add_parser("offtraj-poses"); p1.add_argument("--config", required=True)
     p1.add_argument("--lateral", type=float, default=0.5)
     p1.add_argument("--height", type=float, default=0.8)
+    p3 = sub.add_parser("eval-datasets"); p3.add_argument("--config", required=True)
+    p3.add_argument("--lateral", type=float, default=0.5)
+    p3.add_argument("--height", type=float, default=0.8)
     p2 = sub.add_parser("metrics")
     p2.add_argument("--gt-dir", required=True); p2.add_argument("--render-dir", required=True)
     p2.add_argument("--out", default=None)
     args = ap.parse_args()
 
-    if args.cmd == "offtraj-poses":
+    if args.cmd == "eval-datasets":
+        cfg = pu.load_config(args.config)
+        d = build_eval_datasets(cfg, args.lateral, args.height)
+        print(f"[eval] {d['n']} val frames -> on-traj: {d['ontraj']}  off-traj: {d['offtraj']}")
+    elif args.cmd == "offtraj-poses":
         cfg = pu.load_config(args.config)
         d = offtrajectory_poses(cfg, args.lateral, args.height)
         print(f"[eval] off-trajectory COLMAP model -> {d}")
