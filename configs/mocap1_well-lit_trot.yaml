@@ -13,9 +13,10 @@ sequence:
   # data_root resolves ${CEAR_DATA} from env/cear_env.sh.
   data_root: "${CEAR_DATA}/mocap1_well-lit_trot"
   pose_file: MoCap.txt          # OptiTrack ground truth (this sequence). SLAM seqs: FasterLIO.txt
-  rgb_dir: raw_rgb              # TRAP 5: raw_rgb is the default (unmanipulated photometry);
-                               #         also A/B against rgb/ in Phase 4.
-  depth_dir: depth             # depth already projected into the RGB frame (§6.1). VERIFY.
+  rgb_dir: rgb                 # this download ships ONLY rgb/ (no raw_rgb/), so TRAP-5 A/B
+                               #   is moot here; rgb/ is the processed stream.
+  depth_dir: depth             # holds BOTH *_depth_rgb (used) and *_depth_event projections;
+                               #   the pipeline reads the depth_rgb file named per frame (§6.1).
   raw_depth_dir: raw_depth     # depth in the DEPTH camera frame (not used by default).
   timestamp_table: realsense_timestamp.txt
   imu_file: vectornav.txt
@@ -55,12 +56,12 @@ frames:
   target_up: z                 # pipeline converts everything to Z-up (USD/Isaac, floor z=0)
   pose_frame: marker           # TRAP 4: MoCap reports the MARKER frame, not the RGB optical
                                #         frame. VERIFY (marker | robot).
-  # Extrinsic direction of each stored calibration transform. VERIFY against the
-  # calibration release. "cam_to_marker" means the stored 4x4 maps a point in the
-  # RGB optical frame to the marker frame.
+  # Extrinsic direction of each stored calibration transform. CONFIRMED from the CEAR
+  # calibration headers (2026-09-20): T_rgb_marker/T_rgb_robot "take a point FROM the
+  # marker/robot frame TO the RGB frame", i.e. marker→rgb / robot→rgb == marker_to_cam.
   extrinsic:
-    rgb_marker_direction: cam_to_marker
-    rgb_robot_direction: cam_to_robot
+    rgb_marker_direction: marker_to_cam
+    rgb_robot_direction: robot_to_cam
     # §5.3 constant-extrinsic correction ΔT (16-elem row-major 4x4), applied as
     # T_world_cam = T_world_marker @ T_marker_cam @ ΔT. Left unset (identity); populate
     # from scripts/refine_extrinsic.py ONLY if Gate 2 passes but Gates 3-4 show systematic
