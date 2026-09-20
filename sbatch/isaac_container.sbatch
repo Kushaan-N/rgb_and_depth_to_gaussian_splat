@@ -16,7 +16,10 @@ MODE="${2:-nav}"
 REPO="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 CEAR_WS="${CEAR_WS:-/scratch4/workspace/${USER}-cear}"
 CEAR_OUT="${CEAR_OUT:-$CEAR_WS/outputs}"
-SIF="$CEAR_WS/isaac-sim-5.1.0.sif"
+# NuRec (photoreal Gaussian-volume) rendering needs Isaac Sim >= 6.0.0 (added in 6.0.0). The
+# 5.1.0 image renders only the reconstructed GEOMETRY (dome-lit collider + rover). Point at a
+# 6.0 SIF via CEAR_SIF to get the photoreal splat once it's pulled.
+SIF="${CEAR_SIF:-$CEAR_WS/isaac-sim-5.1.0.sif}"
 OUT="$CEAR_OUT/$SEQ"
 FLOORZ="$(python3 -c "import json;print(json.load(open('$OUT/collider/collider_meta.json'))['floor_z_m'])")"
 
