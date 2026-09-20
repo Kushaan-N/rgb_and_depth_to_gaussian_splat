@@ -64,6 +64,17 @@ those are run._
 
 The full CPU pipeline (Phases 1–5, minus GPU training/sim) is exercised end-to-end on a
 synthetic CEAR-format sequence with known ground truth via `scripts/run_cpu_pipeline.sh
---synthetic` and `tests/`. This validates the trap-prone math (quaternion/timestamp
-conventions, transform-chain direction, COLMAP round-trip, TSDF fusion, collider floor
-height) without the real download or a GPU. Results: see `tests/` output.
+--synthetic` and `tests/` (12 tests, all green). This validates the trap-prone math
+without the real download or a GPU.
+
+| Check | Result |
+|---|---|
+| Pose recovery vs ground truth (full chain) | 17 µm / 0.015° (pure SLERP/LERP residual) |
+| Gate 1 (inventory) | PASS — frame counts self-consistent |
+| Gate 2 (reprojection warp) | PASS — mean grayscale err 4.8/255 |
+| Gate 2b (COLMAP round-trip) | PASS — reloaded-model pose drift 7e-10 |
+| Gate 3 (depth map) | PASS — floor z=−0.006 m, thickness 3 mm, split-half Δz 0.4 mm, C2C median 2.3 mm, reproj 99.4% |
+| Gate 5 (collider, CPU drop-test proxy) | PASS — 100% ray hits, floor contact err p95 3.5 mm |
+
+See `docs/GPU_HANDOFF.md` for the full status and the exact GPU commands. Gates 4 and 6
+require the GPU stages and are TODO(GPU).
