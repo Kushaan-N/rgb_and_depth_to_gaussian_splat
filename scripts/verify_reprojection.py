@@ -25,7 +25,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pose_utils as pu
 import image_utils as iu
-from build_poses import compute_world_cam
+from build_poses import compute_world_cam, depth_poses
 
 
 def warp(depth_i_m, valid_i, rgb_i, Twc_i, Twc_j, K):
@@ -69,7 +69,11 @@ def _pairs(n, k, n_pairs):
     return [(int(i), int(i + k)) for i in starts if 0 <= i and i + k < n]
 
 
-def run_gate2(cfg, kept, Twc, calib, k, n_pairs, out_dir, tag, save=True):
+def run_gate2(cfg, kept, Twc, calib, k, n_pairs, out_dir, tag, save=True, Twc_src=None):
+    # Twc_src poses the SOURCE depth (TRAP 7: at the depth timestamp); Twc poses the
+    # target RGB view. Defaults to Twc when depth poses aren't supplied.
+    if Twc_src is None:
+        Twc_src = Twc
     root = cfg["sequence"]["data_root"]
     depth_dir = os.path.join(root, cfg["sequence"]["depth_dir"])
     rgb_dir = os.path.join(root, cfg["sequence"]["rgb_dir"])
@@ -81,7 +85,7 @@ def run_gate2(cfg, kept, Twc, calib, k, n_pairs, out_dir, tag, save=True):
         di_m, vi = iu.depth_to_meters(depth_i, cfg)
         rgb_i = iu.read_rgb(os.path.join(rgb_dir, kept[i].rgb_name))
         rgb_j = iu.read_rgb(os.path.join(rgb_dir, kept[j].rgb_name))
-        warped, mask = warp(di_m, vi, rgb_i, Twc[i], Twc[j], K)
+        warped, mask = warp(di_m, vi, rgb_i, Twc_src[i], Twc[j], K)
         e = photo_error(warped, mask, rgb_j)
         errs.append(e)
         if save and n < 6:
@@ -119,11 +123,12 @@ def main():
     cfg = pu.load_config(args.config)
     out_dir = os.path.join(cfg["paths"]["out_root"], "gate2")
 
-    kept, Twc, calib, *_ = compute_world_cam(cfg)
+    kept, Twc, calib, interp, mocap, _ = compute_world_cam(cfg)
+    Twc_depth = depth_poses(cfg, kept, mocap, interp, calib)   # TRAP 7: source depth poses
     k = min(args.k, max(1, len(kept) // 4))
 
     # --- Gate 2 (in-memory poses) ---
-    errs = run_gate2(cfg, kept, Twc, calib, k, args.pairs, out_dir, "gate2")
+    errs = run_gate2(cfg, kept, Twc, calib, k, args.pairs, out_dir, "gate2", Twc_src=Twc_depth)
     m = float(np.nanmean(errs))
     print(f"[Gate 2] {len(errs)} pairs (k={k})  mean grayscale err={m:.3f} "
           f"(min {np.nanmin(errs):.2f}, max {np.nanmax(errs):.2f})")
@@ -138,7 +143,7 @@ def main():
         by_name = {im.name: im.T_world_cam for im in imgs}
         Twc_loaded = np.stack([by_name[f.rgb_name] for f in kept])
         errs_b = run_gate2(cfg, kept, Twc_loaded, calib, k, min(args.pairs, 8),
-                           out_dir, "gate2b", save=True)
+                           out_dir, "gate2b", save=True, Twc_src=Twc_depth)
         mb = float(np.nanmean(errs_b))
         drift = float(np.max(np.abs(Twc - Twc_loaded)))
         print(f"[Gate 2b] reloaded-model mean err={mb:.3f}  |Twc-Twc_loaded|max={drift:.2e}")
