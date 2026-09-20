@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 from typing import Tuple
 
 import cv2
@@ -72,15 +73,29 @@ def _look_at(eye: np.ndarray, target: np.ndarray) -> np.ndarray:
     return np.column_stack([right, down, fwd])
 
 
-def cam_pose(tau: float, duration: float) -> Tuple[np.ndarray, np.ndarray]:
-    """Return (R_world_cam, C) for trajectory time tau in [0, duration]."""
-    ph = 2 * np.pi * 0.6 * (tau / duration)
+def cam_pose(tau: float, duration: float, preamble_s: float = 0.0
+             ) -> Tuple[np.ndarray, np.ndarray]:
+    """Return (R_world_cam, C) for trajectory time tau in [0, preamble_s + duration].
+
+    If tau < preamble_s the camera is doing the sync preamble: a near-stationary body with
+    a large pitch swing (the authors' time-sync motion, TRAP 8). Afterwards it orbits.
+    """
+    if preamble_s > 0 and tau < preamble_s:
+        # stationary at the orbit's start pose (so the trajectory is CONTINUOUS at the
+        # handoff — a teleport there would inject a spurious omega spike), doing a big
+        # pitch swing that returns to zero at tau == preamble_s.
+        eye = np.array([CENTER[0] + 1.4, CENTER[1], 0.40])
+        R0 = _look_at(eye, CENTER)
+        pitch = 0.5 * np.sin(2 * np.pi * 1.5 * tau)     # large-amplitude pitch oscillation
+        return R0 @ Rotation.from_euler("x", pitch).as_matrix(), eye
+    tt = tau - preamble_s
+    ph = 2 * np.pi * 0.6 * (tt / duration)
     eye = np.array([CENTER[0] + 1.4 * np.cos(ph),
                     CENTER[1] + 1.4 * np.sin(ph),
                     0.40 + 0.08 * np.sin(3 * ph)])
     R = _look_at(eye, CENTER)
     # time-varying wobble about the camera's down-axis -> spread in |omega| for gating
-    wob = 0.15 * np.sin(2 * np.pi * (0.5 + 2.0 * (tau / duration)) * tau)
+    wob = 0.15 * np.sin(2 * np.pi * (0.5 + 2.0 * (tt / duration)) * tt)
     R = R @ Rotation.from_euler("y", wob).as_matrix()
     return R, eye
 
@@ -96,7 +111,7 @@ def _bounded_plane_hit(o, d, axis, value, lo, hi):
     dv = d[..., axis]
     with np.errstate(divide="ignore", invalid="ignore"):
         s = (value - o[..., axis]) / dv
-    p = o + s[..., None] * d
+        p = o + s[..., None] * d
     ok = (s > 1e-6) & np.isfinite(s)
     others = [a for a in (0, 1, 2) if a != axis]
     ok &= (p[..., others[0]] >= lo[0]) & (p[..., others[0]] <= lo[1])
@@ -174,9 +189,11 @@ def render(R_world_cam: np.ndarray, C: np.ndarray, rng: np.random.Generator,
 # --------------------------------------------------------------------------- #
 # Angular velocity from the trajectory (for the IMU stream)
 # --------------------------------------------------------------------------- #
-def body_omega(tau: float, duration: float, h: float = 1e-3) -> np.ndarray:
-    Ra, _ = cam_pose(max(tau - h, 0.0), duration)
-    Rb, _ = cam_pose(min(tau + h, duration), duration)
+def body_omega(tau: float, duration: float, preamble_s: float = 0.0,
+               h: float = 1e-3) -> np.ndarray:
+    total = duration + preamble_s
+    Ra, _ = cam_pose(max(tau - h, 0.0), duration, preamble_s)
+    Rb, _ = cam_pose(min(tau + h, total), duration, preamble_s)
     dR = Ra.T @ Rb
     return Rotation.from_matrix(dR).as_rotvec() / (2 * h)
 
@@ -186,21 +203,28 @@ def body_omega(tau: float, duration: float, h: float = 1e-3) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 def make_synthetic_sequence(out_root: str, seq_name: str = "synthetic",
                             n_frames: int = 40, duration: float = 2.0,
-                            seed: int = 0) -> dict:
+                            seed: int = 0, preamble_s: float = 0.0,
+                            depth_dt_ms: float = 4.0) -> dict:
     rng = np.random.default_rng(seed)
+    total = duration + preamble_s
+    depth_dt = depth_dt_ms / 1000.0            # RGB->depth timestamp gap (TRAP 7)
     seq_dir = os.path.join(out_root, seq_name)
     rgb_dir = os.path.join(seq_dir, "rgb")
     depth_dir = os.path.join(seq_dir, "depth")
     calib_dir = os.path.join(seq_dir, "calibration")
+    # clear image dirs so re-generating into the same path can't leave stale frames
+    for d in (rgb_dir, depth_dir):
+        if os.path.isdir(d):
+            shutil.rmtree(d)
     for d in (rgb_dir, depth_dir, calib_dir):
         os.makedirs(d, exist_ok=True)
 
-    # ---- MoCap.txt : 200 Hz, seconds, Y-up marker frame, scalar-LAST ----
-    mocap_tau = np.arange(0.0, duration + 1e-9, 1.0 / 200.0)
+    # ---- MoCap.txt : 120 Hz, seconds, Y-up marker frame, scalar-LAST ----
+    mocap_tau = np.arange(0.0, total + 1e-9, 1.0 / 120.0)
     with open(os.path.join(seq_dir, "MoCap.txt"), "w") as f:
         f.write("# timestamp(s) x y z qx qy qz qw  (OptiTrack, marker frame, Y-up)\n")
         for tau in mocap_tau:
-            R_wc, C = cam_pose(tau, duration)
+            R_wc, C = cam_pose(tau, duration, preamble_s)
             T_wc_z = np.eye(4); T_wc_z[:3, :3] = R_wc; T_wc_z[:3, 3] = C
             # camera -> marker(world) : T_world_marker = T_world_cam @ inv(T_marker_cam)
             T_wm_z = T_wc_z @ np.linalg.inv(_T_MARKER_CAM)
@@ -212,12 +236,12 @@ def make_synthetic_sequence(out_root: str, seq_name: str = "synthetic",
                     f"{q[0]:.8f} {q[1]:.8f} {q[2]:.8f} {q[3]:.8f}\n")
 
     # ---- vectornav.txt : 400 Hz, microseconds, scalar-FIRST ----
-    imu_tau = np.arange(0.0, duration + 1e-9, 1.0 / 400.0)
+    imu_tau = np.arange(0.0, total + 1e-9, 1.0 / 400.0)
     with open(os.path.join(seq_dir, "vectornav.txt"), "w") as f:
         f.write("# t(us) gx gy gz ax ay az mx my mz qw qx qy qz  (scalar-first)\n")
         for tau in imu_tau:
-            w = body_omega(tau, duration)
-            R_wc, _ = cam_pose(tau, duration)
+            w = body_omega(tau, duration, preamble_s)
+            R_wc, _ = cam_pose(tau, duration, preamble_s)
             q = Rotation.from_matrix(R_wc).as_quat()             # xyzw
             ts_us = int(round((tau - OFFSETS_S["imu"]) * 1e6))
             f.write(f"{ts_us} {w[0]:.6f} {w[1]:.6f} {w[2]:.6f} "
@@ -227,28 +251,37 @@ def make_synthetic_sequence(out_root: str, seq_name: str = "synthetic",
     # ---- mini_cheetah_joint.txt : 100 Hz, microseconds, 12 joints ----
     with open(os.path.join(seq_dir, "mini_cheetah_joint.txt"), "w") as f:
         f.write("# t(us) 12 joint angles (rad)\n")
-        for tau in np.arange(0.0, duration + 1e-9, 1.0 / 100.0):
+        for tau in np.arange(0.0, total + 1e-9, 1.0 / 100.0):
             ts_us = int(round((tau - OFFSETS_S["joints"]) * 1e6))
             j = 0.2 * np.sin(2 * np.pi * tau + np.arange(12))
             f.write(f"{ts_us} " + " ".join(f"{v:.5f}" for v in j) + "\n")
 
     # ---- frames + realsense_timestamp.txt ----
-    frame_tau = np.linspace(0.05 * duration, 0.95 * duration, n_frames)
+    # RGB and depth get DIFFERENT timestamps (TRAP 7): render each at its own pose so the
+    # pipeline must interpolate each stream at its own time to recover the geometry.
+    if preamble_s > 0:
+        frame_tau = np.linspace(0.02 * total, 0.98 * total - depth_dt, n_frames)
+    else:
+        frame_tau = np.linspace(0.05 * duration, 0.95 * duration - depth_dt, n_frames)
     gt_frames = []
     with open(os.path.join(seq_dir, "realsense_timestamp.txt"), "w") as f:
         f.write("# depth_rgb  depth_event  rgb   (leading integer = timestamp in us)\n")
         for tau in frame_tau:
-            R_wc, C = cam_pose(tau, duration)
-            rgb, depth = render(R_wc, C, rng)
-            ts_us = int(round((tau - OFFSETS_S["rgb"]) * 1e6))
-            rgb_name = f"{ts_us:012d}_rgb.png"
-            depth_name = f"{ts_us:012d}_depth_rgb.png"
-            event_name = f"{ts_us:012d}_depth_event.png"
+            t_rgb, t_depth = float(tau), float(tau) + depth_dt
+            R_rgb, C_rgb = cam_pose(t_rgb, duration, preamble_s)
+            R_dep, C_dep = cam_pose(t_depth, duration, preamble_s)
+            rgb, _ = render(R_rgb, C_rgb, rng)              # color at the RGB instant
+            _, depth = render(R_dep, C_dep, rng)            # geometry at the depth instant
+            rgb_us = int(round((t_rgb - OFFSETS_S["rgb"]) * 1e6))
+            dep_us = int(round((t_depth - OFFSETS_S["rgb"]) * 1e6))
+            rgb_name = f"{rgb_us:012d}_rgb.png"
+            depth_name = f"{dep_us:012d}_depth_rgb.png"
+            event_name = f"{dep_us:012d}_depth_event.png"
             cv2.imwrite(os.path.join(rgb_dir, rgb_name), rgb[:, :, ::-1])   # RGB->BGR
             cv2.imwrite(os.path.join(depth_dir, depth_name), depth)
             f.write(f"{depth_name} {event_name} {rgb_name}\n")
-            T_wc = np.eye(4); T_wc[:3, :3] = R_wc; T_wc[:3, 3] = C
-            gt_frames.append(dict(tau=float(tau), rgb=rgb_name, depth=depth_name,
+            T_wc = np.eye(4); T_wc[:3, :3] = R_rgb; T_wc[:3, 3] = C_rgb
+            gt_frames.append(dict(tau=t_rgb, rgb=rgb_name, depth=depth_name,
                                   T_world_cam=T_wc.tolist()))
 
     # ---- calibration ----
@@ -267,6 +300,7 @@ def make_synthetic_sequence(out_root: str, seq_name: str = "synthetic",
         room=dict(LX=LX, LY=LY, LZ=LZ), obstacle=OBS, floor_z=0.0,
         K=[FX, FY, CX, CY], width=W, height=H,
         frames=gt_frames,
+        preamble_s=float(preamble_s), depth_dt_ms=float(depth_dt_ms),
         conventions=dict(world_up="y", target_up="z"),
     )
     with open(os.path.join(seq_dir, "ground_truth.json"), "w") as f:
@@ -298,8 +332,9 @@ def _emit_config(seq_dir: str, out_root: str, seq_name: str) -> dict:
         "frames": {
             "world_up": "y", "target_up": "z", "pose_frame": "marker",
             "extrinsic": {"rgb_marker_direction": "cam_to_marker",
-                          "rgb_robot_direction": "cam_to_robot"},
+                          "rgb_robot_direction": "cam_to_robot", "delta_T": None},
         },
+        "photometric": {"auto_exposure_confirmed": True},
         "intrinsics": {
             "calib_file": os.path.join(seq_dir, "calibration", "rgb_intrinsics.yaml"),
             "image_width": W, "image_height": H,
@@ -308,7 +343,10 @@ def _emit_config(seq_dir: str, out_root: str, seq_name: str) -> dict:
                   "min_range_m": 0.2, "max_range_m": 4.0},
         "fusion": {"voxel_size_m": 0.025, "sdf_trunc_m": 0.10, "seed_downsample_m": 0.03},
         "gating": {"omega_percentile_keep": 60, "laplacian_min": 5.0,
-                   "spatial_min_sep_m": 0.01, "holdout_every": 8},
+                   "spatial_min_sep_m": 0.01, "holdout_every": 8,
+                   "exclude_preamble": True, "preamble_end_s": None,
+                   "preamble_swing_factor": 2.0},
+        "sync": {"drift_check": True, "drift_tolerance_ms": 2.0},
         "collider": {"method": "tsdf_marching_cubes", "max_triangles": 50000,
                      "floor_patch": True},
         "paths": {"out_root": os.path.join(out_root, f"{seq_name}_out")},
@@ -321,8 +359,11 @@ def main():
     ap.add_argument("--name", default="synthetic")
     ap.add_argument("--frames", type=int, default=40)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--preamble", type=float, default=0.0, help="sync-preamble seconds (TRAP 8)")
+    ap.add_argument("--depth-dt-ms", type=float, default=4.0, help="RGB->depth ts gap (TRAP 7)")
     args = ap.parse_args()
-    paths = make_synthetic_sequence(args.out, args.name, n_frames=args.frames, seed=args.seed)
+    paths = make_synthetic_sequence(args.out, args.name, n_frames=args.frames, seed=args.seed,
+                                    preamble_s=args.preamble, depth_dt_ms=args.depth_dt_ms)
     print(json.dumps(paths, indent=2))
 
 
