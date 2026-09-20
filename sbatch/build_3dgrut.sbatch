@@ -25,10 +25,12 @@ export TORCH_CUDA_ARCH_LIST="8.0;8.9;9.0"
 
 echo "CUDA_HOME=$CUDA_HOME"; nvcc --version | tail -1
 cd "$THREEDGRUT_DIR"
-if [ -d .venv ]; then
-  echo "[build] .venv already exists — remove it to rebuild. Verifying import instead."
+if [ -d .venv ] && ./.venv/bin/python -c "import torch, kaolin" 2>/dev/null; then
+  echo "[build] .venv already complete:"
   ./.venv/bin/python -c "import torch, kaolin; print('torch', torch.__version__, 'kaolin', kaolin.__version__)"
 else
+  echo "[build] building fresh .venv (removing any partial one)..."
+  rm -rf .venv
   bash ./install_env_uv.sh 3dgrut
 fi
 echo "BUILD_3DGRUT_DONE"
