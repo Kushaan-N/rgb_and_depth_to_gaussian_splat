@@ -98,8 +98,15 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
 
     from isaacsim import SimulationApp
-    # nav needs rendering (RTX); drop is physics-only and can run truly headless
-    app = SimulationApp({"headless": not args.gui, "renderer": "RayTracedLighting"})
+    # nav needs rendering (RTX); drop is physics-only and can run truly headless.
+    # NuRec Gaussian volumes need these RTX settings (what nurec_utils.setup_for_rendering
+    # would apply — that helper isn't in the pip distribution, but the 5.1 RTX renderer has
+    # NuRec built in, so we set them via launch args): keep gaussian tonemapping on, and
+    # single-GPU (NuRec volume path requires multiGpu off).
+    nurec_args = ["--/rtx/rtpt/gaussian/skipTonemapping/enabled=false",
+                  "--/renderer/multiGpu/enabled=false"]
+    app = SimulationApp({"headless": not args.gui, "renderer": "RayTracedLighting",
+                         "extra_args": nurec_args if args.mode == "nav" else []})
 
     import numpy as np
     from pxr import UsdGeom, UsdPhysics, Gf, Vt, Sdf
