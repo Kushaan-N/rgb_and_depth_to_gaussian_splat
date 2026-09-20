@@ -1,0 +1,26 @@
+# Data and outputs live on scratch, never in the repo (see env/cear_env.sh).
+data/
+outputs/
+*.usd
+*.usdz
+*.ply
+*.bag
+*.aedat4
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv*/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Generated figures / large artifacts accidentally written under the repo
+*.png
+*.mp4
+!docs/**/*.png
+
+# Editor / OS
+.DS_Store
+*.swp
