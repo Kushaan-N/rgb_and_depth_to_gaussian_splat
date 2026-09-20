@@ -160,11 +160,18 @@ Consistent across all three (same rig/room, different object arrangements):
        not more blind batch jobs.
     2. **Rover velocity API** — `DynamicCuboid.set_linear_velocity` was swallowed by a
        try/except (rover drove 0 m); needs the correct Isaac 5.0 rigid-prim velocity call.
+- **DEFINITIVE render blocker (pip Isaac):** the pip `isaacsim[all]` (both **5.0.0.0 and
+  5.1.0.0**) is missing **`omni.rtx.spg`** (the Gaussian-splat render extension) and
+  **`isaacsim.replicator.nurec_utils.setup_for_rendering`**. The 5.1 RTX binary contains
+  NuRec code, but without the SPG extension + the setup step the NuRec `Volume` renders as
+  white fog regardless of camera pose / launch args (tried: on-path recorded poses,
+  `--no-transform`, `skipTonemapping=false`, `multiGpu=false`, 5.0→5.1). These ship only
+  with the **full Isaac Sim = the NGC container** (`nvcr.io/nvidia/isaac-sim`), which needs
+  an NGC API key to pull (apptainer is available on Unity). → to render the splat
+  interactively in Isaac, use the container; pip Isaac can do the physics but not the splat.
 - **What IS proven for the end goal**: physics/collider correct in Isaac (Gate 5), splat is
-  photorealistic and renderable (3DGRUT), a controllable body composes into the world. The
-  cleanest "drive-through the splat" video is likely to *render the camera path with 3DGRUT*
-  (which works) and drive the body in Isaac for physics — rather than rendering the splat
-  inside Isaac. Recommended next step.
+  photorealistic and renderable (3DGRUT native renderer), a controllable body composes into
+  the Isaac world. Interactive splat-in-Isaac is blocked only on the NGC container.
 - ParticleField vs NuRec in-sim comparison + FPS: TODO.
 
 ## What does not work (the most valuable section)
