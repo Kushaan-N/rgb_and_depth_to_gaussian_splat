@@ -14,9 +14,11 @@ set -euo pipefail
 CEAR_WS="${CEAR_WS:-/scratch4/workspace/${USER}-cear}"
 export THREEDGRUT_DIR="${THREEDGRUT_DIR:-$CEAR_WS/3dgrut}"
 export UV_CACHE_DIR="$CEAR_WS/uv-cache" UV_LINK_MODE=copy
-unset UV_EXCLUDE_NEWER 2>/dev/null || true
 
 module load cuda/12.4.1 gcc/9.4.0 uv/latest 2>/dev/null || module load cuda/12.4.1 gcc/9.4.0
+# the uv module re-sets UV_EXCLUDE_NEWER (1-week cutoff) which filters out CUDA runtime
+# wheels torch 2.6.0+cu124 needs — unset it AFTER loading the module.
+unset UV_EXCLUDE_NEWER 2>/dev/null || true
 export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"
 # build for A100 (8.0), L40S (8.9), H100 (9.0) so the env runs on any of our GPUs
 export TORCH_CUDA_ARCH_LIST="8.0;8.9;9.0"
