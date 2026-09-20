@@ -76,6 +76,23 @@ def patch_floor_holes(mesh, floor_z, centers_xy, cell=0.10):
                   "patched_area_m2": float(len(holes) * cell * cell)}
 
 
+def flatten_floor(mesh, floor_z, band):
+    """Snap collider vertices within `band` of the floor to the RANSAC plane.
+
+    A physics collider's floor only needs to be a clean, flat contact surface (§8: "ground
+    plane and major obstacles"); real-depth noise + decimation leave it bumpy, which makes
+    a dropped foot sink/hover. Flattening keeps walls/obstacles intact (only the bottom
+    `band` of their geometry, which sits on the floor anyway, is snapped). The visual splat
+    keeps the true floor appearance — this is physics-only.
+    """
+    V = np.asarray(mesh.vertices).copy()
+    near = np.abs(V[:, 2] - floor_z) < band
+    V[near, 2] = floor_z
+    mesh.vertices = o3d.utility.Vector3dVector(V)
+    mesh.compute_vertex_normals()
+    return mesh, int(near.sum())
+
+
 def drop_test(mesh, floor_z, cell=0.10):
     """CPU proxy for Gate 5: cast rays down; check no holes + free-floor contact height."""
     centers = _floor_grid(mesh, cell)
@@ -130,6 +147,11 @@ def build(cfg: dict) -> dict:
         centers = _floor_grid(mesh, 0.10)
         mesh, patch_info = patch_floor_holes(mesh, floor_z, centers, cell=0.10)
 
+    n_flattened = 0
+    if cfg["collider"].get("flatten_floor", True) and np.isfinite(floor_z):
+        mesh, n_flattened = flatten_floor(mesh, floor_z,
+                                          float(cfg["collider"].get("flatten_floor_band_m", 0.04)))
+
     o3d.io.write_triangle_mesh(os.path.join(col_dir, "collider.ply"), mesh)
     o3d.io.write_triangle_mesh(os.path.join(col_dir, "collider.obj"), mesh)
 
@@ -146,6 +168,7 @@ def build(cfg: dict) -> dict:
         "n_triangles_before_decimation": n_before,
         "n_triangles_final": int(len(mesh.triangles)),
         "floor_patch": patch_info,
+        "floor_vertices_flattened": n_flattened,
         "gate5_proxy": gate5, "gate5_proxy_pass": bool(ok),
         "usd_written": usd_written,
         "collider_ply": os.path.join(col_dir, "collider.ply"),
