@@ -9,9 +9,9 @@ those are run._
 | Component | Version / commit | Notes |
 |---|---|---|
 | CPU pipeline env | Python 3.11.15; numpy 2.4.6, scipy 1.17.1, opencv 5.0.0, open3d 0.20.0, pycolmap 4.2.0 | `requirements-cpu.txt` |
-| 3DGRUT | TODO(GPU) — pin commit incl. cx/cy PINHOLE fix | `scripts/train_splat.sh` |
+| 3DGRUT | commit 7397cc92 (2.0.0); torch 2.6.0+cu124, kaolin 0.18.0, tiny-cuda-nn v2.0 | built via `sbatch/build_3dgrut.sbatch` on scratch |
 | Isaac Sim | TODO(GPU) — pin 6.0.x vs 6.1 | `scripts/compose_stage.py` |
-| CUDA / GCC | TODO(GPU) — CUDA 11.8+, GCC ≤ 11 | 3DGRUT requirement |
+| CUDA / GCC | CUDA 12.4.1 (toolkit), GCC 9.4.0 | build + train on Unity `gpu` (A100-80GB) |
 
 ## Sequence — REAL DATA (mocap1_well-lit_trot), downloaded 2026-09-20
 
@@ -74,7 +74,26 @@ those are run._
   **must** use per-image exposure compensation / appearance embeddings (§3.3 swap). This
   confirms v3.1's upgrade of AE from contingency to requirement. AWB: still VERIFY.
 - No `raw_rgb/` in this download, so the TRAP-5 A/B is N/A here.
-- PSNR / SSIM / LPIPS on held-out + off-trajectory renders: TODO(GPU).
+
+### Gate 4 — trained (REAL mocap1, 3DGRUT 3DGUT, A100, 30k iters, ~8.5 min)
+
+- **Held-out: PSNR 26.18, SSIM 0.843, LPIPS 0.321** (metrics.json). Baseline = vanilla
+  3DGUT, depth-seeded init, NO exposure compensation.
+- **Exposure is NOT the cap**: color-corrected PSNR 25.99 ≈ raw 26.18. If AE drift were
+  dominating, cc-PSNR would jump; it doesn't. So the appearance-embedding lever won't help
+  much here — the softness (LPIPS 0.32) is blur + coverage + geometry, not brightness.
+  (This overturns the pre-training expectation; the data settled it.)
+- Visual: rendered held-out views are sharp and photorealistic (shelving + contents, floor
+  tape lines, foam blocks, AGV, wall cables all crisp); mild haze at bright windows + a few
+  faint floaters at dark panels. Renders in
+  `train_3dgrut/.../ours_30000/renders/`. Checkpoint `ckpt_last.pt`.
+- Note: 3DGRUT made its own every-8th val split from the 408 frames I supplied (~51
+  held-out); the separate 59-frame val set (`gating/val_frames.json`) is still available
+  for an independent eval + the off-trajectory renders.
+- **Off-trajectory renders (lateral 0.5 m / height 0.8 m): TODO** — the real drivability
+  predictor; needs one more short render job from the checkpoint.
+- Next-lever read: not exposure. Candidates = depth-supervised/regularized trainer for the
+  low-coverage far floor, or blur-aware 3DGS (§7.6). Decide after the off-traj renders.
 
 ## Phase 5 — collider (Gate 5) — REAL DATA: PASS
 
