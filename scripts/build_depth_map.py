@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pose_utils as pu
 import image_utils as iu
 import gating_utils as gu
-from build_poses import compute_world_cam
+from build_poses import compute_world_cam, depth_poses
 
 
 def fuse(cfg, frames, Twc, calib, indices):
@@ -81,7 +81,8 @@ def build(cfg: dict) -> dict:
     dmap_dir = os.path.join(out_root, "depth_map")
     os.makedirs(dmap_dir, exist_ok=True)
 
-    kept, Twc, calib, *_ = compute_world_cam(cfg)
+    kept, Twc, calib, interp, mocap, _ = compute_world_cam(cfg)
+    Twc_depth = depth_poses(cfg, kept, mocap, interp, calib)   # TRAP 7: pose at depth time
     ts = [f.t for f in kept]
     centers = Twc[:, :3, 3]
 
@@ -89,12 +90,13 @@ def build(cfg: dict) -> dict:
     keep, info = gu.motion_gate(cfg, ts, centers,
                                 omega_percentile_keep=float(g["omega_percentile_keep"]),
                                 min_sep=float(g["spatial_min_sep_m"]))
+    keep, n_preamble = gu.apply_preamble_exclusion(cfg, ts, keep)   # TRAP 8
     gated = list(np.where(keep)[0])
     if len(gated) < 3:
         raise RuntimeError(f"only {len(gated)} depth frames survived gating — loosen "
                            "gating.omega_percentile_keep / spatial_min_sep_m")
 
-    pcd, mesh = fuse(cfg, kept, Twc, calib, gated)
+    pcd, mesh = fuse(cfg, kept, Twc_depth, calib, gated)
     o3d.io.write_point_cloud(os.path.join(dmap_dir, "fused_cloud.ply"), pcd)
     o3d.io.write_triangle_mesh(os.path.join(dmap_dir, "fused_mesh.ply"), mesh)
 
@@ -115,6 +117,7 @@ def build(cfg: dict) -> dict:
     meta = {
         "n_depth_frames_total": len(kept),
         "n_depth_frames_gated": len(gated),
+        "n_excluded_preamble": int(n_preamble),
         "omega_threshold_rad_s": info["omega_threshold"],
         "truncation_range_m": [cfg["depth"]["min_range_m"], cfg["depth"]["max_range_m"]],
         "voxel_size_m": cfg["fusion"]["voxel_size_m"],
@@ -136,7 +139,8 @@ def main():
     cfg = pu.load_config(args.config)
     m = build(cfg)
     print(f"[build_depth_map] gated {m['n_depth_frames_gated']}/{m['n_depth_frames_total']} "
-          f"depth frames (‖ω‖ ≤ {m['omega_threshold_rad_s']:.3f} rad/s)")
+          f"depth frames (‖ω‖ ≤ {m['omega_threshold_rad_s']:.3f} rad/s; "
+          f"{m['n_excluded_preamble']} excluded as sync preamble)")
     print(f"[build_depth_map] fused points={m['n_fused_points']}  "
           f"mesh tris={m['n_mesh_triangles']}  seed points={m['n_seed_points']}")
     print(f"[build_depth_map] truncation range {m['truncation_range_m']} m, "
