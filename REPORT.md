@@ -13,20 +13,43 @@ those are run._
 | Isaac Sim | TODO(GPU) — pin 6.0.x vs 6.1 | `scripts/compose_stage.py` |
 | CUDA / GCC | TODO(GPU) — CUDA 11.8+, GCC ≤ 11 | 3DGRUT requirement |
 
-## Sequence
+## Sequence — REAL DATA (mocap1_well-lit_trot), downloaded 2026-09-20
 
-- Sequence: `mocap1_well-lit_trot` (planned primary target).
-- Pose source: OptiTrack (MoCap.txt) — TODO: confirm at Gate 1 on real download.
-- Frame counts (RGB / depth, before → after gating): TODO.
+- Pose source: OptiTrack `MoCap.txt`, **120 Hz**, 12212 poses, 102 s.
+- Streams (Gate 1 PASS): RGB 5789 @ 59.6 Hz (640×480), IMU 400 Hz, joints 100 Hz; 97 s.
+- **No `raw_rgb/`** in the download — only `rgb/` (processed). TRAP-5 A/B is moot here.
+- `depth/` holds BOTH `*_depth_rgb` (5789, used) and `*_depth_event` projections;
+  `raw_depth/` is depth-cam-frame. Depth 16-bit / 1 mm / 0=invalid confirmed; raw range up
+  to 48 m (far noise) → 4 m truncation handles it; ~11% invalid pixels.
+- Intrinsics (RGB): fx=381.05 fy=380.63 cx=316.61 cy=248.54, radtan dist
+  [-0.0582, 0.0693, 0.00036, -0.00012, -0.0221] (OpenCV order).
+- `realsense_timestamp.txt` is ONE filename per line (depth_rgb / depth_event / rgb),
+  not columns — parser is format-agnostic. RGB and depth timestamps differ (TRAP 7, real).
+- Also downloaded + arranged: mocap2 (4.88 GB) and mocap3 (5.77 GB) well-lit_trot
+  (same room, different object arrangements — never joint-train across them).
 
-## Phase 2 — poses (Gate 2 / 2b)
+## Resolved conventions (from real calibration + data)
 
-- Verified transform chain (world → RGB optical), written explicitly: TODO.
-- COLMAP writer conventions (TRAP 1b): world-to-camera, scalar-first quats — round-trip
-  verified at Gate 2b.
-- Gate 2 reprojection images: TODO (`$CEAR_OUT/.../gate2/`).
-- Gate 2b round-trip result: TODO.
-- Trajectory extent + viewing-direction coverage: TODO.
+- **TRAP 4 direction**: CEAR `T_rgb_marker`/`T_rgb_robot` map marker→rgb / robot→rgb, i.e.
+  `marker_to_cam` / `robot_to_cam` (opposite of the synthetic default). Set in config.
+- **Up-axis = Y**: MoCap xyz ranges [5.54, 0.055, 3.67] m — axis 1 (near-constant height)
+  is up. `world_up: y` confirmed by data.
+- **TRAP 3 offsets** match the calibration page exactly (RealSense +0.004611, IMU
+  −0.004012); clock-drift check reports ~5.2 ms end-to-end (measured after the preamble) —
+  flagged (> 2 ms tol) as a candidate for linear drift correction; Gate 2 still passes with
+  constant offsets, so its impact is bounded.
+- **TRAP 8 preamble** (mocap1): pitch swing ≈ 2–10 s, settle 10–16 s, locomotion from
+  ≈ 16 s → `preamble_end ≈ 16.0 s` (auto-detected), excluded from training + fusion.
+
+## Phase 2 — poses (Gate 2 / 2b) — REAL DATA: PASS
+
+- Transform chain: `T_world_cam = up_axis(y→z) @ (T_world_marker(interp @ t) @ T_marker_cam)`,
+  T_marker_cam = inv(T_rgb_marker); COLMAP stores inv(T_world_cam) world→cam scalar-first.
+- **Gate 2 PASS**: mean grayscale warp err **5.59 / 255** over 20 pairs (k=10). Triptychs
+  in `$CEAR_OUT/mocap1_well-lit_trot/gate2/` visually confirm floor/boxes/shelf reproject
+  onto themselves. **Gate 2b PASS**: reloaded-model err identical, pose drift 8.8e-10.
+- Trajectory: extent [5.54, 3.66, 0.056] m, path 31.2 m — healthy 2-D floor coverage
+  (the tiny 3rd axis is the near-constant camera height, not 1-D motion).
 
 ## Phase 3 — depth map (Gate 3)
 
