@@ -147,9 +147,24 @@ Consistent across all three (same rig/room, different object arrangements):
   on the reconstructed floor at **0.0657 m = floor+radius, err ~2e-8 m**; 1/5 fell through a
   collider gap the floor-patch missed (coverage artifact, not physics). Job 3:52 on L40S.
   Result: `$CEAR_OUT/mocap1_well-lit_trot/isaac/drop_result.json`.
-- Robot: switched from quadruped to a **wheeled robot** (no locomotion policy / no Mini
-  Cheetah USD needed) to serve the "navigate a robot in the splat world" goal directly.
-- Nav (drive wheeled robot in the splat + render) : IN PROGRESS.
+- Robot: switched from quadruped to a **wheeled/rigid rover** (no locomotion policy / no
+  Mini Cheetah USD; the compute node can't reach NVIDIA's S3 asset server for a Jetbot USD).
+- Nav status: the rover composes into the scene and the NuRec splat loads + renders
+  non-blank, BUT the programmatic on-path camera view **whites out** in Isaac. Two bounded
+  issues remain (neither is a reconstruction problem):
+    1. **NuRec-in-Isaac camera/render integration** — the splat renders *perfectly* via
+       3DGRUT's native renderer (the 28 dB on-path frames in `render_ontraj/`), so the
+       whiteout is an Isaac-side camera-convention / NuRec render-setting detail. Tried
+       `--no-transform` re-export (frame align) and on-path recorded poses; still white.
+       Needs an interactive Isaac session (or the correct NuRec viewport/exposure config),
+       not more blind batch jobs.
+    2. **Rover velocity API** — `DynamicCuboid.set_linear_velocity` was swallowed by a
+       try/except (rover drove 0 m); needs the correct Isaac 5.0 rigid-prim velocity call.
+- **What IS proven for the end goal**: physics/collider correct in Isaac (Gate 5), splat is
+  photorealistic and renderable (3DGRUT), a controllable body composes into the world. The
+  cleanest "drive-through the splat" video is likely to *render the camera path with 3DGRUT*
+  (which works) and drive the body in Isaac for physics — rather than rendering the splat
+  inside Isaac. Recommended next step.
 - ParticleField vs NuRec in-sim comparison + FPS: TODO.
 
 ## What does not work (the most valuable section)
