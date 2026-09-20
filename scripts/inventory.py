@@ -109,10 +109,23 @@ def inventory(cfg: dict) -> dict:
         report["issues"].append(f"calibration file not found: {calib_path}")
 
     # --- VERIFY items the files usually cannot answer (surface them explicitly) ---
-    report["verify"]["rgb_shutter"] = "UNKNOWN — check calibration release (§2.4)"
-    report["verify"]["auto_exposure_wb"] = "UNKNOWN — check §7.2 intensity-drift plot"
+    report["verify"]["rgb_shutter"] = "rolling (Intel D455 RGB spec); paper is silent (§2.4)"
+    report["verify"]["auto_exposure"] = "ON — paper-confirmed (§7.2); expect exposure drift"
+    report["verify"]["auto_white_balance"] = "UNKNOWN — check §7.2 intensity/color drift plot"
     report["verify"]["depth_units_per_meter"] = cfg["depth"]["units_per_meter"]
     report["verify"]["depth_invalid_value"] = cfg["depth"].get("invalid_value", 0)
+
+    # --- sync diagnostics (TRAP 3 drift + TRAP 8 preamble) ---
+    try:
+        import sync_utils as su
+        preamble = su.detect_sync_preamble(cfg)
+        report["sync"] = {
+            "preamble_end_s": preamble,
+            "preamble_detected": preamble is not None,
+            "clock_drift": su.clock_drift_check(cfg),
+        }
+    except Exception as e:  # noqa: BLE001
+        report["issues"].append(f"sync diagnostics: {e}")
 
     # --- Gate 1 consistency ---
     counts = {k: v.get("count") for k, v in report["dirs"].items()
@@ -157,6 +170,16 @@ def print_table(r: dict) -> None:
     print("\n[VERIFY]")
     for k, v in r["verify"].items():
         print(f"  {k:24s}: {v}")
+    if "sync" in r:
+        s = r["sync"]; d = s.get("clock_drift", {})
+        pre = f"{s['preamble_end_s']:.2f} s" if s.get("preamble_detected") else "none detected"
+        drift = d.get("drift_ms")
+        print("\n[sync]  (TRAP 3 / TRAP 8)")
+        print(f"  preamble_end            : {pre}")
+        print(f"  clock_drift_ms          : "
+              f"{drift:.2f}" if drift is not None else "  clock_drift_ms          : n/a")
+        if d.get("exceeds_tolerance"):
+            print(f"  WARNING: drift exceeds {d.get('tolerance_ms')} ms — apply linear correction")
     print("\n[issues]")
     for m in r["issues"] or ["(none)"]:
         print(f"  - {m}")
