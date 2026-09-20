@@ -29,7 +29,11 @@ nvidia-smi --query-gpu=name --format=csv,noheader
 ARGS="--collider $OUT/collider/collider.obj --mode $MODE --floor-z $FLOORZ --out-dir $OUT/isaac_container"
 [ "$MODE" = "nav" ] && ARGS="$ARGS --splat-usd $OUT/usd/scene_nurec.usdz --cam-model $OUT/colmap/sparse/0"
 
-apptainer exec --nv \
-  --bind "$CEAR_WS:$CEAR_WS" --bind "$REPO:$REPO" --home "$CHOME:$HOME" \
-  "$SIF" /isaac-sim/python.sh "$REPO/scripts/compose_stage.py" $ARGS
+# copy the script to scratch so the container never depends on /work being mounted, and
+# force --pwd /isaac-sim (the host CWD on /work isn't cleanly mounted on compute nodes,
+# which breaks python.sh's `cd /isaac-sim`).
+cp "$REPO/scripts/compose_stage.py" "$CEAR_WS/compose_stage.py"
+apptainer exec --nv --pwd /isaac-sim \
+  --bind "$CEAR_WS:$CEAR_WS" --home "$CHOME:$HOME" \
+  "$SIF" /isaac-sim/python.sh "$CEAR_WS/compose_stage.py" $ARGS
 echo "ISAAC_CONTAINER_DONE $SEQ $MODE"
