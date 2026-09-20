@@ -1,0 +1,97 @@
+# Config for the primary target sequence (plan §2.5).
+#
+# This file is the SINGLE SOURCE OF TRUTH for every convention that the plan's
+# TRAPs warn about (quaternion order, timestamp units, sensor offsets, frame
+# directions, up-axis). Scripts must read conventions from here, never hardcode.
+#
+# Fields marked "VERIFY" are the working assumptions from the plan/paper; they
+# must be confirmed against the actual download in Phase 1 (inventory.py) and
+# the Gate 2 reprojection check before they are trusted.
+
+sequence:
+  name: mocap1_well-lit_trot
+  # data_root resolves ${CEAR_DATA} from env/cear_env.sh.
+  data_root: "${CEAR_DATA}/mocap1_well-lit_trot"
+  pose_file: MoCap.txt          # OptiTrack ground truth (this sequence). SLAM seqs: FasterLIO.txt
+  rgb_dir: raw_rgb              # TRAP 5: raw_rgb is the default (unmanipulated photometry);
+                               #         also A/B against rgb/ in Phase 4.
+  depth_dir: depth             # depth already projected into the RGB frame (§6.1). VERIFY.
+  raw_depth_dir: raw_depth     # depth in the DEPTH camera frame (not used by default).
+  timestamp_table: realsense_timestamp.txt
+  imu_file: vectornav.txt
+  joint_file: mini_cheetah_joint.txt
+
+# --- timestamps -----------------------------------------------------------
+# Everything is converted to float SECONDS on the EVENT-camera clock.
+timestamps:
+  units:                       # TRAP 2: units differ between files
+    rgb: microseconds
+    imu: microseconds
+    joints: microseconds
+    pose: seconds
+  # TRAP 3: per-sensor offsets (seconds). t_event = t_sensor + offset.
+  # Sign convention VERIFY at Gate 2 (a wrong sign shows as a directional
+  # smear that scales with motion in the reprojection warp).
+  offsets_s:
+    event: 0.0                 # reference clock
+    rgb: 0.004611              # RealSense (depth) — CRITICAL
+    imu: -0.004012             # VectorNav
+    joints: 0.004611
+    # velodyne: 0.003044       # LiDAR — NOT USED (project constraint)
+
+# --- rotation conventions -------------------------------------------------
+quaternions:                   # TRAP 1 / 1b
+  pose_order: xyzw             # MoCap.txt / FasterLIO.txt: scalar-LAST
+  imu_order: wxyz              # vectornav.txt: scalar-FIRST
+  colmap_order: wxyz           # COLMAP images.txt: scalar-FIRST, world-to-camera
+
+# --- coordinate frames ----------------------------------------------------
+frames:
+  world_up: y                  # OptiTrack world is Y-up (§5.4). VERIFY.
+  target_up: z                 # pipeline converts everything to Z-up (USD/Isaac, floor z=0)
+  pose_frame: marker           # TRAP 4: MoCap reports the MARKER frame, not the RGB optical
+                               #         frame. VERIFY (marker | robot).
+  # Extrinsic direction of each stored calibration transform. VERIFY against the
+  # calibration release. "cam_to_marker" means the stored 4x4 maps a point in the
+  # RGB optical frame to the marker frame.
+  extrinsic:
+    rgb_marker_direction: cam_to_marker
+    rgb_robot_direction: cam_to_robot
+
+# --- camera intrinsics ----------------------------------------------------
+intrinsics:
+  # Populated from the calibration release by inventory.py; undistortion (§7.2)
+  # then writes a plain PINHOLE camera for the trainer.
+  calib_file: "${CEAR_DATA}/mocap1_well-lit_trot/calibration/rgb_intrinsics.yaml"
+  image_width: 640             # VERIFY at Gate 1
+  image_height: 480
+
+# --- depth ----------------------------------------------------------------
+depth:
+  units_per_meter: 1000.0      # 16-bit, 1 mm/unit (typical RealSense) — VERIFY at Gate 1
+  invalid_value: 0             # 0 = invalid/no-return — VERIFY
+  min_range_m: 0.2
+  max_range_m: 4.0             # §2.7 range truncation to bound D455 noise growth; tune 3-5
+
+# --- depth fusion (Phase 3) ----------------------------------------------
+fusion:
+  voxel_size_m: 0.025          # TSDF voxel (2-3 cm)
+  sdf_trunc_m: 0.10
+  seed_downsample_m: 0.03      # voxel-downsample for points3D.txt seed
+
+# --- blur / motion gating (Phase 4) --------------------------------------
+gating:
+  omega_percentile_keep: 50    # keep the sharpest ~50% by |omega|; then tune
+  laplacian_min: 50.0          # variance-of-Laplacian floor (sharpness); tune
+  spatial_min_sep_m: 0.03      # drop near-duplicate viewpoints
+  holdout_every: 8             # §7.4: hold out every 8th GATED frame (split after gating)
+
+# --- collider (Phase 5) ---------------------------------------------------
+collider:
+  method: tsdf_marching_cubes  # tsdf_marching_cubes | poisson (nvblox is Option B, external)
+  max_triangles: 50000
+  floor_patch: true            # patch unobserved floor holes with the RANSAC plane (§8)
+
+# --- outputs --------------------------------------------------------------
+paths:
+  out_root: "${CEAR_OUT}/mocap1_well-lit_trot"
