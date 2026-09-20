@@ -99,14 +99,20 @@ def main():
 
     from isaacsim import SimulationApp
     # nav needs rendering (RTX); drop is physics-only and can run truly headless.
-    # NuRec Gaussian volumes need these RTX settings (what nurec_utils.setup_for_rendering
-    # would apply — that helper isn't in the pip distribution, but the 5.1 RTX renderer has
-    # NuRec built in, so we set them via launch args): keep gaussian tonemapping on, and
-    # single-GPU (NuRec volume path requires multiGpu off).
-    # plain NuRec Volume assets (ours) do NOT need omni.rtx.spg (that's only for SPG/PPISP
-    # assets, and it isn't in the registry anyway — enabling it aborts the app). The RTX
-    # renderer already has NuRec; these settings + nurec_utils.setup_for_rendering do it.
+    #
+    # NuRec (neural Gaussian volume) rendering is NOT bundled in the base isaac-sim:5.1.0
+    # image: the render feature lives in the extension `omni.rtx.spg` and the setup helper in
+    # `isaacsim.replicator.nurec_utils`, both of which are pulled from NVIDIA's extension
+    # registry on demand. Unity compute nodes have outbound HTTPS, so we turn the registry ON
+    # (`registryEnabled=true`) and `--enable` the extensions at launch; Kit downloads them into
+    # the scratch-bound kit data dir (persists across runs). Then the official recipe is
+    # `/rtx/spg/enabled=true` + nurec carb settings + nurec_utils.setup_for_rendering(stage).
     nurec_args = ["--/renderer/multiGpu/enabled=false",
+                  "--/app/extensions/registryEnabled=true",
+                  "--/app/extensions/installUncertifiedExts=true",
+                  "--enable", "omni.rtx.spg",
+                  "--enable", "isaacsim.replicator.nurec_utils",
+                  "--/rtx/spg/enabled=true",
                   "--/omni/rtx/nre/compositing/disableNuRecPostProcessings=true",
                   "--/rtx/rtpt/gaussian/skipTonemapping/enabled=false"]
     app = SimulationApp({"headless": not args.gui, "renderer": "RayTracedLighting",
@@ -142,21 +148,39 @@ def main():
     if args.mode == "drop":
         result = gate5_drop(world, DynamicSphere, np, cx, cy, args.floor_z)
     else:
+        # a dome light so the reconstructed geometry (collider + rover) is visible under RTX
+        # even if the NuRec volume fails to render — a lit navigation is still real evidence,
+        # strictly better than the all-black frames from no-light + no-splat.
+        from pxr import UsdLux
+        UsdLux.DomeLight.Define(stage, "/World/domeLight").CreateIntensityAttr(1000.0)
+
+        result_setup, setup_err = "no_splat", None
         if args.splat_usd:
             add_reference_to_stage(usd_path=args.splat_usd, prim_path="/World/splat")
-            print(f"[compose] referenced splat: {args.splat_usd}")
-            # NuRec render setup (wires the SPG/gaussian render path) — present in the full
-            # Isaac Sim container; absent from pip Isaac (there we fall back to launch args).
+            print(f"[compose] referenced splat: {args.splat_usd}", flush=True)
+            # ensure the registry-downloaded exts are enabled (idempotent if --enable already
+            # did it at launch), then apply the official NuRec render setup.
+            from isaacsim.core.utils.extensions import enable_extension
+            for ext in ("omni.rtx.spg", "isaacsim.replicator.nurec_utils"):
+                try:
+                    enable_extension(ext)
+                except Exception as e:  # noqa: BLE001
+                    setup_err = f"enable {ext}: {type(e).__name__}: {e}"
+                    print(f"[compose] {setup_err}", flush=True)
+            app.update()   # let the extension manager resolve/download before importing
             try:
                 from isaacsim.replicator.nurec_utils import setup_for_rendering
                 setup_for_rendering(stage)
-                print("[compose] nurec_utils.setup_for_rendering applied")
+                print("[compose] nurec_utils.setup_for_rendering applied", flush=True)
                 result_setup = "nurec_utils"
             except Exception as e:  # noqa: BLE001
-                print(f"[compose] nurec_utils unavailable ({type(e).__name__}: {e}); using launch args only")
+                setup_err = f"{type(e).__name__}: {e}"
+                print(f"[compose] nurec_utils unavailable ({setup_err}); launch args only", flush=True)
                 result_setup = "launch_args_only"
         result = nav_rover(world, app, args, cx, cy)
-        result["nurec_setup"] = result_setup if args.splat_usd else "no_splat"
+        result["nurec_setup"] = result_setup
+        if setup_err:
+            result["nurec_setup_err"] = setup_err
 
     json.dump(result, open(os.path.join(args.out_dir, f"{args.mode}_result.json"), "w"), indent=2)
     print("[compose] result:", json.dumps(result))
