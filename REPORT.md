@@ -64,19 +64,26 @@ those are run._
 - Floor coverage within 4 m ≈ 46% (honest — 7.5×5.5 m room, 0.3 m camera; far floor is
   only fused when the trajectory passes near it). Coverage map in `$CEAR_OUT/.../gate3/`.
 
-## Phase 4 — training (Gate 4) — TODO(GPU)
+## Phase 4 — prep done (Gate 4 training is TODO(GPU))
 
-- Blur gating: retained frame count + ‖ω‖ histogram: TODO.
-- rgb/ vs raw_rgb/ A/B (both undistorted): TODO.
-- AE/AWB: auto-exposure CONFIRMED ON (paper §7.2); `precondition_frames.py` quantifies the
-  drift per sequence to decide the exposure-comp route. AWB state TODO (VERIFY). 
-- PSNR / SSIM / LPIPS on held-out: TODO(GPU).
-- Off-trajectory renders (lateral 0.5 m, height 0.8 m): TODO(GPU).
+- Blur/motion gating (REAL mocap1): kept **467/5789** frames (‖ω‖ ≤ 0.28 rad/s + laplacian
+  ≥ 50 + spatial spread), split **408 train / 59 val** (hold every 8th). Train COLMAP model
+  + depth-seeded points3D staged at `$CEAR_OUT/.../colmap_train/sparse/0`.
+- **AE finding (REAL, important)**: undistorted 5789 frames (real distortion applied);
+  mean-intensity range **64.8 / 255** over the trajectory → drift SIGNIFICANT → the trainer
+  **must** use per-image exposure compensation / appearance embeddings (§3.3 swap). This
+  confirms v3.1's upgrade of AE from contingency to requirement. AWB: still VERIFY.
+- No `raw_rgb/` in this download, so the TRAP-5 A/B is N/A here.
+- PSNR / SSIM / LPIPS on held-out + off-trajectory renders: TODO(GPU).
 
-## Phase 5 — collider (Gate 5)
+## Phase 5 — collider (Gate 5) — REAL DATA: PASS
 
-- Collider provenance (TSDF vs nvblox): TODO.
-- Floor patches applied (every region logged): TODO.
+- Provenance: TSDF marching-cubes mesh (823k tris) → decimated to 58k, floor holes patched
+  (**4006 cells ≈ 40 m²** — 54% of the floor was unobserved within 4 m, patched with the
+  RANSAC plane), then near-floor vertices flattened to the plane for a clean contact surface.
+- **Gate 5 CPU drop-test proxy: PASS** — 100% ray hits (no holes), floor contact err
+  p95 **16.3 mm** (< 30 mm). Real physics drop test is Phase 6 (Isaac, L40S).
+- USD collider written in Phase 6 (no pxr in the CPU env).
 - Drop-test floor height error: TODO.
 
 ## Phase 6 — Isaac Sim (Gate 6) — TODO(GPU)
