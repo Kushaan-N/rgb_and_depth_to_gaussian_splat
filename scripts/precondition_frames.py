@@ -44,9 +44,13 @@ def ae_awb_report(mean_intensity: np.ndarray, times: np.ndarray, out_png: str) -
     ax.set_xlabel("time (s)"); ax.set_ylabel("mean intensity (0-255)")
     ax.set_title(f"AE/AWB check — range {rng:.1f}, std {std:.1f}, slope {slope:.2f}/s")
     fig.tight_layout(); fig.savefig(out_png, dpi=110); plt.close(fig)
-    likely_ae = rng > 15.0 or abs(slope) > 5.0
+    # Auto-exposure is CONFIRMED ON (paper, §7.2); this quantifies HOW MUCH the brightness
+    # actually drifts in this sequence, to decide whether per-image exposure compensation /
+    # appearance embeddings are needed or the drift is modest in the well-lit mocap room.
+    drift_significant = rng > 15.0 or abs(slope) > 5.0
     return {"intensity_range": rng, "intensity_std": std, "slope_per_s": slope,
-            "likely_auto_exposure": bool(likely_ae)}
+            "auto_exposure_confirmed_on": True,
+            "exposure_comp_recommended": bool(drift_significant)}
 
 
 def precondition(cfg: dict) -> dict:
@@ -99,9 +103,9 @@ def main():
     for sub, info in r["undistorted"].items():
         ae = info["ae"]
         print(f"[precondition] {sub}: undistorted {info['n']} frames -> {info['out_dir']}")
-        print(f"               AE/AWB: intensity range {ae['intensity_range']:.1f}, "
+        print(f"               AE confirmed ON (§7.2). intensity range {ae['intensity_range']:.1f}, "
               f"slope {ae['slope_per_s']:.2f}/s -> "
-              f"{'LIKELY auto-exposure (use appearance embeddings)' if ae['likely_auto_exposure'] else 'looks fixed'}")
+              f"{'drift SIGNIFICANT — use exposure comp / appearance embeddings' if ae['exposure_comp_recommended'] else 'drift modest — seed-only may suffice'}")
 
 
 if __name__ == "__main__":
