@@ -39,7 +39,8 @@ those are run._
 
 - Blur gating: retained frame count + ‖ω‖ histogram: TODO.
 - rgb/ vs raw_rgb/ A/B (both undistorted): TODO.
-- AE/AWB finding and exposure-comp route: TODO.
+- AE/AWB: auto-exposure CONFIRMED ON (paper §7.2); `precondition_frames.py` quantifies the
+  drift per sequence to decide the exposure-comp route. AWB state TODO (VERIFY). 
 - PSNR / SSIM / LPIPS on held-out: TODO(GPU).
 - Off-trajectory renders (lateral 0.5 m, height 0.8 m): TODO(GPU).
 
@@ -75,6 +76,10 @@ without the real download or a GPU.
 | Gate 2b (COLMAP round-trip) | PASS — reloaded-model pose drift 7e-10 |
 | Gate 3 (depth map) | PASS — floor z=−0.006 m, thickness 3 mm, split-half Δz 0.4 mm, C2C median 2.3 mm, reproj 99.4% |
 | Gate 5 (collider, CPU drop-test proxy) | PASS — 100% ray hits, floor contact err p95 3.5 mm |
+| TRAP 7 (separate RGB/depth timestamps) | PASS — 4 ms gap parsed, depth fused at its own timestamp |
+| TRAP 8 (sync-preamble exclusion) | PASS — 2 s preamble detected + excluded from training + fusion |
+| TRAP 3 (clock-drift check) | PASS — residual IMU↔pose lag ~0 on the clean fixture |
+| §5.3 (ΔT extrinsic refinement) | PASS — negligible/not-significant on a correct extrinsic |
 
-See `docs/GPU_HANDOFF.md` for the full status and the exact GPU commands. Gates 4 and 6
-require the GPU stages and are TODO(GPU).
+Plan v3.1 (paper-reconciled): 20 pytest tests green. See `docs/GPU_HANDOFF.md` for full
+status and exact GPU commands. Gates 4 and 6 require the GPU stages and are TODO(GPU).
