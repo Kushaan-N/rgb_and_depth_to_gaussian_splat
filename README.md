@@ -67,6 +67,8 @@ python scripts/verify_depth_map.py    --config configs/mocap1_well-lit_trot.yaml
 python scripts/precondition_frames.py --config configs/mocap1_well-lit_trot.yaml  # Phase 4
 python scripts/gate_frames.py         --config configs/mocap1_well-lit_trot.yaml  # Phase 4
 python scripts/build_collider.py      --config configs/mocap1_well-lit_trot.yaml  # Phase 5
+# optional, only if Gate 2 passes but geometry is soft (§5.3):
+python scripts/refine_extrinsic.py    --config configs/mocap1_well-lit_trot.yaml
 # --- GPU boundary: everything above is CPU. Stop here and hand off. ---
 ```
 
@@ -75,5 +77,8 @@ python scripts/build_collider.py      --config configs/mocap1_well-lit_trot.yaml
 
 ## Status
 
-CPU pipeline (Phases 1–5) implemented and tested on the synthetic fixture. GPU scripts
-(Phases 4-train, 6) written but not run. See `REPORT.md`.
+Plan **v3.1** (paper-reconciled). CPU pipeline (Phases 1–5) implemented and tested on the
+synthetic fixture — 20 pytest tests green, including the v3.1 traps: separate RGB/depth
+timestamps (TRAP 7), sync-preamble exclusion (TRAP 8), clock-drift check (TRAP 3), and the
+constant-extrinsic ΔT refinement (§5.3). GPU scripts (Phases 4-train, 6) written but not
+run. See `REPORT.md` and `docs/GPU_HANDOFF.md`.
