@@ -67,45 +67,53 @@ def detect_sync_preamble(cfg) -> Optional[float]:
     or None if none is detected. A manual override (cfg.gating.preamble_end_s) wins — the
     auto-detector is a heuristic and this is a Phase-1 VERIFY item.
 
-    Auto-detection: the preamble is a large, sustained pitch oscillation at the very start.
-    In 1 s windows, flag those whose dominant-gyro-axis std exceeds `swing_factor` x the
-    whole-sequence median; the preamble is the leading contiguous run of flagged windows.
+    Auto-detection (robust to a quiet lead-in): the preamble is a large, mostly SINGLE-AXIS
+    pitch swing somewhere in the first ~25 s, typically flanked by stationary periods (the
+    robot settles, the ball is thrown), after which balanced multi-axis LOCOMOTION begins.
+    We find the swing, then return the time sustained locomotion starts (everything before
+    it — swing + settle + ball — is excluded). Heuristic: eyeball it and set
+    `gating.preamble_end_s` to override.
     """
+    import os
     g = cfg.get("gating", {})
     override = g.get("preamble_end_s")
     if override is not None:
         return float(override)
 
-    t, _ = _imu_omega_mag(cfg)
-    import os
     imu = pu.parse_vectornav(os.path.join(cfg["sequence"]["data_root"],
                                           cfg["sequence"]["imu_file"]), cfg)
-    if len(imu.t) < 10:
+    if len(imu.t) < 30:
         return None
-    axis = int(np.argmax(imu.omega[: min(len(imu.t), 2000)].std(axis=0)))  # dominant early axis
-    sig = imu.omega[:, axis]
+    t = imu.t - imu.t[0]
     win = 1.0
-    t0, t1 = float(imu.t[0]), float(imu.t[-1])
-    edges = np.arange(t0, t1, win)
-    stds = np.array([sig[(imu.t >= e) & (imu.t < e + win)].std() if
-                     ((imu.t >= e) & (imu.t < e + win)).sum() > 3 else 0.0 for e in edges])
-    if len(stds) < 3:
+    edges = np.arange(0.0, float(t[-1]), win)
+    if len(edges) < 4:
         return None
-    # Baseline = steady-state locomotion, taken from the LATTER half of the sequence so it
-    # is not inflated by the preamble itself (which sits at the very start).
-    baseline = np.median(stds[len(stds) // 2:])
-    if baseline <= 1e-9:
-        baseline = np.median(stds)
-    if baseline <= 1e-9:
+    wmean = np.zeros(len(edges)); dom = np.zeros(len(edges))
+    for i, e in enumerate(edges):
+        m = (t >= e) & (t < e + win)
+        if m.sum() < 3:
+            continue
+        wmean[i] = np.linalg.norm(imu.omega[m], axis=1).mean()
+        s = imu.omega[m].std(axis=0)
+        dom[i] = s.max() / (s.sum() + 1e-9)          # 1 => single-axis, ~0.33 => balanced
+
+    loco_level = np.median(wmean[wmean > 1e-6]) if np.any(wmean > 1e-6) else 0.0
+    if loco_level <= 1e-6:
         return None
-    swing_factor = float(g.get("preamble_swing_factor", 2.0))
-    flagged = stds > swing_factor * baseline
-    if not flagged[0]:
-        return None
-    end_idx = 0
-    while end_idx < len(flagged) and flagged[end_idx]:
-        end_idx += 1
-    return float(edges[0] + end_idx * win)
+    loco_thr = 0.5 * loco_level
+    scan = int(min(len(edges), g.get("preamble_max_scan_s", 25)))
+
+    swings = [i for i in range(scan) if wmean[i] > loco_thr and dom[i] > 0.6]
+    if not swings:
+        return None                                   # no clear single-axis swing => no preamble
+
+    hold = 3
+    for i in range(swings[0] + 1, len(edges) - hold):
+        # sustained, balanced motion => locomotion has begun
+        if all(wmean[i + k] > loco_thr for k in range(hold)) and dom[i] < 0.55:
+            return float(edges[i])
+    return float(edges[min(swings[-1] + 1, len(edges) - 1)])   # fallback: just after the swing
 
 
 # --------------------------------------------------------------------------- #
