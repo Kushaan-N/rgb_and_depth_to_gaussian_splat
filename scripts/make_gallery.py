@@ -12,10 +12,16 @@ from __future__ import annotations
 import argparse, base64, glob, os
 
 
-def load_seq(frame_dir, n_max=48, width=560, quality=82):
-    """Subsample frames in `frame_dir`, resize to <=width, JPEG-encode -> list of data URIs."""
+def load_seq(frame_dir, n_max=48, width=560, quality=82, min_mean=20.0):
+    """Subsample frames in `frame_dir`, drop near-black (uncovered) ones, JPEG-embed -> data URIs.
+
+    mocap1's coverage is sparse, so a moving camera produces some black frames (view points into
+    unreconstructed space). We skip those (mean brightness < min_mean) so the player only shows
+    usable frames.
+    """
     import cv2
     fs = sorted(glob.glob(os.path.join(frame_dir, "*.png")))
+    fs = [f for f in fs if (cv2.imread(f) is not None and cv2.imread(f).mean() >= min_mean)]
     if not fs:
         return []
     if len(fs) > n_max:
@@ -24,8 +30,6 @@ def load_seq(frame_dir, n_max=48, width=560, quality=82):
     uris = []
     for f in fs:
         im = cv2.imread(f)
-        if im is None:
-            continue
         h, w = im.shape[:2]
         if w > width:
             im = cv2.resize(im, (width, int(h * width / w)), interpolation=cv2.INTER_AREA)
@@ -68,9 +72,11 @@ def main():
     out = args.out or os.path.join(repo, "results", "results.html")
     os.makedirs(os.path.dirname(out), exist_ok=True)
 
-    robot_dir = find(f"{nav}/navsplat")
-    walk_dir  = find(f"{nav}/walkthrough/camera_0")
-    hero      = find(f"{repo}/docs/figures/robot_in_splat_hero.png", f"{nav}/navsplat/nav_0012.png")
+    robot_dir = find(f"{nav}/navsplat_hq", f"{nav}/navsplat")           # prefer HQ (1280x720)
+    walk_dir  = find(f"{nav}/walkthrough_follow", f"{nav}/walkthrough_hq/camera_0",
+                     f"{nav}/walkthrough/camera_0")                       # prefer upright follow-cam
+    hero      = find(f"{nav}/navsplat_hq/nav_0011.png", f"{repo}/docs/figures/robot_in_splat_hero.png",
+                     f"{nav}/navsplat/nav_0012.png")
     proof     = find(f"{repo}/docs/figures/nurec_render_proof.png")
     onoff     = find(f"{repo}/docs/figures/mocap1_onpath_vs_offpath.png")
 
