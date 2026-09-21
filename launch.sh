@@ -5,7 +5,8 @@
 #   ./launch.sh open              # just (re)build results/results.html (open it in VS Code)
 #   ./launch.sh robot [args...]   # GPU: render the robot navigating the photoreal splat
 #   ./launch.sh walkthrough       # GPU: render the photoreal fly-through of the world
-#   ./launch.sh live              # GPU: LIVE interactive Isaac Sim session (WebRTC stream)
+#   ./launch.sh viser             # GPU: NAVIGABLE real-time splat viewer (browser, via VS Code PORTS)
+#   ./launch.sh live              # GPU: LIVE Isaac Sim session (WebRTC — needs VPN; prefer viser)
 #   ./launch.sh scene <seq>       # run the CPU pipeline on another CEAR sequence (cleaner scene)
 #   ./launch.sh status            # show your queued/running jobs
 #   ./launch.sh help
@@ -53,8 +54,27 @@ case "$CMD" in
     echo "submitting photoreal walkthrough render (6.1.0)…"
     sub nurec_render_test.sbatch "$SEQ" walkthrough.tum walkthrough warmup_fast.yaml "$@" ;;
 
+  viser)
+    # NAVIGABLE real-time viewer (3DGRUT viser web GUI). Submits the job, waits for its node,
+    # then starts a login-node relay so VS Code can forward it. TCP -> works over your setup.
+    LPORT="${PORT:-8090}"
+    echo "submitting navigable viser viewer for $SEQ…"
+    JV=$(sbatch --parsable -A "$ACCT" --export=ALL,CEAR_SIF="$SIF" "$REPO/sbatch/viser_viewer.sbatch" "$SEQ")
+    echo "viser job: $JV — waiting for it to start + serve :8080 …"
+    until squeue -j "$JV" -h -o %T 2>/dev/null | grep -q RUNNING; do sleep 15; done
+    NODE=$(squeue -j "$JV" -h -o %R 2>/dev/null | head -1)
+    until curl -s -m 5 -o /dev/null "http://$NODE:8080" 2>/dev/null; do sleep 10; done
+    pkill -f "viser_proxy.py $LPORT " 2>/dev/null || true
+    setsid nohup python3 "$REPO/scripts/viser_proxy.py" "$LPORT" "$NODE" 8080 \
+      > "$CEAR_WS/viser_proxy.log" 2>&1 < /dev/null & disown 2>/dev/null || true
+    echo "============================================================"
+    echo " Navigable viewer READY (job $JV on $NODE)."
+    echo " In VS Code: PORTS tab -> Forward a Port -> $LPORT -> click the globe."
+    echo " Then drag to orbit / WASD to fly. Stop with:  scancel $JV"
+    echo "============================================================" ;;
+
   live)
-    echo "submitting LIVE interactive Isaac Sim session (WebRTC)…"
+    echo "submitting LIVE Isaac Sim session (WebRTC — needs VPN/direct reach; prefer 'viser')…"
     sub isaac_live.sbatch "$SEQ" "$@"
     echo "Once RUNNING, see the job's .out for the connect URL + the SSH port-forward command." ;;
 
