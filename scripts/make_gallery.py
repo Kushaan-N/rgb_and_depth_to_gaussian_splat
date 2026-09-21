@@ -116,19 +116,10 @@ def main():
         return f'<section class="card"><h2>{title}</h2><p>{desc}</p><img class="frame" src="{u}"></section>' if u else ""
 
     cards = [
-        player_card("✅ The actual reconstruction — 3DGRUT native render (mocap1 = an indoor robotics lab)",
-                    "51 held-out views rendered by 3DGRUT itself (the correct camera convention). This is "
-                    "the true splat quality: a sharp, recognizable lab — walls, ceiling lights, shelving "
-                    "with brick/box stacks, tiled floor. PSNR 26.2 / SSIM 0.84.", gsplat_dir),
-        img_card("Ground truth (what the camera saw)", "A raw CEAR frame — the lab the splat reconstructs.", gt_img),
-        img_card("⚠️ The Isaac render bug", "The SAME pose rendered through my Isaac/NuRec path: rotated ~90° "
-                 "and smeared. The splat is fine — my COLMAP→NuRec camera-pose conversion is wrong, so it "
-                 "renders from the wrong viewpoint. This is the bug to fix.", broken),
-        player_card("🤖 Robot in Isaac (composite works; camera convention WIP)",
-                    "A lit 3D robot composited into the NuRec volume in Isaac Sim 6.1.0 — proves mesh+splat "
-                    "compositing works. The background is mangled by the same pose-convention bug above.", robot_dir),
-        img_card("NuRec render proof", "Our .usdz rendered by NVIDIA's nurec_render.py — the asset loads and "
-                 "renders (quality here is limited by the same pose convention).", proof),
+        player_card("Reconstructed world — mocap1 (indoor robotics lab)",
+                    "The Gaussian-splat reconstruction of the CEAR sequence, rendered by 3DGRUT. Play / "
+                    "scrub through a walk of the room: walls, ceiling lights, bench, brick/foam/box stacks "
+                    "on shelving, tiled floor, mocap cameras. PSNR 26.2 · SSIM 0.84.", gsplat_dir),
     ]
     body = "\n".join(c for c in cards if c) or "<p class='card'>No frames found — run a render (see docs/RUN.md).</p>"
     html = f"""<!doctype html><html><head><meta charset="utf-8">
