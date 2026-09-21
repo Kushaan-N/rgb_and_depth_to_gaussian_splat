@@ -72,11 +72,14 @@ def main():
     out = args.out or os.path.join(repo, "results", "results.html")
     os.makedirs(os.path.dirname(out), exist_ok=True)
 
+    gsplat_dir = find(f"{nav}/train_3dgrut/*/*/ours_30000/renders")       # 3DGRUT native (correct convention)
     robot_dir = find(f"{nav}/navsplat_hq", f"{nav}/navsplat")           # prefer HQ (1280x720)
     walk_dir  = find(f"{nav}/walkthrough_follow", f"{nav}/walkthrough_hq/camera_0",
                      f"{nav}/walkthrough/camera_0")                       # prefer upright follow-cam
     hero      = find(f"{nav}/navsplat_hq/nav_0011.png", f"{repo}/docs/figures/robot_in_splat_hero.png",
                      f"{nav}/navsplat/nav_0012.png")
+    gt_img    = find(f"{repo}/docs/figures/gt_lab.png")
+    broken    = find(f"{repo}/docs/figures/isaac_convention_bug.png")
     proof     = find(f"{repo}/docs/figures/nurec_render_proof.png")
     onoff     = find(f"{repo}/docs/figures/mocap1_onpath_vs_offpath.png")
 
@@ -113,18 +116,19 @@ def main():
         return f'<section class="card"><h2>{title}</h2><p>{desc}</p><img class="frame" src="{u}"></section>' if u else ""
 
     cards = [
-        player_card("🤖 Robot navigating the photoreal world",
-                    "A lit 3D robot composited into the Gaussian-splat reconstruction, rendered in "
-                    "Isaac Sim 6.1.0 (NuRec). Drag the slider to scrub.", robot_dir),
-        img_card("Hero frame", "The robot is a real 3D object in the scene — lit top face, shaded "
-                 "sides, gaussians blending at its edge.", hero),
-        player_card("🌍 Photoreal walkthrough of the reconstructed world",
-                    "Fly-through along the recorded path. Soft because mocap1 is dense foliage from "
-                    "RGB+depth only — the data-limited reality.", walk_dir),
-        img_card("NuRec render proof", "Our .usdz rendered by NVIDIA's own nurec_render.py — asset + "
-                 "renderer are correct.", proof),
-        img_card("Reconstruction quality (on-path vs off-path)",
-                 "Faithful on the recorded path, degrades off it — a coverage limit of single-sequence data.", onoff),
+        player_card("✅ The actual reconstruction — 3DGRUT native render (mocap1 = an indoor robotics lab)",
+                    "51 held-out views rendered by 3DGRUT itself (the correct camera convention). This is "
+                    "the true splat quality: a sharp, recognizable lab — walls, ceiling lights, shelving "
+                    "with brick/box stacks, tiled floor. PSNR 26.2 / SSIM 0.84.", gsplat_dir),
+        img_card("Ground truth (what the camera saw)", "A raw CEAR frame — the lab the splat reconstructs.", gt_img),
+        img_card("⚠️ The Isaac render bug", "The SAME pose rendered through my Isaac/NuRec path: rotated ~90° "
+                 "and smeared. The splat is fine — my COLMAP→NuRec camera-pose conversion is wrong, so it "
+                 "renders from the wrong viewpoint. This is the bug to fix.", broken),
+        player_card("🤖 Robot in Isaac (composite works; camera convention WIP)",
+                    "A lit 3D robot composited into the NuRec volume in Isaac Sim 6.1.0 — proves mesh+splat "
+                    "compositing works. The background is mangled by the same pose-convention bug above.", robot_dir),
+        img_card("NuRec render proof", "Our .usdz rendered by NVIDIA's nurec_render.py — the asset loads and "
+                 "renders (quality here is limited by the same pose convention).", proof),
     ]
     body = "\n".join(c for c in cards if c) or "<p class='card'>No frames found — run a render (see docs/RUN.md).</p>"
     html = f"""<!doctype html><html><head><meta charset="utf-8">
