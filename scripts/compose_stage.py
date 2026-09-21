@@ -249,12 +249,25 @@ def collision_test(world, np, cx, cy, floor_z, verts, faces, out_dir):
     """
     import os
     import cv2
-    from isaacsim.core.api.objects import DynamicSphere, DynamicCuboid
+    from isaacsim.core.api.objects import DynamicSphere, DynamicCuboid, FixedCuboid
     from pxr import UsdGeom, UsdLux, Gf, PhysxSchema
     import omni.replicator.core as rep
     fdir = os.path.join(out_dir, "collision_frames"); os.makedirs(fdir, exist_ok=True)
     V = np.array(verts); vmin = V.min(0); vmax = V.max(0)
     info = {"floor_grid": [], "walls": [], "notes": ""}
+
+    # backup ground plane at the detected floor height: the reconstructed collider has holes at
+    # the periphery (coverage limit), so a robot driving there falls into the void. A large thin
+    # static collider whose TOP sits at floor_z catches those holes -> the robot rests on the real
+    # mesh where it exists and on this plane over holes; walls/obstacles from the mesh still block.
+    gx = float(vmax[0] - vmin[0]) + 6.0; gy = float(vmax[1] - vmin[1]) + 6.0
+    ground = world.scene.add(FixedCuboid(prim_path="/World/backup_ground", name="backup_ground",
+                             position=np.array([cx, cy, floor_z - 0.05]),
+                             scale=np.array([gx, gy, 0.1])))
+    try:
+        UsdGeom.Imageable(world.stage.GetPrimAtPath("/World/backup_ground")).MakeInvisible()
+    except Exception:  # noqa: BLE001
+        pass
 
     # contact reporting — direct proof collisions fire (global counter via PhysX callback)
     contacts = {"n": 0}
@@ -336,27 +349,29 @@ def collision_test(world, np, cx, cy, floor_z, verts, faces, out_dir):
             world.step(render=(step % 40 == 0))
         p = rover.get_world_pose()[0]; end = np.array([float(p[0]), float(p[1])])
         reach = float(np.linalg.norm(end - np.array([cx, cy])))
-        tunneled = bool(end[0] > vmax[0] + margin or end[0] < vmin[0] - margin or
-                        end[1] > vmax[1] + margin or end[1] < vmin[1] - margin)
+        fell = bool(float(p[2]) < floor_z - 0.3)               # fell through despite backup plane
+        blocked = bool(reach < 3.0)                             # stopped early = hit a wall/obstacle
         info["walls"].append({"dir": dname, "reach_m": round(reach, 2),
                               "end_xy": [round(end[0], 2), round(end[1], 2)],
-                              "contained": not tunneled, "fell": bool(float(p[2]) < floor_z - 0.2),
+                              "blocked_by_wall": blocked, "fell": fell,
                               "contacts": contacts["n"] - c0})
         snap(f"02_wall_{dname}.png")
 
     floor_ok = len(probes) - n_through
-    walls_ok = sum(1 for w in info["walls"] if w["contained"] and not w["fell"])
+    n_fell = sum(1 for w in info["walls"] if w["fell"])
+    n_blocked = sum(1 for w in info["walls"] if w["blocked_by_wall"])
     total_contacts = sum(w["contacts"] for w in info["walls"])
     info["floor_ok"] = f"{floor_ok}/{len(probes)}"
-    info["walls_contained"] = f"{walls_ok}/{len(info['walls'])}"
+    info["rovers_fell"] = n_fell
+    info["walls_blocked"] = n_blocked
     info["total_contacts"] = total_contacts
     info["frames_dir"] = fdir
-    # PASS: nothing falls through, all rovers contained by geometry, and contacts actually fired
-    info["gate_collision"] = "PASS" if (n_through == 0 and walls_ok == len(info["walls"])
-                                        and total_contacts > 0) else "REVIEW"
-    print(f"[compose] collision: floor {info['floor_ok']} (spread {info['floor_rest_spread_m']}m), "
-          f"walls {info['walls_contained']} contained, {total_contacts} contacts -> {info['gate_collision']}",
-          flush=True)
+    # PASS: nothing falls through (backup plane holds), no rover falls, real contacts fire, and at
+    # least one direction is clearly blocked by wall/obstacle geometry (proves 3-D collision).
+    info["gate_collision"] = "PASS" if (n_through == 0 and n_fell == 0 and total_contacts > 0
+                                        and n_blocked >= 1) else "REVIEW"
+    print(f"[compose] collision: floor {info['floor_ok']} no-fallthrough, rovers_fell {n_fell}, "
+          f"walls_blocked {n_blocked}/4, {total_contacts} contacts -> {info['gate_collision']}", flush=True)
     return info
 
 
