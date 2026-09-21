@@ -114,14 +114,15 @@ def main():
     #   * 6.0.x  -> nurec_utils.setup_for_rendering renders the photoreal Gaussian volume.
     #   * 5.1.0  -> that import fails gracefully; the dome light (added below) still renders the
     #               reconstructed geometry (collider + rover) so we get a real navigation.
-    # We do NOT `--enable` the exts at launch (a missing ext aborts Kit before it boots); we
-    # enable them at runtime in a try/except instead. Our asset is a PLAIN NuRec volume, which
-    # per the docs does NOT need omni.rtx.spg (that's only for SPG/PPISP assets) — only the
-    # setup step + these carb settings (gaussian tonemapping on, single-GPU).
-    nurec_args = ["--/renderer/multiGpu/enabled=false",
-                  "--/app/extensions/registryEnabled=true",
-                  "--/omni/rtx/nre/compositing/disableNuRecPostProcessings=true",
-                  "--/rtx/rtpt/gaussian/skipTonemapping/enabled=false"]
+    # We do NOT `--enable` the exts at launch (a missing ext aborts Kit before boot on 5.1); we
+    # enable them at runtime below (graceful). The ONLY launch arg needed is single-GPU — the
+    # canonical nurec_render.py passes just `--enable omni.rtx.spg --/renderer/multiGpu/enabled=
+    # false`. CRUCIAL: do NOT set /omni/rtx/nre/compositing/disableNuRecPostProcessings or
+    # /rtx/rtpt/gaussian/skipTonemapping here — those are SPG/PPISP-only. For a PLAIN NuRec
+    # volume the engine ISP/tonemap/compositing must stay ON; forcing disableNuRecPostProcessings
+    # =true blanks the render to black. setup_for_rendering() applies the correct per-stage
+    # (plain vs SPG) overrides before the first Hydra sync.
+    nurec_args = ["--/renderer/multiGpu/enabled=false"]
     app = SimulationApp({"headless": not args.gui, "renderer": "RayTracedLighting",
                          "multi_gpu": False,
                          "extra_args": nurec_args if args.mode == "nav" else []})
