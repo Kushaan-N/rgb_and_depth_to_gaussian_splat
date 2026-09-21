@@ -1,19 +1,50 @@
 #!/usr/bin/env python3
-"""Build a single self-contained results.html (videos + frames base64-embedded).
+"""Build a single self-contained results.html — codec-free JS frame players + still frames.
 
-One portable file — open it in VS Code's Simple Browser, download it, or serve it with
-`python -m http.server`. No external assets, so it works anywhere.
+Browsers won't reliably play OpenCV's mp4v-encoded .mp4 in an HTML5 <video>, so instead of
+embedding video we embed the PNG frames (subsampled, resized, JPEG-compressed, base64) and
+cycle them with a tiny JS player (play/pause + scrubber). Works in any browser, over http.server
+or opened directly. No external assets.
 
     python scripts/make_gallery.py --seq mocap1_well-lit_trot --out results/results.html
 """
 from __future__ import annotations
-import argparse, base64, glob, os, mimetypes
+import argparse, base64, glob, os
 
 
-def b64(path):
-    mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
-    with open(path, "rb") as f:
-        return f"data:{mime};base64," + base64.b64encode(f.read()).decode()
+def load_seq(frame_dir, n_max=48, width=560, quality=82):
+    """Subsample frames in `frame_dir`, resize to <=width, JPEG-encode -> list of data URIs."""
+    import cv2
+    fs = sorted(glob.glob(os.path.join(frame_dir, "*.png")))
+    if not fs:
+        return []
+    if len(fs) > n_max:
+        step = len(fs) / n_max
+        fs = [fs[int(i * step)] for i in range(n_max)]
+    uris = []
+    for f in fs:
+        im = cv2.imread(f)
+        if im is None:
+            continue
+        h, w = im.shape[:2]
+        if w > width:
+            im = cv2.resize(im, (width, int(h * width / w)), interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", im, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        if ok:
+            uris.append("data:image/jpeg;base64," + base64.b64encode(buf).decode())
+    return uris
+
+
+def b64_img(path, width=720, quality=88):
+    import cv2
+    im = cv2.imread(path)
+    if im is None:
+        return None
+    h, w = im.shape[:2]
+    if w > width:
+        im = cv2.resize(im, (width, int(h * width / w)), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", im, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    return "data:image/jpeg;base64," + base64.b64encode(buf).decode() if ok else None
 
 
 def find(*cands):
@@ -29,69 +60,91 @@ def main():
     ap.add_argument("--seq", default="mocap1_well-lit_trot")
     ap.add_argument("--repo", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     ap.add_argument("--out", default=None)
+    ap.add_argument("--fps", type=int, default=12)
     args = ap.parse_args()
-    repo = args.repo
+    repo, seq = args.repo, args.seq
     ws = os.environ.get("CEAR_WS", "/scratch4/workspace/%s-cear" % os.environ.get("USER", ""))
-    nav = f"{ws}/outputs/{args.seq}"
+    nav = f"{ws}/outputs/{seq}"
     out = args.out or os.path.join(repo, "results", "results.html")
     os.makedirs(os.path.dirname(out), exist_ok=True)
 
-    # locate assets (durable /work copies first, then scratch)
-    robot_vid = find(f"{repo}/results/robot_in_splat.mp4", f"{nav}/navsplat/robot_in_splat.mp4")
-    walk_vid  = find(f"{repo}/results/walkthrough.mp4", f"{nav}/walkthrough.mp4")
+    robot_dir = find(f"{nav}/navsplat")
+    walk_dir  = find(f"{nav}/walkthrough/camera_0")
     hero      = find(f"{repo}/docs/figures/robot_in_splat_hero.png", f"{nav}/navsplat/nav_0012.png")
     proof     = find(f"{repo}/docs/figures/nurec_render_proof.png")
     onoff     = find(f"{repo}/docs/figures/mocap1_onpath_vs_offpath.png")
 
-    cards = []
-    def vid_card(title, desc, path):
-        if not path or not os.path.exists(path): return
-        cards.append(f"""<section class="card"><h2>{title}</h2><p>{desc}</p>
-          <video controls loop autoplay muted playsinline src="{b64(path)}"></video></section>""")
+    players, pid = [], 0
+
+    def player_card(title, desc, frame_dir):
+        nonlocal pid
+        if not frame_dir:
+            return ""
+        uris = load_seq(frame_dir)
+        if not uris:
+            return ""
+        pid += 1
+        i = f"p{pid}"
+        arr = "[" + ",".join(f'"{u}"' for u in uris) + "]"
+        return f"""<section class="card"><h2>{title}</h2><p>{desc}</p>
+          <img id="{i}img" class="frame">
+          <div class="ctl"><button id="{i}btn">⏸ Pause</button>
+            <input id="{i}rng" type="range" min="0" max="{len(uris)-1}" value="0">
+            <span id="{i}lbl" class="lbl">1/{len(uris)}</span></div>
+          <script>(function(){{const F={arr};let k=0,play=true;
+            const img=document.getElementById("{i}img"),rng=document.getElementById("{i}rng"),
+                  btn=document.getElementById("{i}btn"),lbl=document.getElementById("{i}lbl");
+            function show(x){{k=(x+F.length)%F.length;img.src=F[k];rng.value=k;lbl.textContent=(k+1)+"/"+F.length;}}
+            show(0);setInterval(()=>{{if(play)show(k+1);}},{int(1000/args.fps)});
+            btn.onclick=()=>{{play=!play;btn.textContent=play?"⏸ Pause":"▶ Play";}};
+            rng.oninput=()=>{{play=false;btn.textContent="▶ Play";show(+rng.value);}};}})();</script>
+        </section>"""
+
     def img_card(title, desc, path):
-        if not path or not os.path.exists(path): return
-        cards.append(f"""<section class="card"><h2>{title}</h2><p>{desc}</p>
-          <img src="{b64(path)}"></section>""")
+        if not path or not os.path.exists(path):
+            return ""
+        u = b64_img(path)
+        return f'<section class="card"><h2>{title}</h2><p>{desc}</p><img class="frame" src="{u}"></section>' if u else ""
 
-    vid_card("🤖 Robot navigating the photoreal world",
-             "A physics-lit robot composited into the Gaussian-splat reconstruction of the CEAR "
-             "scene, rendered in Isaac Sim 6.1.0 (NuRec neural volume rendering).", robot_vid)
-    img_card("Hero frame", "Single frame — the robot is a real 3D object in the reconstructed scene "
-             "(lit top face, shaded sides), with gaussians blending at its edge.", hero)
-    vid_card("🌍 Photoreal walkthrough of the reconstructed world",
-             "90-frame fly-through along the recorded trajectory. Soft/hazy because mocap1 is a "
-             "dense foliage scene reconstructed from RGB+depth only — the data-limited reality.", walk_vid)
-    img_card("NuRec render proof", "Our exported .usdz rendered by NVIDIA's own nurec_render.py at a "
-             "recorded pose — confirms the asset + renderer are correct.", proof)
-    img_card("Reconstruction quality (on-path vs off-path)",
-             "The splat is faithful on the recorded path and degrades off it — a coverage limit of "
-             "the single-sequence data, not the renderer.", onoff)
-
-    body = "\n".join(cards) or "<p>No assets found. Run a render first (see docs/RUN.md).</p>"
+    cards = [
+        player_card("🤖 Robot navigating the photoreal world",
+                    "A lit 3D robot composited into the Gaussian-splat reconstruction, rendered in "
+                    "Isaac Sim 6.1.0 (NuRec). Drag the slider to scrub.", robot_dir),
+        img_card("Hero frame", "The robot is a real 3D object in the scene — lit top face, shaded "
+                 "sides, gaussians blending at its edge.", hero),
+        player_card("🌍 Photoreal walkthrough of the reconstructed world",
+                    "Fly-through along the recorded path. Soft because mocap1 is dense foliage from "
+                    "RGB+depth only — the data-limited reality.", walk_dir),
+        img_card("NuRec render proof", "Our .usdz rendered by NVIDIA's own nurec_render.py — asset + "
+                 "renderer are correct.", proof),
+        img_card("Reconstruction quality (on-path vs off-path)",
+                 "Faithful on the recorded path, degrades off it — a coverage limit of single-sequence data.", onoff),
+    ]
+    body = "\n".join(c for c in cards if c) or "<p class='card'>No frames found — run a render (see docs/RUN.md).</p>"
     html = f"""<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CEAR → Splat → Isaac — results</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>CEAR → Splat → Isaac</title>
 <style>
   :root {{ color-scheme: light dark; }}
-  body {{ font-family: system-ui, sans-serif; margin: 0; background: #0f1115; color: #e8e8ea; }}
-  header {{ padding: 28px 24px; background: linear-gradient(135deg,#1b2333,#0f1115); border-bottom:1px solid #222; }}
-  header h1 {{ margin: 0 0 6px; font-size: 22px; }}
-  header p {{ margin: 0; color: #9aa4b2; font-size: 14px; }}
-  main {{ max-width: 900px; margin: 0 auto; padding: 20px; }}
+  body {{ font-family: system-ui, sans-serif; margin:0; background:#0f1115; color:#e8e8ea; }}
+  header {{ padding:26px 24px; background:linear-gradient(135deg,#1b2333,#0f1115); border-bottom:1px solid #222; }}
+  header h1 {{ margin:0 0 6px; font-size:22px; }} header p {{ margin:0; color:#9aa4b2; font-size:14px; }}
+  main {{ max-width:860px; margin:0 auto; padding:18px; }}
   .card {{ background:#151922; border:1px solid #232a36; border-radius:12px; padding:18px; margin:18px 0; }}
-  .card h2 {{ margin: 0 0 6px; font-size: 17px; }}
-  .card p {{ margin: 0 0 12px; color:#9aa4b2; font-size:13.5px; line-height:1.5; }}
-  video, img {{ width: 100%; border-radius: 8px; background:#000; display:block; }}
-  footer {{ text-align:center; color:#6b7280; font-size:12px; padding: 24px; }}
+  .card h2 {{ margin:0 0 6px; font-size:17px; }} .card p {{ margin:0 0 12px; color:#9aa4b2; font-size:13.5px; line-height:1.5; }}
+  .frame {{ width:100%; border-radius:8px; background:#000; display:block; }}
+  .ctl {{ display:flex; align-items:center; gap:12px; margin-top:10px; }}
+  .ctl button {{ background:#2a3142; color:#e8e8ea; border:none; padding:7px 12px; border-radius:7px; cursor:pointer; font-size:13px; }}
+  .ctl input[type=range] {{ flex:1; }} .lbl {{ color:#9aa4b2; font-size:12px; min-width:52px; text-align:right; }}
+  footer {{ text-align:center; color:#6b7280; font-size:12px; padding:24px; }}
 </style></head><body>
 <header><h1>CEAR → Gaussian Splat → Isaac Sim</h1>
 <p>mocap1 quadruped sequence reconstructed from RGB+depth+poses (no LiDAR), rendered with NuRec in Isaac Sim 6.1.0.</p></header>
 <main>{body}</main>
-<footer>Self-contained — every asset is embedded. Generated by scripts/make_gallery.py</footer>
+<footer>Self-contained frame players (no video codec needed). Generated by scripts/make_gallery.py</footer>
 </body></html>"""
     with open(out, "w") as f:
         f.write(html)
-    print(f"wrote {out} ({os.path.getsize(out)//1024} KB, {len(cards)} cards)")
+    print(f"wrote {out} ({os.path.getsize(out)//1024} KB, {pid} players)")
 
 
 if __name__ == "__main__":
