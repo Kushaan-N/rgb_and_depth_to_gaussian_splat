@@ -28,7 +28,8 @@ FLOORZ="$(python3 -c "import json;print(json.load(open('$OUT/collider/collider_m
 # isaacsim.replicator.nurec_utils) from NVIDIA's registry into $HOME/.local/share/ov. Bind HOME
 # to scratch via `--home` (APPTAINERENV_HOME is silently rejected by apptainer) so those
 # downloads persist across runs; --writable-tmpfs is the catch-all for any other write path.
-CHOME="$CEAR_WS/isaac-chome"; mkdir -p "$CHOME" "$CHOME/kit-cache" "$CHOME/kit-data"
+# per-image HOME/cache so different Isaac versions don't share a shader/material cache.
+CHOME="$CEAR_WS/isaac-chome-$(basename "$SIF" .sif)"; mkdir -p "$CHOME" "$CHOME/kit-cache" "$CHOME/kit-data"
 export APPTAINERENV_OMNI_KIT_ACCEPT_EULA=YES APPTAINERENV_ACCEPT_EULA=Y APPTAINERENV_PRIVACY_CONSENT=N
 echo "SIF=$SIF  seq=$SEQ mode=$MODE floor_z=$FLOORZ"
 nvidia-smi --query-gpu=name --format=csv,noheader
