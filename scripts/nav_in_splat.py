@@ -37,6 +37,41 @@ def read_tum(path):
     return out
 
 
+def look_at_pose(cam, target, up):
+    """Build a TUM pose [tx,ty,tz,qx,qy,qz,qw] for a USD camera at `cam` looking at `target`.
+
+    USD cameras look down local -Z with +Y up. We solve the look-at rotation directly (no
+    OpenCV/COLMAP convention guessing), so the camera reliably frames `target`. This is what
+    fixes the earlier half-black views + invisible robot: aim along the path where coverage and
+    the robot are, instead of trusting the raw recorded quaternion.
+    """
+    import numpy as np
+    f = np.asarray(target, float) - np.asarray(cam, float)
+    f = f / (np.linalg.norm(f) + 1e-9)                 # forward: camera -Z points here
+    up = np.asarray(up, float)
+    r = np.cross(f, up)
+    if np.linalg.norm(r) < 1e-6:                        # forward ~parallel to up
+        up = np.array([1.0, 0.0, 0.0]); r = np.cross(f, up)
+    r = r / (np.linalg.norm(r) + 1e-9)
+    u = np.cross(r, f); u = u / (np.linalg.norm(u) + 1e-9)
+    R = np.column_stack([r, u, -f])                    # cam-to-world: X=right, Y=up, Z=-forward
+    t = np.trace(R)
+    if t > 0:
+        s = (t + 1.0) ** 0.5 * 2; qw = 0.25 * s
+        qx = (R[2, 1] - R[1, 2]) / s; qy = (R[0, 2] - R[2, 0]) / s; qz = (R[1, 0] - R[0, 1]) / s
+    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+        s = (1 + R[0, 0] - R[1, 1] - R[2, 2]) ** 0.5 * 2; qw = (R[2, 1] - R[1, 2]) / s
+        qx = 0.25 * s; qy = (R[0, 1] + R[1, 0]) / s; qz = (R[0, 2] + R[2, 0]) / s
+    elif R[1, 1] > R[2, 2]:
+        s = (1 + R[1, 1] - R[0, 0] - R[2, 2]) ** 0.5 * 2; qw = (R[0, 2] - R[2, 0]) / s
+        qx = (R[0, 1] + R[1, 0]) / s; qy = 0.25 * s; qz = (R[1, 2] + R[2, 1]) / s
+    else:
+        s = (1 + R[2, 2] - R[0, 0] - R[1, 1]) ** 0.5 * 2; qw = (R[1, 0] - R[0, 1]) / s
+        qx = (R[0, 2] + R[2, 0]) / s; qy = (R[1, 2] + R[2, 1]) / s; qz = 0.25 * s
+    c = np.asarray(cam, float)
+    return [float(c[0]), float(c[1]), float(c[2]), float(qx), float(qy), float(qz), float(qw)]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", required=True, help="NuRec USDZ")
@@ -45,8 +80,11 @@ def main() -> int:
     ap.add_argument("--camera", default="camera_0", help="authored camera name in the USDZ")
     ap.add_argument("--resolution", default="640x480")
     ap.add_argument("--warmup", type=int, default=300, help="RTPT accumulation ticks per frame")
-    ap.add_argument("--view-index", type=int, default=0, help="TUM index for the FIXED viewing camera")
-    ap.add_argument("--robot-start", type=int, default=6, help="first TUM index used as a robot position")
+    ap.add_argument("--cam-index", type=int, default=8, help="TUM index for the FIXED viewing camera position")
+    ap.add_argument("--look-ahead", type=int, default=45,
+                    help="TUM index offset the camera AIMS at (down the path, well-covered forward view)")
+    ap.add_argument("--up-sign", type=float, default=1.0, help="sign of the world up axis (flip to -1 if upside down)")
+    ap.add_argument("--robot-start", type=int, default=4, help="robot's first TUM index offset from cam-index")
     ap.add_argument("--robot-stride", type=int, default=1)
     ap.add_argument("--robot-count", type=int, default=60)
     ap.add_argument("--robot-drop", type=float, default=0.25,
@@ -86,19 +124,27 @@ def main() -> int:
     tum = read_tum(args.tum)
     if not tum:
         print("[nav] empty TUM", flush=True); app.close(); return 2
-    view_pose = tum[min(args.view_index, len(tum) - 1)][1]
 
-    # robot positions along the recorded path (camera centres), lowered toward the floor. The
-    # trajectory is ~planar at constant height along one world axis (the up axis) — detect that
-    # axis from the spread of camera centres and drop the robot along it.
+    # camera centres along the recorded path; the path is ~planar at constant height along one
+    # world axis (the up axis) — detect it from the spread of centres.
     centres = np.array([p[1][:3] for p in tum])
     spread = centres.max(0) - centres.min(0)
     up_axis = int(np.argmin(spread))                 # smallest spread = height/up axis
-    # floor is below the cameras along the up axis; subtract to drop the robot toward it. We
-    # don't know the up SIGN a priori — pass a negative --robot-drop to flip if it goes up.
-    print(f"[nav] up_axis={up_axis} spread={spread.round(3).tolist()} drop={args.robot_drop}", flush=True)
+    up_vec = np.zeros(3); up_vec[up_axis] = args.up_sign
 
-    idxs = [args.robot_start + i * args.robot_stride for i in range(args.robot_count)]
+    # FIXED viewing camera: sit at a recorded position and AIM along the path (look-at), so the
+    # view faces the well-covered forward direction and frames the robot. Not the raw recorded
+    # quaternion (that gave half-black views + an off-screen robot).
+    ci = max(0, min(args.cam_index, len(tum) - 1))
+    li = max(0, min(ci + args.look_ahead, len(tum) - 1))
+    cam_pos = centres[ci].copy()
+    look_target = centres[li].copy(); look_target[up_axis] -= args.robot_drop  # aim at floor-ish, down the path
+    view_pose = look_at_pose(cam_pos, look_target, up_vec)
+    print(f"[nav] up_axis={up_axis} up_sign={args.up_sign} cam_idx={ci} look_idx={li} "
+          f"cam@{cam_pos.round(2).tolist()} aim@{look_target.round(2).tolist()}", flush=True)
+
+    # robot drives along the recorded path, away from the camera (all on-path = good coverage)
+    idxs = [ci + args.robot_start + i * args.robot_stride for i in range(args.robot_count)]
     idxs = [i for i in idxs if 0 <= i < len(tum)]
 
     # robot mesh + a dome light so it's lit (the gaussians carry their own radiance)
