@@ -17,6 +17,7 @@ SEQ="${1:-mocap1_well-lit_trot}"
 TUMNAME="${2:-onpath_cam.tum}"          # trajectory file in $CEAR_WS
 OUTNAME="${3:-nurec_render_test}"       # output subdir under the sequence
 CFG="${4:-}"                            # optional render config (warmup override) in $CEAR_WS
+RES="${RES:-1280x720}"                   # render resolution (higher = sharper)
 CEAR_WS="${CEAR_WS:-/scratch4/workspace/${USER}-cear}"
 CEAR_OUT="${CEAR_OUT:-$CEAR_WS/outputs}"
 SIF="${CEAR_SIF:-$CEAR_WS/isaac-sim-6.1.0.sif}"
@@ -38,5 +39,5 @@ apptainer exec --nv --fakeroot --writable-tmpfs --pwd /isaac-sim \
   --bind "$CHOME/kit-cache:/isaac-sim/kit/cache" \
   --bind "$CHOME/kit-data:/isaac-sim/kit/data" \
   "$SIF" /isaac-sim/python.sh /isaac-sim/standalone_examples/nurec/nurec_render.py poses \
-    --stage "$USDZ" --output "$OUTDIR" --cameras camera_0 --poses "$TUM" --resolution 640x480 $CFGARG
+    --stage "$USDZ" --output "$OUTDIR" --cameras camera_0 --poses "$TUM" --resolution "$RES" $CFGARG
 echo "NUREC_RENDER_TEST_DONE"; find "$OUTDIR" -name "*.png" | wc -l; find "$OUTDIR" -name "*.png" -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -3
