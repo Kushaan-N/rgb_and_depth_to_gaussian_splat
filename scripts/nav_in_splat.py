@@ -64,7 +64,7 @@ def main() -> int:
     import numpy as np
     import carb  # noqa: F401
     from pxr import UsdGeom, UsdLux, Gf, Vt
-    from isaacsim.core.utils.stage import open_stage
+    from isaacsim.replicator.nurec_utils.usd_utils import open_stage  # returns the Stage (core.utils one returns bool)
     from isaacsim.replicator.nurec_utils.rendering_setup import setup_for_rendering, enable_omni_rtx_spg
     from isaacsim.replicator.nurec_utils.render import (
         RenderTargetFactory, _resolve_camera_targets, _open_camera_renderer,
