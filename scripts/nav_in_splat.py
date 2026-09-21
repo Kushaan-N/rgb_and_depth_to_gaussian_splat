@@ -94,6 +94,11 @@ def main() -> int:
                     help="sweep: foreground lateral pass (stays visible); path: drive along the trajectory")
     ap.add_argument("--sweep-dist", type=float, default=1.3, help="robot distance in front of the camera (m)")
     ap.add_argument("--sweep-range", type=float, default=0.9, help="half-width of the lateral sweep (m)")
+    ap.add_argument("--cam-mode", choices=["fixed", "follow"], default="fixed",
+                    help="fixed: stationary look-at camera; follow: camera moves along the path (upright "
+                         "walkthrough via look-at — avoids the ~90deg roll of the raw recorded quaternions)")
+    ap.add_argument("--cam-stride", type=int, default=2, help="path steps per frame in follow mode")
+    ap.add_argument("--frames", type=int, default=60, help="number of frames in follow mode")
     args = ap.parse_args()
     os.makedirs(args.output, exist_ok=True)
     W, H = (int(x) for x in args.resolution.lower().split("x"))
@@ -160,14 +165,16 @@ def main() -> int:
     idxs = [ci + args.robot_start + i * args.robot_stride for i in range(args.robot_count)]
     idxs = [i for i in idxs if 0 <= i < len(tum)]
 
-    # robot mesh + a dome light so it's lit (the gaussians carry their own radiance)
+    # dome light so meshes are lit (the gaussians carry their own radiance)
     UsdLux.DomeLight.Define(stage, "/World/navLight").CreateIntensityAttr(600.0)
-    robot = UsdGeom.Cube.Define(stage, "/World/robot")
-    robot.CreateSizeAttr(1.0)
-    robot.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.05, 0.45, 1.0)]))
-    rx = UsdGeom.Xformable(robot.GetPrim()); rx.ClearXformOpOrder()
-    r_t = rx.AddTranslateOp(); r_s = rx.AddScaleOp()
-    r_s.Set(Gf.Vec3d(args.robot_size, args.robot_size, args.robot_size))
+    r_t = None
+    if args.robot_count > 0:                          # robot optional (0 = clean walkthrough)
+        robot = UsdGeom.Cube.Define(stage, "/World/robot")
+        robot.CreateSizeAttr(1.0)
+        robot.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.05, 0.45, 1.0)]))
+        rx = UsdGeom.Xformable(robot.GetPrim()); rx.ClearXformOpOrder()
+        r_t = rx.AddTranslateOp()
+        rx.AddScaleOp().Set(Gf.Vec3d(args.robot_size, args.robot_size, args.robot_size))
 
     targets = _resolve_camera_targets(stage, has_spg, {args.camera})
     if not targets:
@@ -179,21 +186,32 @@ def main() -> int:
 
     import cv2
     n_written = 0
-    N = len(idxs)
-    for k, i in enumerate(idxs):
-        if args.robot_mode == "sweep":
-            pos = sweep_pos(k, N)
+    # frame count: follow mode walks the path; fixed mode steps through the robot positions
+    N = args.frames if args.cam_mode == "follow" else len(idxs)
+    for k in range(N):
+        if args.cam_mode == "follow":
+            # UPRIGHT walkthrough: camera moves along the path, look-at the point ahead (up=world-up)
+            c = min(ci + k * args.cam_stride, len(tum) - 1)
+            t = min(c + args.look_ahead, len(tum) - 1)
+            tgt = centres[t].copy(); tgt[up_axis] -= args.robot_drop
+            pose = look_at_pose(centres[c], tgt, up_vec)
         else:
-            pos = centres[i].copy(); pos[up_axis] -= args.robot_drop   # drive along path, at floor
-        r_t.Set(Gf.Vec3d(float(pos[0]), float(pos[1]), float(pos[2])))
-        rgb = cap.render_at_pose(view_pose)
+            pose = view_pose
+        if r_t is not None:
+            if args.robot_mode == "sweep" and args.cam_mode == "fixed":
+                pos = sweep_pos(k, N)
+            else:
+                i = idxs[min(k, len(idxs) - 1)] if idxs else ci
+                pos = centres[i].copy(); pos[up_axis] -= args.robot_drop
+            r_t.Set(Gf.Vec3d(float(pos[0]), float(pos[1]), float(pos[2])))
+        rgb = cap.render_at_pose(pose)
         if rgb is None:
-            print(f"[nav] frame {k} (tum {i}) produced no data", flush=True); continue
+            print(f"[nav] frame {k} produced no data", flush=True); continue
         bgr = cv2.cvtColor(np.asarray(rgb)[..., :3].astype("uint8"), cv2.COLOR_RGB2BGR)
         cv2.imwrite(os.path.join(args.output, f"nav_{k:04d}.png"), bgr)
         n_written += 1
         if k % 10 == 0:
-            print(f"[nav] frame {k}/{len(idxs)} robot@{pos.round(3).tolist()} std={np.asarray(rgb)[...,:3].std():.1f}", flush=True)
+            print(f"[nav] frame {k}/{N} std={np.asarray(rgb)[...,:3].std():.1f}", flush=True)
     try:
         cap.close()
     except Exception:  # noqa: BLE001
