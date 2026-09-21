@@ -31,3 +31,10 @@ cd "$THREEDGRUT_DIR"
 python "$REPO/scripts/render_splat_depth.py" --checkpoint "$CKPT" --dataset "$DATASET" \
     --out "$DEPTHDIR" --stride "$STRIDE" --yaw "$YAW" --limit "$LIMIT"
 echo "SPLAT_DEPTH_DONE $SEQ  ($(ls "$DEPTHDIR"/*.npz 2>/dev/null | wc -l) frames)"
+
+# Stage 2 — TSDF-fuse on CPU (Open3D lives in the CPU venv, not the 3dgrut venv)
+deactivate 2>/dev/null || true
+source "$REPO/env/cear_env.sh"
+python "$REPO/scripts/fuse_splat_collider.py" --depth-dir "$DEPTHDIR" \
+    --out "$OUT/collider_splatA" --voxel 0.03
+echo "COLLIDER_SPLAT_A_DONE $SEQ"
