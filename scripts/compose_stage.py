@@ -256,18 +256,10 @@ def collision_test(world, np, cx, cy, floor_z, verts, faces, out_dir):
     V = np.array(verts); vmin = V.min(0); vmax = V.max(0)
     info = {"floor_grid": [], "walls": [], "notes": ""}
 
-    # backup ground plane at the detected floor height: the reconstructed collider has holes at
-    # the periphery (coverage limit), so a robot driving there falls into the void. A large thin
-    # static collider whose TOP sits at floor_z catches those holes -> the robot rests on the real
-    # mesh where it exists and on this plane over holes; walls/obstacles from the mesh still block.
-    gx = float(vmax[0] - vmin[0]) + 6.0; gy = float(vmax[1] - vmin[1]) + 6.0
-    ground = world.scene.add(FixedCuboid(prim_path="/World/backup_ground", name="backup_ground",
-                             position=np.array([cx, cy, floor_z - 0.05]),
-                             scale=np.array([gx, gy, 0.1])))
-    try:
-        UsdGeom.Imageable(world.stage.GetPrimAtPath("/World/backup_ground")).MakeInvisible()
-    except Exception:  # noqa: BLE001
-        pass
+    # NOTE: this test adds NO manual colliders (no backup ground plane, no per-obstacle proxy
+    # boxes) — those defeat generalization. It HONESTLY measures the completeness of whatever
+    # collider mesh was loaded, so generalizable splat-derived colliders (novel-view depth fusion,
+    # gaussian-surface mesh) can be compared for VLA use.
 
     # contact reporting — direct proof collisions fire (global counter via PhysX callback)
     contacts = {"n": 0}
@@ -367,20 +359,6 @@ def collision_test(world, np, cx, cy, floor_z, verts, faces, out_dir):
     obstacles.sort(key=lambda o: -o["cells"])
     obstacles = obstacles[:12]
     info["n_obstacles_detected"] = len(obstacles)
-
-    # ENSURE collision: materialize a SOLID invisible box collider at each detected obstacle
-    # (footprint + height from the reconstruction), so the robot reliably collides with every
-    # block even though the raw mesh shells are thin/holey.
-    for k, o in enumerate(obstacles):
-        h = max(0.15, o["top_z"] - floor_z)
-        world.scene.add(FixedCuboid(prim_path=f"/World/obs_{k}", name=f"obs_{k}",
-                        position=np.array([o["xy"][0], o["xy"][1], floor_z + h/2]),
-                        scale=np.array([max(o["wx"], 0.25), max(o["wy"], 0.25), h])))
-        try:
-            UsdGeom.Imageable(world.stage.GetPrimAtPath(f"/World/obs_{k}")).MakeInvisible()
-        except Exception:  # noqa: BLE001
-            pass
-    info["obstacle_proxies"] = len(obstacles)
     info["obstacles"] = []
     for k, o in enumerate(obstacles):
         ox, oy = o["xy"]; top = o["top_z"]
