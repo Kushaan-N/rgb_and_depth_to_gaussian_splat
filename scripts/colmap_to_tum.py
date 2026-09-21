@@ -72,7 +72,11 @@ def main():
             ts, qw, qx, qy, qz, tx, ty, tz = poses[i]
             Rcw = qwxyz_to_R(qw, qx, qy, qz); Rwc = transpose(Rcw)
             C = matvec(Rwc, [tx, ty, tz]); C = [-c for c in C]
-            ox, oy, oz, ow = R_to_qxyzw(Rwc)
+            # OpenCV cam-to-world -> USD camera basis (flip Y,Z). Verified against ground truth
+            # via scripts/convention_test.py: raw OpenCV renders anti-correlated garbage; this
+            # flip (R_wc @ diag(1,-1,-1)) is the correct convention for NuRec's pinholeOpenCV cam.
+            Rusd = [[Rwc[r][0], -Rwc[r][1], -Rwc[r][2]] for r in range(3)]
+            ox, oy, oz, ow = R_to_qxyzw(Rusd)
             f.write(f"{ts} {C[0]:.6f} {C[1]:.6f} {C[2]:.6f} {ox:.6f} {oy:.6f} {oz:.6f} {ow:.6f}\n")
     print(f"wrote {len(idxs)} poses to {out_tum} (of {len(poses)} images)")
 
