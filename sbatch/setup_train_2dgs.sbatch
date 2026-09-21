@@ -26,7 +26,7 @@ nvidia-smi --query-gpu=name --format=csv,noheader
 # --- idempotent setup: isolated venv + torch 2.6/cu124 + deps + CUDA submodules ---
 if [ ! -f "$TDGS/.setup_done" ]; then
   echo "=== setting up 2dgs venv ==="
-  "$UV" venv --python 3.11 "$VENV"
+  [ -d "$VENV" ] || "$UV" venv --python 3.11 "$VENV"   # reuse a partial venv (torch already installed)
   "$UV" pip install --python "$PY" torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
   "$UV" pip install --python "$PY" open3d plyfile mediapy opencv-python tqdm scipy trimesh
   "$UV" pip install --python "$PY" "$TDGS/submodules/diff-surfel-rasterization" "$TDGS/submodules/simple-knn"
