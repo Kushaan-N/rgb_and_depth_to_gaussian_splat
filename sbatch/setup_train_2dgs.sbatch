@@ -11,7 +11,7 @@
 #SBATCH -o %x_%j.out
 
 set -euo pipefail
-SEQ="${1:-mocap2_well-lit_trot}"; ITERS="${2:-15000}"
+SEQ="${1:-mocap2_well-lit_trot}"; ITERS="${2:-15000}"; MESHMODE="${3:-bounded}"
 REPO="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 source "$REPO/env/cear_env.sh"; deactivate 2>/dev/null || true
 module load cuda/12.4.1 gcc/9.4.0 2>/dev/null || true
@@ -38,13 +38,22 @@ fi
 echo "=== 2dgs env ready ==="; "$PY" -c "import torch,open3d,diff_surfel_rasterization; print('torch',torch.__version__,'o3d',open3d.__version__,'surfel ok')"
 
 cd "$TDGS"
-# --- train 2DGS on the COLMAP dataset ---
-"$PY" train.py -s "$DATASET" -m "$MODEL" --iterations "$ITERS" -r 1
-echo "2DGS_TRAIN_DONE"
-# --- extract TSDF surface mesh (bounded), keep 50 largest clusters (retain scattered objects) ---
-"$PY" render.py -m "$MODEL" -s "$DATASET" --iteration "$ITERS" --skip_test \
-    --voxel_size 0.02 --depth_trunc 8.0 --num_cluster 50
-MESH="$MODEL/train/ours_${ITERS}/fuse_post.ply"
+# --- train 2DGS on the COLMAP dataset (skip if already trained to ITERS) ---
+if [ ! -d "$MODEL/point_cloud/iteration_${ITERS}" ]; then
+  "$PY" train.py -s "$DATASET" -m "$MODEL" --iterations "$ITERS" -r 1
+  echo "2DGS_TRAIN_DONE"
+else
+  echo "2DGS already trained to $ITERS; skipping train"
+fi
+# --- extract surface mesh: bounded (normalized scenes) or unbounded (robust for real scenes) ---
+if [ "$MESHMODE" = "unbounded" ]; then
+  "$PY" render.py -m "$MODEL" -s "$DATASET" --iteration "$ITERS" --skip_test --unbounded --mesh_res 1024 --num_cluster 50
+  MESH="$MODEL/train/ours_${ITERS}/fuse_unbounded_post.ply"
+else
+  "$PY" render.py -m "$MODEL" -s "$DATASET" --iteration "$ITERS" --skip_test \
+      --voxel_size 0.02 --depth_trunc 8.0 --num_cluster 50
+  MESH="$MODEL/train/ours_${ITERS}/fuse_post.ply"
+fi
 echo "2DGS_MESH=$MESH"; ls -la "$MESH" 2>&1 | tail -1
 # --- gravity-align into an Isaac collider ---
 "$PY" "$REPO/scripts/align_mesh_collider.py" --mesh "$MESH" --out "$OUT/collider_2dgs" --source 2dgs
