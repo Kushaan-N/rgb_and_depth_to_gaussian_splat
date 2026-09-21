@@ -29,17 +29,28 @@ def main():
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--dataset", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--split", choices=["train", "test"], default="train",
+                    help="train = the dense recorded trajectory (best floor coverage); test = val subset")
     ap.add_argument("--stride", type=int, default=4, help="use every Nth training camera (base views)")
     ap.add_argument("--yaw", type=float, default=25.0, help="extra look-around yaw magnitude (deg); 0=off")
     ap.add_argument("--limit", type=int, default=0, help="cap total frames (0=all)")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
+    import torch.utils.data
     from threedgrut.render import Renderer
-    from threedgrut.datasets.protocols import Batch
     r = Renderer.from_checkpoint(checkpoint_path=args.checkpoint, path=args.dataset,
                                  out_dir=args.out, save_gt=False, computes_extra_metrics=False)
-    model, dataset, loader = r.model, r.dataset, r.dataloader
+    model = r.model
+    if args.split == "train":                      # dense recorded trajectory (full floor coverage)
+        import threedgrut.datasets as datasets
+        from threedgrut.datasets.utils import configure_dataloader_for_platform
+        dataset, _val = datasets.make(r.conf.dataset.type, r.conf, ray_jitter=None)
+        loader = torch.utils.data.DataLoader(dataset, **configure_dataloader_for_platform(
+            {"num_workers": 8, "batch_size": 1, "shuffle": False, "collate_fn": None}))
+        print(f"[render] train split: {len(dataset)} cameras", flush=True)
+    else:
+        dataset, loader = r.dataset, r.dataloader
     dev = "cuda"
 
     # extra look-around offsets (camera-frame rotations) applied on top of each base pose
