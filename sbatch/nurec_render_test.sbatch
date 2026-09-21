@@ -14,13 +14,17 @@
 
 set -euo pipefail
 SEQ="${1:-mocap1_well-lit_trot}"
+TUMNAME="${2:-onpath_cam.tum}"          # trajectory file in $CEAR_WS
+OUTNAME="${3:-nurec_render_test}"       # output subdir under the sequence
+CFG="${4:-}"                            # optional render config (warmup override) in $CEAR_WS
 CEAR_WS="${CEAR_WS:-/scratch4/workspace/${USER}-cear}"
 CEAR_OUT="${CEAR_OUT:-$CEAR_WS/outputs}"
 SIF="${CEAR_SIF:-$CEAR_WS/isaac-sim-6.1.0.sif}"
 OUT="$CEAR_OUT/$SEQ"
 USDZ="$OUT/usd/scene_nurec.usdz"
-TUM="$CEAR_WS/onpath_cam.tum"
-OUTDIR="$OUT/nurec_render_test"
+TUM="$CEAR_WS/$TUMNAME"
+OUTDIR="$OUT/$OUTNAME"
+CFGARG=""; [ -n "$CFG" ] && CFGARG="--config $CEAR_WS/$CFG"
 mkdir -p "$OUTDIR"
 
 CHOME="$CEAR_WS/isaac-chome-$(basename "$SIF" .sif)"; mkdir -p "$CHOME" "$CHOME/kit-cache" "$CHOME/kit-data"
@@ -34,5 +38,5 @@ apptainer exec --nv --fakeroot --writable-tmpfs --pwd /isaac-sim \
   --bind "$CHOME/kit-cache:/isaac-sim/kit/cache" \
   --bind "$CHOME/kit-data:/isaac-sim/kit/data" \
   "$SIF" /isaac-sim/python.sh /isaac-sim/standalone_examples/nurec/nurec_render.py poses \
-    --stage "$USDZ" --output "$OUTDIR" --cameras camera_0 --poses "$TUM" --resolution 640x480
-echo "NUREC_RENDER_TEST_DONE"; find "$OUTDIR" -name "*.png" -printf '%s\t%p\n' 2>/dev/null | head
+    --stage "$USDZ" --output "$OUTDIR" --cameras camera_0 --poses "$TUM" --resolution 640x480 $CFGARG
+echo "NUREC_RENDER_TEST_DONE"; find "$OUTDIR" -name "*.png" | wc -l; find "$OUTDIR" -name "*.png" -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -3
