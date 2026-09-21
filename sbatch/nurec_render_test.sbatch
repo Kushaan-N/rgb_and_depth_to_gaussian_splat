@@ -34,5 +34,5 @@ apptainer exec --nv --fakeroot --writable-tmpfs --pwd /isaac-sim \
   --bind "$CHOME/kit-cache:/isaac-sim/kit/cache" \
   --bind "$CHOME/kit-data:/isaac-sim/kit/data" \
   "$SIF" /isaac-sim/python.sh /isaac-sim/standalone_examples/nurec/nurec_render.py poses \
-    --stage "$USDZ" --output "$OUTDIR" --cameras cam0 --poses "$TUM" --resolution 640x480
+    --stage "$USDZ" --output "$OUTDIR" --cameras camera_0 --poses "$TUM" --resolution 640x480
 echo "NUREC_RENDER_TEST_DONE"; find "$OUTDIR" -name "*.png" -printf '%s\t%p\n' 2>/dev/null | head
