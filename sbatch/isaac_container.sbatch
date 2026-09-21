@@ -21,7 +21,10 @@ CEAR_OUT="${CEAR_OUT:-$CEAR_WS/outputs}"
 # 6.0 SIF via CEAR_SIF to get the photoreal splat once it's pulled.
 SIF="${CEAR_SIF:-$CEAR_WS/isaac-sim-5.1.0.sif}"
 OUT="$CEAR_OUT/$SEQ"
-FLOORZ="$(python3 -c "import json;print(json.load(open('$OUT/collider/collider_meta.json'))['floor_z_m'])")"
+# which collider to load: default the depth-fused one; override with CEAR_COLLIDER_DIR to test a
+# splat-derived collider (e.g. collider_splatA / collider_splatB) for the generalization comparison.
+COLLIDER_DIR="${CEAR_COLLIDER_DIR:-$OUT/collider}"
+FLOORZ="$(python3 -c "import json;print(json.load(open('$COLLIDER_DIR/collider_meta.json'))['floor_z_m'])")"
 
 # writable dirs: the SIF is read-only, but Isaac writes to $HOME and to /isaac-sim/kit/{cache,
 # data} (shader DB, material cache) AND — new — downloads the NuRec extensions (omni.rtx.spg,
@@ -34,7 +37,7 @@ export APPTAINERENV_OMNI_KIT_ACCEPT_EULA=YES APPTAINERENV_ACCEPT_EULA=Y APPTAINE
 echo "SIF=$SIF  seq=$SEQ mode=$MODE floor_z=$FLOORZ"
 nvidia-smi --query-gpu=name --format=csv,noheader
 
-ARGS="--collider $OUT/collider/collider.obj --mode $MODE --floor-z $FLOORZ --out-dir $OUT/isaac_container"
+ARGS="--collider $COLLIDER_DIR/collider.obj --mode $MODE --floor-z $FLOORZ --out-dir $OUT/isaac_container"
 [ "$MODE" = "nav" ] && ARGS="$ARGS --splat-usd $OUT/usd/scene_nurec.usdz --cam-model $OUT/colmap/sparse/0"
 
 # Run from scratch (never depend on /work being mounted on compute nodes). --fakeroot is
