@@ -27,11 +27,13 @@ sub() {  # submit a GPU sbatch under the right account + 6.1.0 image
 
 case "$CMD" in
   open)
+    source "$REPO/env/cear_env.sh" >/dev/null 2>&1 || true   # gallery needs cv2 (venv-cpu)
     python3 "$REPO/scripts/make_gallery.py" --seq "$SEQ" --out "$REPO/results/results.html"
     echo "Open in VS Code: right-click results/results.html -> 'Open with Live Preview' or Simple Browser,"
     echo "or run './launch.sh view' to serve it over a forwarded port." ;;
 
   view)
+    source "$REPO/env/cear_env.sh" >/dev/null 2>&1 || true   # gallery needs cv2 (venv-cpu)
     python3 "$REPO/scripts/make_gallery.py" --seq "$SEQ" --out "$REPO/results/results.html"
     PORT="${PORT:-8000}"
     echo "============================================================"
