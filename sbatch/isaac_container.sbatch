@@ -37,7 +37,8 @@ export APPTAINERENV_OMNI_KIT_ACCEPT_EULA=YES APPTAINERENV_ACCEPT_EULA=Y APPTAINE
 echo "SIF=$SIF  seq=$SEQ mode=$MODE floor_z=$FLOORZ"
 nvidia-smi --query-gpu=name --format=csv,noheader
 
-ARGS="--collider $COLLIDER_DIR/collider.obj --mode $MODE --floor-z $FLOORZ --out-dir $OUT/isaac_container"
+OUTNAME="${CEAR_OUTNAME:-isaac_container}"     # per-run output dir (avoid clobbering when comparing colliders)
+ARGS="--collider $COLLIDER_DIR/collider.obj --mode $MODE --floor-z $FLOORZ --out-dir $OUT/$OUTNAME"
 [ "$MODE" = "nav" ] && ARGS="$ARGS --splat-usd $OUT/usd/scene_nurec.usdz --cam-model $OUT/colmap/sparse/0"
 
 # Run from scratch (never depend on /work being mounted on compute nodes). --fakeroot is
