@@ -50,25 +50,28 @@ Frames land in `$CEAR_OUT/<seq>/navsplat/` (robot) and `.../walkthrough/camera_0
 
 ---
 
-## 3. Live interactive session (fly/drive it yourself)
+## 3. Navigate the splat live (recommended: viser)
 
 ```
-./launch.sh live          # submit; then read the job's cear-live_<id>.out
+./launch.sh viser         # submit + auto-start the login-node relay; prints the PORTS step
 ```
-The job prints your node name and the exact SSH tunnel. In a new terminal on your laptop:
-```
-ssh -N -L 8211:<node>:8211 -L 8111:<node>:8111 <user>@unity.rc.umass.edu
-```
-Then open the **Isaac Sim WebRTC Streaming Client** (NVIDIA, free) — or the browser client —
-and connect to `127.0.0.1:8211`. You get the live Isaac viewport on the splat world; mouse to
-fly around.
+This launches 3DGRUT's **viser** web viewer (real-time, server-side rendered) and starts a
+relay on the login node so the viewer appears as a local port. Then, entirely in **VS Code**:
 
-**Caveat (important):** WebRTC also uses **UDP** media ports, which a plain SSH TCP tunnel
-can't carry. If the client connects but video never starts, it's the UDP-over-SSH limit, not a
-bug. Reliable options: (a) `salloc` a GPU node and run from a host your browser can reach
-directly; (b) configure a TURN relay; or (c) just use the rendered clips in the gallery, which
-need no networking. `sbatch/isaac_live.sbatch` is the launcher; it idles until you cancel
-(`scancel <id>`) or the 2 h walltime.
+1. Open the **PORTS** tab (bottom panel, next to TERMINAL).
+2. **Forward a Port** → `8090` → Enter.
+3. Click the **🌐 globe** on that row → browser opens the viewer.
+4. **Drag** to orbit, **WASD** + scroll to fly. `scancel <job>` when done.
+
+Why this and not WebRTC: viser is **HTTP+websocket (TCP)**, so it forwards over your existing
+SSH / VS Code connection — no VPN, no keys, no laptop terminal. (The relay exists because the
+viewer runs on a compute node; login1 can reach it directly and VS Code forwards the login-node
+port.) If the page dies, the `gpu-preempt` job was likely preempted — re-run `./launch.sh viser`.
+
+### Alternative: Isaac WebRTC (`./launch.sh live`)
+Full Isaac viewport (robot + physics), but WebRTC media is **UDP**, which a plain SSH tunnel
+can't carry — only works on the campus **VPN** (connect VPN, then Isaac WebRTC client →
+`<node>:8211`). Prefer `viser` unless you specifically need the Isaac scene.
 
 ---
 
