@@ -325,6 +325,91 @@ def collision_test(world, np, cx, cy, floor_z, verts, faces, out_dir):
     info["floor_rest_spread_m"] = round(float(max(rest_zs) - min(rest_zs)), 3)  # >0 => 3-D geometry
     snap("01_floor_grid.png")
 
+    # ---- Test 1b: SCATTERED OBSTACLES must be solid colliders ----
+    # detect raised structures from the collider mesh (grid-bin XY, cells whose top is well above
+    # the floor = blocks/boxes/furniture), then (a) drop a probe onto each -> must rest ELEVATED
+    # (proves the obstacle is a solid collider, not empty space), and (b) drive a rover into the
+    # biggest few -> must be blocked with contacts (horizontal collision on obstacles, not walls).
+    import collections
+    CELL = 0.3
+    cellmax = collections.defaultdict(lambda: -1e9)
+    for x, y, z in V:
+        cellmax[(int(np.floor(x/CELL)), int(np.floor(y/CELL)))] = max(
+            cellmax[(int(np.floor(x/CELL)), int(np.floor(y/CELL)))], float(z))
+    raised = {c: h for c, h in cellmax.items() if h > floor_z + 0.12}   # >12cm above floor
+    seen, clusters = set(), []
+    for c in raised:
+        if c in seen:
+            continue
+        stack, comp = [c], []
+        while stack:
+            cc = stack.pop()
+            if cc in seen or cc not in raised:
+                continue
+            seen.add(cc); comp.append(cc)
+            for ddx in (-1, 0, 1):
+                for ddy in (-1, 0, 1):
+                    stack.append((cc[0]+ddx, cc[1]+ddy))
+        clusters.append(comp)
+    obstacles = []
+    for comp in clusters:
+        if len(comp) < 2:                       # skip single-cell noise
+            continue
+        ox = float(np.mean([(c[0]+0.5)*CELL for c in comp]))
+        oy = float(np.mean([(c[1]+0.5)*CELL for c in comp]))
+        top = float(max(raised[c] for c in comp))
+        # keep obstacles that sit inside the floor area (not the perimeter walls)
+        if vmin[0]+0.6 < ox < vmax[0]-0.6 and vmin[1]+0.6 < oy < vmax[1]-0.6:
+            obstacles.append({"xy": [round(ox, 2), round(oy, 2)], "top_z": round(top, 3), "cells": len(comp)})
+    obstacles.sort(key=lambda o: -o["cells"])
+    obstacles = obstacles[:6]
+    info["n_obstacles_detected"] = len(obstacles)
+    info["obstacles"] = []
+    for k, o in enumerate(obstacles):
+        ox, oy = o["xy"]; top = o["top_z"]
+        s = world.scene.add(DynamicSphere(prim_path=f"/World/op_{k}", name=f"op_{k}",
+                            position=np.array([ox, oy, top + 0.35]), radius=0.05, mass=0.2))
+        world.reset()
+        for _ in range(250):
+            world.step(render=False)
+        rz = float(s.get_world_pose()[0][2])
+        o["probe_rest_z"] = round(rz, 3)
+        o["solid"] = bool(rz > floor_z + 0.1)   # rested elevated on the obstacle = solid collider
+        info["obstacles"].append(o)
+    snap("03_obstacle_drops.png")
+
+    # drive a rover horizontally INTO the biggest obstacle -> must be blocked + contacts
+    info["obstacle_drive"] = None
+    if obstacles:
+        o = obstacles[0]; ox, oy = o["xy"]
+        approach = np.array([cx - ox, cy - oy]); approach = approach/(np.linalg.norm(approach)+1e-9)
+        startp = np.array([ox, oy]) + approach*1.2                 # 1.2 m from the obstacle
+        path = "/World/rover_obs"
+        rover = world.scene.add(DynamicCuboid(prim_path=path, name="r_obs",
+                                position=np.array([startp[0], startp[1], floor_z+0.12]),
+                                scale=np.array([0.25, 0.25, 0.15]), mass=3.0, color=np.array([0.95, 0.4, 0.1])))
+        try:
+            PhysxSchema.PhysxRigidBodyAPI.Apply(world.stage.GetPrimAtPath(path)).CreateEnableCCDAttr(True)
+            PhysxSchema.PhysxContactReportAPI.Apply(world.stage.GetPrimAtPath(path)).CreateThresholdAttr(0.0)
+        except Exception:  # noqa: BLE001
+            pass
+        world.reset()
+        c0 = contacts["n"]
+        drive = -approach                                          # toward the obstacle
+        for step in range(240):
+            try:
+                rover.set_linear_velocity(np.array([drive[0]*0.8, drive[1]*0.8, 0.0]))
+            except Exception:  # noqa: BLE001
+                pass
+            world.step(render=(step % 40 == 0))
+        endp = rover.get_world_pose()[0]
+        d_to_obs = float(np.linalg.norm(np.array([float(endp[0]), float(endp[1])]) - np.array([ox, oy])))
+        info["obstacle_drive"] = {"obstacle_xy": [ox, oy], "start_dist": 1.2,
+                                  "end_dist_to_obstacle": round(d_to_obs, 2),
+                                  "blocked": bool(d_to_obs > 0.25),   # stopped short of the obstacle centre
+                                  "contacts": contacts["n"] - c0}
+        snap("04_obstacle_drive.png")
+
     # ---- Test 2: drive a CCD rover into each wall — must be blocked + contained ----
     margin = 0.5
     for dname, (dx, dy) in {"+x": (1, 0), "-x": (-1, 0), "+y": (0, 1), "-y": (0, -1)}.items():
@@ -361,17 +446,24 @@ def collision_test(world, np, cx, cy, floor_z, verts, faces, out_dir):
     n_fell = sum(1 for w in info["walls"] if w["fell"])
     n_blocked = sum(1 for w in info["walls"] if w["blocked_by_wall"])
     total_contacts = sum(w["contacts"] for w in info["walls"])
+    n_obs = len(info["obstacles"]); n_solid = sum(1 for o in info["obstacles"] if o["solid"])
+    obs_drive_ok = bool(info["obstacle_drive"] and info["obstacle_drive"]["blocked"]
+                        and info["obstacle_drive"]["contacts"] > 0)
     info["floor_ok"] = f"{floor_ok}/{len(probes)}"
     info["rovers_fell"] = n_fell
     info["walls_blocked"] = n_blocked
+    info["obstacles_solid"] = f"{n_solid}/{n_obs}"
+    info["obstacle_drive_blocked"] = obs_drive_ok
     info["total_contacts"] = total_contacts
     info["frames_dir"] = fdir
-    # PASS: nothing falls through (backup plane holds), no rover falls, real contacts fire, and at
-    # least one direction is clearly blocked by wall/obstacle geometry (proves 3-D collision).
+    # PASS: floor holds (no fall-through), no rover falls, contacts fire, walls block, AND the
+    # scattered obstacles are solid (probes rest on them) + a rover is blocked driving into one.
     info["gate_collision"] = "PASS" if (n_through == 0 and n_fell == 0 and total_contacts > 0
-                                        and n_blocked >= 1) else "REVIEW"
-    print(f"[compose] collision: floor {info['floor_ok']} no-fallthrough, rovers_fell {n_fell}, "
-          f"walls_blocked {n_blocked}/4, {total_contacts} contacts -> {info['gate_collision']}", flush=True)
+                                        and n_blocked >= 1 and n_obs > 0 and n_solid == n_obs
+                                        and obs_drive_ok) else "REVIEW"
+    print(f"[compose] collision: floor {info['floor_ok']}, obstacles_solid {n_solid}/{n_obs}, "
+          f"obs_drive_blocked {obs_drive_ok}, walls_blocked {n_blocked}/4, rovers_fell {n_fell}, "
+          f"{total_contacts} contacts -> {info['gate_collision']}", flush=True)
     return info
 
 
