@@ -422,10 +422,14 @@ def collision_test(world, np, cx, cy, floor_z, verts, faces, out_dir):
             world.step(render=(step % 50 == 0 and k == 0))
         endp = rover.get_world_pose()[0]
         d_to_obs = float(np.linalg.norm(np.array([float(endp[0]), float(endp[1])]) - np.array([ox, oy])))
-        # blocked = stopped short of the obstacle centre (didn't pass through it)
+        # blocked = collided (contacts) AND did not cross to the FAR side of the obstacle. `approach`
+        # points obstacle->centre (the rover's start side), so a rover still on the start side has a
+        # positive projection; one that tunnelled through to the far side goes negative.
+        proj = float(np.dot(np.array([float(endp[0]) - ox, float(endp[1]) - oy]), approach))
+        nc = contacts["n"] - c0
         info["obstacle_drives"].append({"xy": [ox, oy], "end_dist": round(d_to_obs, 2),
-                                        "blocked": bool(d_to_obs > half*0.8),
-                                        "contacts": contacts["n"] - c0})
+                                        "proj": round(proj, 2), "contacts": nc,
+                                        "blocked": bool(nc > 0 and proj > -0.2)})
         if k == 0:
             snap("04_obstacle_drive.png")
 
