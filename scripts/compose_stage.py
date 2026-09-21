@@ -97,6 +97,9 @@ def main():
                     help="render the collider mesh (debug/geometry view). Default: when a splat"
                          " is loaded the collider is an INVISIBLE physics proxy so it doesn't"
                          " occlude the photoreal NuRec volume.")
+    ap.add_argument("--warmup", type=int, default=800,
+                    help="render steps to converge the NuRec gaussians before capturing "
+                         "(NVIDIA's nurec_render.py default is 800; too few -> wrong/blurry).")
     ap.add_argument("--gui", action="store_true")
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
@@ -120,7 +123,25 @@ def main():
                   "--/omni/rtx/nre/compositing/disableNuRecPostProcessings=true",
                   "--/rtx/rtpt/gaussian/skipTonemapping/enabled=false"]
     app = SimulationApp({"headless": not args.gui, "renderer": "RayTracedLighting",
+                         "multi_gpu": False,
                          "extra_args": nurec_args if args.mode == "nav" else []})
+
+    # NuRec render extensions must be enabled right after boot — BEFORE the stage is built and
+    # the first Hydra sync — exactly as NVIDIA's standalone_examples/nurec/nurec_render.py does
+    # (enable isaacsim.replicator.nurec_utils, then enable_omni_rtx_spg). Bundled in Isaac 6.x;
+    # absent on 5.1 (there this fails gracefully and we fall back to the dome-lit geometry).
+    nurec_ready = False
+    if args.mode == "nav" and args.splat_usd:
+        try:
+            app.update()
+            from isaacsim.core.utils.extensions import enable_extension
+            enable_extension("isaacsim.replicator.nurec_utils")
+            from isaacsim.replicator.nurec_utils.rendering_setup import enable_omni_rtx_spg
+            enable_omni_rtx_spg(app)
+            nurec_ready = True
+            print("[compose] NuRec extensions enabled (nurec_utils + omni.rtx.spg)", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[compose] NuRec enable failed ({type(e).__name__}: {e}); geometry-only", flush=True)
 
     import numpy as np
     from pxr import UsdGeom, UsdPhysics, Gf, Vt, Sdf
@@ -165,25 +186,21 @@ def main():
         if args.splat_usd:
             add_reference_to_stage(usd_path=args.splat_usd, prim_path="/World/splat")
             print(f"[compose] referenced splat: {args.splat_usd}", flush=True)
-            # Enable the NuRec helper (bundled in Isaac 6.x; absent on 5.1 -> fails gracefully).
-            # A plain NuRec volume does NOT need omni.rtx.spg. enable_extension is synchronous
-            # for a bundled ext, so DON'T app.update() here — that would trigger the first Hydra
-            # sync before setup_for_rendering, which must run before the first render update.
-            from isaacsim.core.utils.extensions import enable_extension
-            try:
-                enable_extension("isaacsim.replicator.nurec_utils")
-            except Exception as e:  # noqa: BLE001
-                setup_err = f"enable nurec_utils: {type(e).__name__}: {e}"
-                print(f"[compose] {setup_err}", flush=True)
-            try:
-                from isaacsim.replicator.nurec_utils import setup_for_rendering
-                setup_for_rendering(stage)
-                print("[compose] nurec_utils.setup_for_rendering applied", flush=True)
-                result_setup = "nurec_utils"
-            except Exception as e:  # noqa: BLE001
-                setup_err = f"{type(e).__name__}: {e}"
-                print(f"[compose] nurec_utils unavailable ({setup_err}); launch args only", flush=True)
-                result_setup = "launch_args_only"
+            # Apply the NuRec render setup on the composed stage (detects the NuRec volume prim,
+            # sets gaussian tonemapping/photometry) — must run before the first render update.
+            # The exts were already enabled right after boot (nurec_ready).
+            if nurec_ready:
+                try:
+                    from isaacsim.replicator.nurec_utils.rendering_setup import setup_for_rendering
+                    setup_for_rendering(stage)
+                    print("[compose] setup_for_rendering applied", flush=True)
+                    result_setup = "nurec_utils"
+                except Exception as e:  # noqa: BLE001
+                    setup_err = f"{type(e).__name__}: {e}"
+                    print(f"[compose] setup_for_rendering failed ({setup_err})", flush=True)
+                    result_setup = "launch_args_only"
+            else:
+                result_setup = "geometry_only"  # 5.1 / no NuRec — dome-lit collider render
         result = nav_rover(world, app, args, cx, cy)
         result["nurec_setup"] = result_setup
         if setup_err:
@@ -267,7 +284,7 @@ def nav_rover(world, app, args, cx, cy):
 
     world.reset()
     import cv2
-    for _ in range(90):                        # warm up (NuRec gaussians take frames to converge)
+    for _ in range(args.warmup):               # converge NuRec gaussians before capture (default 800)
         world.step(render=True)
     vel_err = None
     for i in range(400):
