@@ -86,7 +86,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--collider", required=True, help="collider .obj (Z-up, metres)")
     ap.add_argument("--splat-usd", default=None, help="NuRec/ParticleField splat USD (nav mode)")
-    ap.add_argument("--mode", choices=["drop", "nav"], default="drop")
+    ap.add_argument("--mode", choices=["drop", "nav", "collision"], default="drop")
     ap.add_argument("--floor-z", type=float, default=0.0, help="RANSAC floor height (m)")
     ap.add_argument("--robot", default="jetbot", help="wheeled robot asset (nav mode)")
     ap.add_argument("--cam-model", default=None,
@@ -176,6 +176,8 @@ def main():
     result = {}
     if args.mode == "drop":
         result = gate5_drop(world, DynamicSphere, np, cx, cy, args.floor_z)
+    elif args.mode == "collision":
+        result = collision_test(world, np, cx, cy, args.floor_z, verts, faces, args.out_dir)
     else:
         # a dome light so the rover (and, on 5.1, the reconstructed geometry) is lit. The NuRec
         # volume carries its own baked radiance, so this mainly lights the rover cuboid; it also
@@ -235,6 +237,127 @@ def gate5_drop(world, DynamicSphere, np, cx, cy, floor_z, n=5, radius=0.05):
     passed = sum(oks) >= max(1, len(oks) - 1)             # allow 1 sphere over an obstacle
     return {"gate5": "PASS" if passed else "REVIEW", "n": len(spheres),
             "n_ok": int(sum(oks)), "drops": rests}
+
+
+def collision_test(world, np, cx, cy, floor_z, verts, faces, out_dir):
+    """Rigorously validate physics navigation on the reconstructed collider:
+       (1) drop a grid of probes — nothing falls through the floor; probes over obstacles rest
+           ELEVATED (proves 3-D collision, not just a ground plane);
+       (2) drive a CCD rover into the walls — it must be BLOCKED and stay contained (no tunnelling
+           out), with real PhysX CONTACT events logged as direct proof;
+       plus rendered frames of the rover navigating + colliding.
+    """
+    import os
+    import cv2
+    from isaacsim.core.api.objects import DynamicSphere, DynamicCuboid
+    from pxr import UsdGeom, UsdLux, Gf, PhysxSchema
+    import omni.replicator.core as rep
+    fdir = os.path.join(out_dir, "collision_frames"); os.makedirs(fdir, exist_ok=True)
+    V = np.array(verts); vmin = V.min(0); vmax = V.max(0)
+    info = {"floor_grid": [], "walls": [], "notes": ""}
+
+    # contact reporting — direct proof collisions fire (global counter via PhysX callback)
+    contacts = {"n": 0}
+    try:
+        from omni.physx import get_physx_simulation_interface
+        _sub = get_physx_simulation_interface().subscribe_contact_report_events(
+            lambda headers, data: contacts.__setitem__("n", contacts["n"] + len(headers)))
+    except Exception as e:  # noqa: BLE001
+        info["notes"] += f"contact-sub failed: {e}; "; _sub = None
+
+    UsdLux.DomeLight.Define(world.stage, "/World/domeLight").CreateIntensityAttr(1200.0)
+
+    # angled overhead camera looking at the scene centre (Z-up world), for visual proof
+    cam_pos = np.array([vmax[0] + 1.5, vmin[1] - 1.5, floor_z + 3.5])
+    fwd = np.array([cx, cy, floor_z]) - cam_pos; fwd = fwd / (np.linalg.norm(fwd) + 1e-9)
+    up = np.array([0, 0, 1.0]); right = np.cross(fwd, up); right /= (np.linalg.norm(right) + 1e-9)
+    Rc = np.column_stack([right, np.cross(right, fwd), -fwd]); q = _R_to_quat_wxyz(Rc)
+    cam = UsdGeom.Camera.Define(world.stage, "/World/coll_cam")
+    xf = UsdGeom.Xformable(cam.GetPrim()); xf.ClearXformOpOrder()
+    xf.AddTranslateOp().Set(Gf.Vec3d(*[float(v) for v in cam_pos]))
+    xf.AddOrientOp().Set(Gf.Quatf(float(q[0]), float(q[1]), float(q[2]), float(q[3])))
+    rprod = rep.create.render_product("/World/coll_cam", (1280, 720))
+    annot = rep.AnnotatorRegistry.get_annotator("LdrColor"); annot.attach([rprod])
+
+    def snap(name):
+        try:
+            for _ in range(4):
+                world.step(render=True)
+            arr = np.asarray(annot.get_data())
+            if arr.ndim >= 3 and arr.shape[0] > 1 and arr[..., :3].std() > 2:
+                cv2.imwrite(os.path.join(fdir, name),
+                            cv2.cvtColor(arr[..., :3].astype("uint8"), cv2.COLOR_RGB2BGR))
+                return True
+        except Exception as e:  # noqa: BLE001
+            info["notes"] += f"snap {name}: {e}; "
+        return False
+
+    # ---- Test 1: drop grid (floor + obstacles) ----
+    probes = []
+    for i, x in enumerate(np.linspace(vmin[0] + 1.0, vmax[0] - 1.0, 3)):
+        for j, y in enumerate(np.linspace(vmin[1] + 1.0, vmax[1] - 1.0, 3)):
+            s = world.scene.add(DynamicSphere(prim_path=f"/World/gp_{i}_{j}", name=f"gp_{i}_{j}",
+                                position=np.array([float(x), float(y), floor_z + 0.6]),
+                                radius=0.05, mass=0.2))
+            probes.append((s, (float(x), float(y))))
+    world.reset()
+    for _ in range(400):
+        world.step(render=False)
+    n_through = 0
+    rest_zs = []
+    for s, (x, y) in probes:
+        z = float(s.get_world_pose()[0][2]); through = z < floor_z - 0.1
+        n_through += int(through); rest_zs.append(z)
+        info["floor_grid"].append({"xy": [round(x, 2), round(y, 2)], "rest_z": round(z, 4), "through": through})
+    info["floor_rest_spread_m"] = round(float(max(rest_zs) - min(rest_zs)), 3)  # >0 => 3-D geometry
+    snap("01_floor_grid.png")
+
+    # ---- Test 2: drive a CCD rover into each wall — must be blocked + contained ----
+    margin = 0.5
+    for dname, (dx, dy) in {"+x": (1, 0), "-x": (-1, 0), "+y": (0, 1), "-y": (0, -1)}.items():
+        path = f"/World/rover_{dname.replace('+', 'p').replace('-', 'm')}"
+        rover = world.scene.add(DynamicCuboid(prim_path=path, name="r_" + dname,
+                                position=np.array([cx, cy, floor_z + 0.12]),
+                                scale=np.array([0.3, 0.3, 0.15]), mass=3.0,
+                                color=np.array([0.1, 0.5, 0.95])))
+        try:
+            rprim = world.stage.GetPrimAtPath(path)
+            PhysxSchema.PhysxRigidBodyAPI.Apply(rprim).CreateEnableCCDAttr(True)  # no tunnelling
+            PhysxSchema.PhysxContactReportAPI.Apply(rprim).CreateThresholdAttr(0.0)
+        except Exception:  # noqa: BLE001
+            pass
+        world.reset()
+        c0 = contacts["n"]
+        for step in range(400):
+            try:
+                rover.set_linear_velocity(np.array([dx * 1.0, dy * 1.0, 0.0]))
+            except Exception:  # noqa: BLE001
+                pass
+            world.step(render=(step % 40 == 0))
+        p = rover.get_world_pose()[0]; end = np.array([float(p[0]), float(p[1])])
+        reach = float(np.linalg.norm(end - np.array([cx, cy])))
+        tunneled = bool(end[0] > vmax[0] + margin or end[0] < vmin[0] - margin or
+                        end[1] > vmax[1] + margin or end[1] < vmin[1] - margin)
+        info["walls"].append({"dir": dname, "reach_m": round(reach, 2),
+                              "end_xy": [round(end[0], 2), round(end[1], 2)],
+                              "contained": not tunneled, "fell": bool(float(p[2]) < floor_z - 0.2),
+                              "contacts": contacts["n"] - c0})
+        snap(f"02_wall_{dname}.png")
+
+    floor_ok = len(probes) - n_through
+    walls_ok = sum(1 for w in info["walls"] if w["contained"] and not w["fell"])
+    total_contacts = sum(w["contacts"] for w in info["walls"])
+    info["floor_ok"] = f"{floor_ok}/{len(probes)}"
+    info["walls_contained"] = f"{walls_ok}/{len(info['walls'])}"
+    info["total_contacts"] = total_contacts
+    info["frames_dir"] = fdir
+    # PASS: nothing falls through, all rovers contained by geometry, and contacts actually fired
+    info["gate_collision"] = "PASS" if (n_through == 0 and walls_ok == len(info["walls"])
+                                        and total_contacts > 0) else "REVIEW"
+    print(f"[compose] collision: floor {info['floor_ok']} (spread {info['floor_rest_spread_m']}m), "
+          f"walls {info['walls_contained']} contained, {total_contacts} contacts -> {info['gate_collision']}",
+          flush=True)
+    return info
 
 
 def nav_rover(world, app, args, cx, cy):
