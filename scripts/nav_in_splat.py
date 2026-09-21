@@ -90,6 +90,10 @@ def main() -> int:
     ap.add_argument("--robot-drop", type=float, default=0.25,
                     help="lower the robot from camera height toward the floor along the up axis (m)")
     ap.add_argument("--robot-size", type=float, default=0.25)
+    ap.add_argument("--robot-mode", choices=["sweep", "path"], default="sweep",
+                    help="sweep: foreground lateral pass (stays visible); path: drive along the trajectory")
+    ap.add_argument("--sweep-dist", type=float, default=1.3, help="robot distance in front of the camera (m)")
+    ap.add_argument("--sweep-range", type=float, default=0.9, help="half-width of the lateral sweep (m)")
     args = ap.parse_args()
     os.makedirs(args.output, exist_ok=True)
     W, H = (int(x) for x in args.resolution.lower().split("x"))
@@ -143,7 +147,16 @@ def main() -> int:
     print(f"[nav] up_axis={up_axis} up_sign={args.up_sign} cam_idx={ci} look_idx={li} "
           f"cam@{cam_pos.round(2).tolist()} aim@{look_target.round(2).tolist()}", flush=True)
 
-    # robot drives along the recorded path, away from the camera (all on-path = good coverage)
+    # Robot path. mocap1 is a dense foliage volume (no open corridor), so driving "forward" sends
+    # the robot behind the gaussians. Default: a FOREGROUND lateral sweep — hold the robot a fixed
+    # distance in front of the camera and move it across the view, staying visible against the
+    # photoreal backdrop. (`--robot-mode path` drives along the recorded trajectory instead.)
+    front = look_target - cam_pos; front = front / (np.linalg.norm(front) + 1e-9)
+    right = np.cross(front, up_vec); right = right / (np.linalg.norm(right) + 1e-9)
+    def sweep_pos(k, n):
+        s = (k / max(n - 1, 1)) * 2.0 - 1.0                       # -1 .. +1
+        return (cam_pos + front * args.sweep_dist
+                + right * (s * args.sweep_range) - up_vec * args.robot_drop)
     idxs = [ci + args.robot_start + i * args.robot_stride for i in range(args.robot_count)]
     idxs = [i for i in idxs if 0 <= i < len(tum)]
 
@@ -166,9 +179,12 @@ def main() -> int:
 
     import cv2
     n_written = 0
+    N = len(idxs)
     for k, i in enumerate(idxs):
-        pos = centres[i].copy()
-        pos[up_axis] -= args.robot_drop                      # drop toward floor (negative to flip)
+        if args.robot_mode == "sweep":
+            pos = sweep_pos(k, N)
+        else:
+            pos = centres[i].copy(); pos[up_axis] -= args.robot_drop   # drive along path, at floor
         r_t.Set(Gf.Vec3d(float(pos[0]), float(pos[1]), float(pos[2])))
         rgb = cap.render_at_pose(view_pose)
         if rgb is None:
