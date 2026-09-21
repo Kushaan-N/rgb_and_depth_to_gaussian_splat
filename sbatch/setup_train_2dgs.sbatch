@@ -37,6 +37,23 @@ if [ ! -f "$TDGS/.setup_done" ]; then
 fi
 echo "=== 2dgs env ready ==="; "$PY" -c "import torch,open3d,diff_surfel_rasterization; print('torch',torch.__version__,'o3d',open3d.__version__,'surfel ok')"
 
+# compat patch: trimesh>=5 dropped Trimesh.as_open3d, which unbounded extraction relies on.
+# Idempotent (runs every time; only rewrites if the old line is still present) so a fresh checkout survives.
+"$PY" - "$TDGS/utils/mesh_utils.py" <<'PATCH'
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = "        mesh = mesh.as_open3d\n"
+new = ("        # trimesh>=5 dropped the .as_open3d property; build the o3d mesh explicitly\n"
+       "        mesh = o3d.geometry.TriangleMesh(\n"
+       "            o3d.utility.Vector3dVector(np.asarray(mesh.vertices)),\n"
+       "            o3d.utility.Vector3iVector(np.asarray(mesh.faces)),\n"
+       "        )\n")
+if old in s:
+    open(p, "w").write(s.replace(old, new)); print("patched mesh_utils.as_open3d")
+else:
+    print("mesh_utils already patched")
+PATCH
+
 cd "$TDGS"
 # --- train 2DGS on the COLMAP dataset (skip if already trained to ITERS) ---
 if [ ! -d "$MODEL/point_cloud/iteration_${ITERS}" ]; then
