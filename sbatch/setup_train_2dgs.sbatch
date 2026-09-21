@@ -29,7 +29,10 @@ if [ ! -f "$TDGS/.setup_done" ]; then
   [ -d "$VENV" ] || "$UV" venv --python 3.11 "$VENV"   # reuse a partial venv (torch already installed)
   "$UV" pip install --python "$PY" torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
   "$UV" pip install --python "$PY" open3d plyfile mediapy opencv-python tqdm scipy trimesh
-  "$UV" pip install --python "$PY" "$TDGS/submodules/diff-surfel-rasterization" "$TDGS/submodules/simple-knn"
+  "$UV" pip install --python "$PY" setuptools wheel ninja        # build deps for the CUDA extensions
+  # --no-build-isolation: the submodules' setup.py imports torch at build time (isolated build has none)
+  "$UV" pip install --python "$PY" --no-build-isolation \
+      "$TDGS/submodules/diff-surfel-rasterization" "$TDGS/submodules/simple-knn"
   touch "$TDGS/.setup_done"
 fi
 echo "=== 2dgs env ready ==="; "$PY" -c "import torch,open3d,diff_surfel_rasterization; print('torch',torch.__version__,'o3d',open3d.__version__,'surfel ok')"
