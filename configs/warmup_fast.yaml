@@ -1,0 +1,4 @@
+# Faster warmup for a dense multi-frame walkthrough (quality vs speed trade-off).
+# 300 RTPT ticks/frame converges a moving camera reasonably while keeping 90 frames tractable.
+rendering:
+  warmup_steps: 300
