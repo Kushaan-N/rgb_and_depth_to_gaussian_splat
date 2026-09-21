@@ -73,6 +73,7 @@ def main():
     os.makedirs(os.path.dirname(out), exist_ok=True)
 
     gsplat_dir = find(f"{nav}/train_3dgrut/*/*/ours_30000/renders")       # 3DGRUT native (correct convention)
+    robocomp_dir = find(f"{nav}/robot_composite")                          # robot driving in the sharp lab
     robot_dir = find(f"{nav}/navsplat_hq", f"{nav}/navsplat")           # prefer HQ (1280x720)
     walk_dir  = find(f"{nav}/walkthrough_follow", f"{nav}/walkthrough_hq/camera_0",
                      f"{nav}/walkthrough/camera_0")                       # prefer upright follow-cam
@@ -120,6 +121,10 @@ def main():
                     "The Gaussian-splat reconstruction of the CEAR sequence, rendered by 3DGRUT. Play / "
                     "scrub through a walk of the room: walls, ceiling lights, bench, brick/foam/box stacks "
                     "on shelving, tiled floor, mocap cameras. PSNR 26.2 · SSIM 0.84.", gsplat_dir),
+        player_card("Robot navigating the reconstructed world",
+                    "A robot driving across the floor of the sharp reconstruction — projected with the "
+                    "recovered camera pose (NCC 0.98) so it sits correctly grounded in perspective.",
+                    robocomp_dir),
     ]
     body = "\n".join(c for c in cards if c) or "<p class='card'>No frames found — run a render (see docs/RUN.md).</p>"
     html = f"""<!doctype html><html><head><meta charset="utf-8">
