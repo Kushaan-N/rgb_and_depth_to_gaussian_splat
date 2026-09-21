@@ -47,37 +47,47 @@ def main():
     if args.yaw > 0:
         offs += [(args.yaw, 0), (-args.yaw, 0), (0, args.yaw*0.6), (0, -args.yaw*0.6)]
 
+    def derive_K(rays_dir):
+        """Recover pinhole (fx,fy,cx,cy) from normalized camera-frame ray dirs by LS on the grid."""
+        rd = rays_dir.squeeze().float().cpu().numpy()               # (H,W,3)
+        H, W = rd.shape[0], rd.shape[1]
+        xs = (rd[..., 0] / rd[..., 2]).ravel(); ys = (rd[..., 1] / rd[..., 2]).ravel()
+        uu, vv = np.meshgrid(np.arange(W) + 0.5, np.arange(H) + 0.5)
+        fx, cx = np.linalg.lstsq(np.stack([xs, np.ones_like(xs)], 1), uu.ravel(), rcond=None)[0]
+        fy, cy = np.linalg.lstsq(np.stack([ys, np.ones_like(ys)], 1), vv.ravel(), rcond=None)[0]
+        return [float(fx), float(fy), float(cx), float(cy)], (H, W)
+
     n = 0
     for it, batch in enumerate(loader):
         if it % args.stride != 0:
             continue
         gb = dataset.get_gpu_batch_with_intrinsics(batch)
-        rays_dir0 = gb.rays_dir                      # (1,H,W,3) camera-frame, normalized
+        rays_dir0 = gb.rays_dir                      # (1,H,W,3) camera-frame pinhole rays (normalized)
         T0 = gb.T_to_world.clone()                   # (1,4,4) cam->world
-        K = list(gb.intrinsics)
-        H, W = rays_dir0.shape[1], rays_dir0.shape[2]
+        K, (H, W) = derive_K(rays_dir0)
+        rz = rays_dir0.squeeze()[..., 2].float().cpu().numpy()      # z-component (ray dist -> z-depth)
         for (yaw, pit) in offs:
-            gb.T_to_world = T0.clone()
-            gb.rays_dir = rays_dir0
-            if yaw != 0 or pit != 0:                 # rotate the camera in place to look around
+            # look-around: rotate ONLY the camera basis (c2w); keep the SAME pinhole rays in the
+            # (now rotated) camera frame, so depth + K + pose stay mutually consistent.
+            Tn = T0.clone()
+            if yaw != 0 or pit != 0:
                 Rc = torch.tensor(rot_yaw_pitch(yaw, pit), dtype=T0.dtype, device=T0.device)
-                Tn = T0.clone()
-                Tn[0, :3, :3] = T0[0, :3, :3] @ Rc   # rotate cam->world basis
-                gb.T_to_world = Tn
-                gb.rays_dir = torch.einsum("ij,bhwj->bhwi", Rc.T.to(rays_dir0.dtype), rays_dir0)
+                Tn[0, :3, :3] = T0[0, :3, :3] @ Rc
+            gb.T_to_world = Tn
+            gb.rays_dir = rays_dir0
             with torch.no_grad():
                 out = model(gb)
             dist = out["pred_dist"].squeeze().float().cpu().numpy()        # (H,W) ray distance
-            rz = gb.rays_dir.squeeze()[..., 2].float().cpu().numpy()       # cos angle to +Z
             zdepth = (dist * rz).astype(np.float32)                        # (H,W) z-depth
             zdepth[~np.isfinite(zdepth)] = 0.0
             zdepth[zdepth < 0] = 0.0
-            c2w = gb.T_to_world.squeeze().float().cpu().numpy()            # (4,4)
+            c2w = Tn.squeeze().float().cpu().numpy()                       # (4,4)
             np.savez_compressed(os.path.join(args.out, f"f_{n:05d}.npz"),
                                 depth=zdepth, c2w=c2w, K=np.array(K, np.float32))
             if n == 0:
-                print(f"[render] first frame: depth {zdepth.shape} range "
-                      f"[{zdepth[zdepth>0].min():.2f},{zdepth.max():.2f}]m  K={K}", flush=True)
+                v = zdepth[zdepth > 0]
+                print(f"[render] first frame: depth {zdepth.shape} valid%={100*(zdepth>0).mean():.0f} "
+                      f"range [{v.min():.2f},{v.max():.2f}]m  K={[round(x,1) for x in K]}", flush=True)
             n += 1
             if args.limit and n >= args.limit:
                 print(f"[render] wrote {n} depth frames to {args.out}", flush=True); return
