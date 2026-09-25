@@ -41,6 +41,7 @@ timestamps:
     event: 0.0                 # reference clock
     rgb: 0.004611              # RealSense (RGB + depth) — CRITICAL
     imu: -0.004012             # VectorNav
+    velodyne: 0.003044         # Velodyne VLP-16 LiDAR (t_event = t_scan + offset), CEAR calib page
     joints: 0.004611
     # velodyne: 0.003044       # LiDAR — NOT USED (project constraint)
 
