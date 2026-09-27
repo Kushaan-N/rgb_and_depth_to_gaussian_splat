@@ -24,6 +24,8 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--matcher", choices=["exhaustive", "sequential"], default="exhaustive")
     ap.add_argument("--refine-intrinsics", type=int, default=1, help="1=let BA refine focal/pp (the optimization arm)")
+    ap.add_argument("--frame-stride", type=int, default=0,
+                    help="0=use the gated set (default); N>0=use every Nth precond frame (denser coverage)")
     args = ap.parse_args()
     import pycolmap
 
@@ -31,14 +33,19 @@ def main():
     root = cfg["sequence"]["data_root"]
     out_root = cfg["paths"]["out_root"]
     precond = os.path.join(out_root, "precond", cfg["sequence"].get("rgb_dir", "rgb"))
-    # gated set used by the baseline = train_frames.txt + val_frames.txt (same frames -> fair compare)
-    names = []
-    for f in ["train_frames.txt", "val_frames.txt"]:
-        p = os.path.join(out_root, "gating", f)
-        if os.path.exists(p):
-            names += [ln.strip() for ln in open(p) if ln.strip()]
-    names = sorted(set(os.path.basename(n) for n in names))
-    print(f"[colmap] {len(names)} gated frames; image dir {precond}", flush=True)
+    if args.frame_stride > 0:
+        allf = sorted(os.path.basename(p) for p in glob.glob(os.path.join(precond, "*.png")))
+        names = allf[::args.frame_stride]
+        print(f"[colmap] {len(names)} frames (every {args.frame_stride}th of {len(allf)} precond); image dir {precond}", flush=True)
+    else:
+        # gated set used by the baseline = train_frames.txt + val_frames.txt (same frames -> fair compare)
+        names = []
+        for f in ["train_frames.txt", "val_frames.txt"]:
+            p = os.path.join(out_root, "gating", f)
+            if os.path.exists(p):
+                names += [ln.strip() for ln in open(p) if ln.strip()]
+        names = sorted(set(os.path.basename(n) for n in names))
+        print(f"[colmap] {len(names)} gated frames; image dir {precond}", flush=True)
 
     # known intrinsics as init
     import yaml
