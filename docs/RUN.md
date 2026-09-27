@@ -93,6 +93,34 @@ Data for mocap2/3 is already downloaded on scratch; only the GPU train/export ar
 
 ---
 
+## 6. Higher-fidelity splat (COLMAP poses) + LiDAR collider — RECOMMENDED
+
+Two measured findings changed the default recipe:
+
+- **Splat: COLMAP-optimized poses beat the raw GT mocap poses.** The OptiTrack poses are metric
+  but carry per-frame noise (time-sync, marker→cam), which caps the splat at a soft ~26 dB. COLMAP's
+  joint photometric bundle adjustment makes the poses mutually consistent → **PSNR 26.2 → 37.2 dB**
+  (SSIM 0.84 → 0.97) on held-out frames (mocap2). The refined intrinsics barely move (~0.6%), so it's
+  the poses, not K, that matter. COLMAP is arbitrary-scale, so we Sim3-align it back to the metric
+  GT frame afterward.
+- **Collider: use the Velodyne LiDAR, not the RGB-D depth.** The ground-level trot under-observed the
+  floor (colliders got floor 1–5/9, walls 0–3/4). The 360°/long-range LiDAR gives floor **7/9, walls
+  4/4, 0 rovers fell** — a functional navigable world.
+
+Recommended per-sequence recipe:
+```
+source env/cear_env.sh
+# sharper splat (COLMAP poses -> train -> export .ply for SuperSplat -> Sim3 metric .ply for Isaac)
+sbatch -A pi_donghyunkim_umass_edu sbatch/colmap_splat.sbatch <seq>
+# LiDAR collider (dense metric geometry)
+sbatch -A pi_donghyunkim_umass_edu sbatch/build_lidar.sbatch <seq>     # cloud -> collider_lidar
+```
+Outputs: `gaussians_colmap.ply` (COLMAP frame, drop into SuperSplat), `gaussians_colmap_metric.ply`
+(metric frame, co-registered with `collider_lidar` for Isaac). The old GT path
+(`sbatch/train_a100.sbatch`) is kept for reference/ablation (metric but soft).
+
+---
+
 ## 5. Validated physics rover — status & path to unify
 
 Physics **is** validated, just in a separate stage from the photoreal render:
