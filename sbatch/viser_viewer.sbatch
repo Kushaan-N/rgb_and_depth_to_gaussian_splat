@@ -21,10 +21,11 @@ export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"
 source "$THREEDGRUT_DIR/.venv/bin/activate"
 
 OUT="$CEAR_OUT/$SEQ"
-CKPT="$(ls -t "$OUT"/train_3dgrut/"$SEQ"/*/ckpt_last.pt 2>/dev/null | head -1)"
-DATASET="$OUT/dataset_3dgrut"
-[ -f "$CKPT" ] || { echo "no checkpoint for $SEQ"; exit 1; }
-[ -d "$DATASET" ] || { echo "no dataset_3dgrut for $SEQ (run train_splat first)"; exit 1; }
+# defaults to the GT splat; override CEAR_CKPT + CEAR_DATASET to view another (e.g. the COLMAP splat)
+CKPT="${CEAR_CKPT:-$(ls -t "$OUT"/train_3dgrut/"$SEQ"/*/ckpt_last.pt 2>/dev/null | head -1)}"
+DATASET="${CEAR_DATASET:-$OUT/dataset_3dgrut}"
+[ -f "$CKPT" ] || { echo "no checkpoint for $SEQ (set CEAR_CKPT)"; exit 1; }
+[ -d "$DATASET" ] || { echo "no dataset $DATASET (set CEAR_DATASET)"; exit 1; }
 NODE="$(hostname)"
 
 cat <<EOF
