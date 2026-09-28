@@ -1,0 +1,5 @@
+# CEAR sequence. Everything is inherited from datasets/cear.yaml (shared rig + calibration);
+# only what genuinely differs for this sequence belongs here.
+base: datasets/cear.yaml
+sequence:
+  name: mocap3_well-lit_comb
