@@ -63,6 +63,10 @@ frames:
     # SMALL correction; a large ΔT means something else is wrong (go back to TRAP 4).
     delta_T: null
 
+# --- raw data download (scripts/fetch_sequence.py; run automatically when a sequence is missing) ---
+download:
+  index: configs/datasets/cear_index.yaml   # all 87 CEAR sequences; regenerate: scripts/build_cear_index.py
+
 # --- calibration ----------------------------------------------------------
 calibration:
   dir: "${CEAR_DATA}/_calib"
