@@ -35,7 +35,7 @@ fi
 
 echo "[make_cpu_venv] verifying imports..."
 "$CEAR_VENV/bin/python" - <<'PY'
-import numpy, scipy, cv2, open3d, pycolmap, PIL, matplotlib, tqdm, yaml, imageio
+import numpy, scipy, cv2, open3d, pycolmap, PIL, matplotlib, tqdm, yaml, imageio, rosbags, plyfile
 print("OK:", "numpy", numpy.__version__, "| open3d", open3d.__version__,
       "| pycolmap", pycolmap.__version__, "| cv2", cv2.__version__)
 PY
