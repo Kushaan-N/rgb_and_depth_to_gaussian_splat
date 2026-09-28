@@ -10,7 +10,7 @@ is the sharp splat, in the same metric frame as everything else.
         --in-ply gaussians_colmap.ply --out-ply gaussians_colmap_metric.ply
 """
 from __future__ import annotations
-import argparse, os
+import argparse, os, sys
 import numpy as np
 
 
@@ -40,11 +40,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--colmap-model", required=True)
     ap.add_argument("--gt-model", required=True)
-    ap.add_argument("--in-ply", required=True)
-    ap.add_argument("--out-ply", required=True)
+    ap.add_argument("--in-ply", default=None, help="splat to transform (omit to only solve the Sim3)")
+    ap.add_argument("--out-ply", default=None)
+    ap.add_argument("--sim3-json", default=None, help="write {scale, R, t, residual} (COLMAP -> metric)")
     args = ap.parse_args()
-    from plyfile import PlyData, PlyElement
-    from scipy.spatial.transform import Rotation
 
     C = centers(args.colmap_model); G = centers(args.gt_model)
     common = sorted(set(C) & set(G))
@@ -55,6 +54,17 @@ def main():
     resid = np.linalg.norm((s * (R @ src.T).T + t) - dst, axis=1)
     print(f"[sim3] {len(common)} correspondences  scale={s:.4f}  "
           f"residual mean={resid.mean()*1000:.1f}mm p95={np.percentile(resid,95)*1000:.1f}mm", flush=True)
+    if args.sim3_json:
+        import json
+        os.makedirs(os.path.dirname(os.path.abspath(args.sim3_json)), exist_ok=True)
+        json.dump({"scale": s, "R": R.tolist(), "t": t.tolist(), "n_frames": len(common),
+                   "residual_mean_m": float(resid.mean()), "residual_p95_m": float(np.percentile(resid, 95))},
+                  open(args.sim3_json, "w"), indent=2)
+        print(f"[sim3] wrote {args.sim3_json}", flush=True)
+    if not args.in_ply:
+        return 0
+    from plyfile import PlyData, PlyElement
+    from scipy.spatial.transform import Rotation
 
     ply = PlyData.read(args.in_ply); v = ply["vertex"].data
     xyz = np.stack([v["x"], v["y"], v["z"]], 1).astype(np.float64)
@@ -82,4 +92,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
