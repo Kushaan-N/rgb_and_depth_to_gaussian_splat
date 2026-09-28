@@ -12,8 +12,11 @@ Classifies every room-floor cell the splat is missing, which tells you WHY it's 
         --colmap-model <ds>/sparse/0 --gt-model <out>/colmap_train/sparse/0 --out fig.png
 """
 from __future__ import annotations
-import argparse, json, os
+import argparse, json, os, sys
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from floor_plane import find_floor_plane
 
 
 def umeyama(src, dst):
@@ -57,14 +60,14 @@ def main():
     common = sorted(set(C) & set(G))
     s, R, t = umeyama(np.array([C[n] for n in common]), np.array([G[n] for n in common]))
 
-    # LiDAR floor plane (metric GT frame)
+    # floor plane (metric Z-up frame) — same deterministic detector the floor fill uses
     pc = o3d.io.read_point_cloud(args.lidar_cloud); L = np.asarray(pc.points)
-    model, inl = pc.segment_plane(0.03, 3, 1000)
-    n = np.array(model[:3]); d = model[3]; k = np.linalg.norm(n); n, d = n / k, d / k
-    if n[2] < 0:
-        n, d = -n, -d
+    floor = find_floor_plane(pc, np.array(list(G.values())))
+    if floor is None:
+        print("FLOOR_COVERAGE", json.dumps({"skipped": "no clear floor plane below the cameras"})); return
+    n, d, inl = floor
     hL = L @ n + d
-    fl = L[np.asarray(inl)]
+    fl = L[inl]
     lo = np.percentile(fl[:, :2], 2, axis=0) - 0.3
     hi = np.percentile(fl[:, :2], 98, axis=0) + 0.3
     nx, ny = np.ceil((hi - lo) / args.cell).astype(int)
