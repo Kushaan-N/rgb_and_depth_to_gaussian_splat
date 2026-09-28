@@ -76,6 +76,9 @@ calibration:
     - {file: event_rgb_extrinsic,   gdrive: 1sAij16MgFDjAzZAkVyfcUnNn_sH6cOpN, expect: T_event_rgb}
     - {file: event_lidar_extrinsic, gdrive: 13E0TcEdK7u-YI4HmLRvHlZMndmbR9B7o, expect: T_event_lidar}
     - {file: robot_links,           gdrive: 1b-tvjlJe6tQa-d5bC0vY5_CTV81R7IHq, expect: mini_cheetah}
+  # dataset-specific converter (scripts/<name> --calib-dir <dir> --out <intrinsics.calib_file>);
+  # another dataset supplies its own converter here — the pipeline code does not change.
+  convert: convert_calibration.py
 
 # --- camera intrinsics ----------------------------------------------------
 intrinsics:
