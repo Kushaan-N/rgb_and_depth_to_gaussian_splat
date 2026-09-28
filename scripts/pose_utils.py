@@ -45,15 +45,42 @@ from scipy.spatial.transform import Rotation, Slerp
 # Config loading
 # --------------------------------------------------------------------------- #
 
-def load_config(path: str) -> dict:
-    """Load a YAML config and expand ${ENV} references in every string value."""
+def _deep_merge(base: dict, over: dict) -> dict:
+    """Recursively merge `over` onto `base` (dicts merge key-wise; everything else is replaced)."""
+    out = dict(base)
+    for k, v in over.items():
+        out[k] = _deep_merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+
+
+def _load_config_raw(path: str) -> dict:
+    """Load YAML, resolving `base:` inheritance (relative to the including file), no expansion yet."""
     import yaml
     with open(path) as f:
-        cfg = yaml.safe_load(f)
+        cfg = yaml.safe_load(f) or {}
+    base = cfg.pop("base", None)
+    if base:
+        bpath = base if os.path.isabs(base) else os.path.join(os.path.dirname(os.path.abspath(path)), base)
+        cfg = _deep_merge(_load_config_raw(bpath), cfg)
+    return cfg
+
+
+def load_config(path: str) -> dict:
+    """Load a YAML config: resolve `base:` inheritance, `{seq}` placeholders and ${ENV} refs.
+
+    A config may name a `base:` file holding dataset-level facts shared by every sequence of that
+    dataset (sensor offsets, extrinsic directions, calibration, LiDAR topic, ...), so a sequence
+    config only overrides what differs — usually just `sequence.name`. Any string may use `{seq}`
+    for the sequence name, so per-sequence paths are derived instead of copy-pasted. Configs with
+    no `base:` load exactly as before.
+    """
+    cfg = _load_config_raw(path)
+    seq = (cfg.get("sequence") or {}).get("name")
 
     def _expand(obj):
         if isinstance(obj, str):
-            return os.path.expandvars(obj)
+            s = os.path.expandvars(obj)
+            return s.replace("{seq}", seq) if seq else s
         if isinstance(obj, dict):
             return {k: _expand(v) for k, v in obj.items()}
         if isinstance(obj, list):
