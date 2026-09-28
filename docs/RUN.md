@@ -93,31 +93,50 @@ Data for mocap2/3 is already downloaded on scratch; only the GPU train/export ar
 
 ---
 
-## 6. Higher-fidelity splat (COLMAP poses) + LiDAR collider — RECOMMENDED
+## 6. The pipeline — one command, any configured sequence (RECOMMENDED)
 
-Two measured findings changed the default recipe:
-
-- **Splat: COLMAP-optimized poses beat the raw GT mocap poses.** The OptiTrack poses are metric
-  but carry per-frame noise (time-sync, marker→cam), which caps the splat at a soft ~26 dB. COLMAP's
-  joint photometric bundle adjustment makes the poses mutually consistent → **PSNR 26.2 → 37.2 dB**
-  (SSIM 0.84 → 0.97) on held-out frames (mocap2). The refined intrinsics barely move (~0.6%), so it's
-  the poses, not K, that matter. COLMAP is arbitrary-scale, so we Sim3-align it back to the metric
-  GT frame afterward.
-- **Collider: use the Velodyne LiDAR, not the RGB-D depth.** The ground-level trot under-observed the
-  floor (colliders got floor 1–5/9, walls 0–3/4). The 360°/long-range LiDAR gives floor **7/9, walls
-  4/4, 0 rovers fell** — a functional navigable world.
-
-Recommended per-sequence recipe:
 ```
-source env/cear_env.sh
-# sharper splat (COLMAP poses -> train -> export .ply for SuperSplat -> Sim3 metric .ply for Isaac)
-sbatch -A pi_donghyunkim_umass_edu sbatch/colmap_splat.sbatch <seq>
-# LiDAR collider (dense metric geometry)
-sbatch -A pi_donghyunkim_umass_edu sbatch/build_lidar.sbatch <seq>     # cloud -> collider_lidar
+bash scripts/run_pipeline.sh mocap2_well-lit_trot     # or: path/to/config.yaml   (--force to redo)
 ```
-Outputs: `gaussians_colmap.ply` (COLMAP frame, drop into SuperSplat), `gaussians_colmap_metric.ply`
-(metric frame, co-registered with `collider_lidar` for Isaac). The old GT path
-(`sbatch/train_a100.sbatch`) is kept for reference/ablation (metric but soft).
+Three chained SLURM jobs (CPU prep → GPU train → CPU post), so a GPU is held only while training.
+Every step skips work already done and **skips itself when its input is absent** (no LiDAR bag,
+no depth, no clear floor) — the same command works on sequences with and without those sensors.
+
+| step | what | skips when |
+|---|---|---|
+| raw data | download the sequence from the dataset's index (`fetch_sequence.py`) | already present |
+| calibration | download + validate the calibration release, build the camera file (`fetch_calibration.py`) | already present |
+| poses / depth / gating | CPU phases 1–5 (`run_cpu_pipeline.sh`) | already done |
+| LiDAR cloud | any rosbag, topic + extrinsic chain from config (`build_lidar_cloud.py`) | no bag |
+| depth cloud | first of `pipeline.depth_sources` (LiDAR, else RGB-D fused cloud) | neither exists |
+| collider | depth cloud → gravity-aligned, room-cropped mesh (`build_lidar_collider.py`) | no depth |
+| COLMAP poses | photometric bundle adjustment (`colmap_sfm.py`, auto matcher) | done |
+| Sim3 | COLMAP → metric frame from shared cameras (`sim3_align_splat.py`) | — |
+| splat | 3DGRUT, gaussians seeded from the depth cloud (`lidar_to_colmap_points.py`) | no depth → COLMAP points |
+| floor fill | floor a depth sensor measured but no camera viewed (`infill_floor.py`) | no depth / no floor / no holes |
+| report | metric splat, floor-coverage figure, `summary.json` | — |
+
+Outputs in `$CEAR_OUT/<seq>/pipeline/`: `splat_filled.ply` (drop into SuperSplat),
+`splat_metric.ply` (metric frame, co-registered with the collider for Isaac), `collider/collider.obj`,
+`report/`, `summary.json`.
+
+**Why these defaults** (measured, mocap2 held-out frames):
+- COLMAP poses beat the raw OptiTrack GT poses: **PSNR 26.2 → 37.2 dB** (GT carries per-frame
+  time-sync/extrinsic noise; the refined intrinsics barely move, so it is the poses). Sim3 back to the
+  metric frame agrees with GT to ~6 mm.
+- LiDAR collider: floor 7/9, walls 4/4, 0 rovers fell (vs floor 1–5/9 from the ground-level RGB-D).
+- LiDAR-seeded init: best LPIPS (0.165 vs 0.196) and floor coverage 51% → 81% before the fill.
+
+**Add a sequence:** `configs/<name>.yaml` = `base: datasets/cear.yaml` + `sequence.name` (4 lines).
+**Add a dataset:** copy `configs/datasets/cear.yaml`, change the facts (sensor offsets, extrinsic
+chains, calibration fetch list + converter, LiDAR topic, download index), point sequence configs at it.
+No code changes.
+
+**Known limits:** CEAR's SLAM sequences give FasterLIO poses in a LiDAR/IMU body frame, which the
+pose chain doesn't support yet (mocap `marker`/`robot` frames only). On CEAR the pipeline's metric
+frame is actually **Z-down** despite `target_up: z` — the floor tools derive "up" from the data and
+warn; anything else that assumes +z = up must too. Floor no camera ever viewed is filled from depth
+(right place, plainer texture); only a capture that looks there adds real detail.
 
 ---
 
