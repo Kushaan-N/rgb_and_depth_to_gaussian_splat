@@ -1,25 +1,39 @@
-"""Fill interior floor holes in a splat with LiDAR-measured floor.
+"""Fill interior floor holes in a splat with floor a metric depth sensor measured (optional stage).
 
-floor_coverage.py shows the remaining hole is floor the LiDAR measured but no camera viewed head-on
-(the robot looped around the room centre facing outward), so training prunes whatever is seeded
-there. This post-process adds flat, matte gaussians exactly there — additive, nothing is deleted:
+Floor no camera viewed head-on (e.g. a robot looping around a room facing outward) gets pruned in
+training, leaving holes. Where a metric depth source (LiDAR cloud, or the fused RGB-D cloud) DID
+measure that floor, this adds flat, matte gaussians there — additive, nothing is deleted:
 
   WHERE   interior holes only (enclosed by splat floor, not touching the room box edge), on cells
-          with a LiDAR floor surface and no tall LiDAR object -> never paints over furniture/walls
-  HEIGHT  the LiDAR-measured surface height of each cell (not an assumed plane)
+          with a measured floor surface and no tall object -> never paints over furniture/walls
+  HEIGHT  the measured surface height of each cell (not an assumed plane)
   COLOUR  median of the real pixels that project onto the cell across every camera view that saw it
           (even grazing); pixel->SH mapping is fit on floor the splat already reconstructed. Cells
           no camera ever saw copy the nearest reconstructed floor gaussian.
 
-Output stays in the input splat's (COLMAP) frame.
+Auto-skips (copies the splat through unchanged, prints INFILL {"skipped": ...}) when there is no
+clear floor — the largest near-horizontal plane BELOW the cameras must hold >=2% of the points, so
+walls (tilted) and ceilings (above the cameras) are never mistaken for floor — or no interior hole.
+Assumes the pipeline's metric frame is Z-up. Output stays in the input splat's (COLMAP) frame.
 
-    python scripts/infill_floor.py --lidar-cloud <out>/lidar_cloud.ply --splat-ply in.ply \
+    python scripts/infill_floor.py --depth-cloud <metric cloud .ply> --splat-ply in.ply \
         --colmap-model <ds>/sparse/0 --gt-model <out>/colmap_train/sparse/0 \
         --images <out>/precond/rgb --out-ply out.ply
 """
 from __future__ import annotations
-import argparse, json, os
+import argparse, json, os, shutil, sys
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from floor_plane import find_floor_plane
+
+
+def passthrough(args, reason):
+    if os.path.abspath(args.splat_ply) != os.path.abspath(args.out_ply):
+        os.makedirs(os.path.dirname(os.path.abspath(args.out_ply)), exist_ok=True)
+        shutil.copyfile(args.splat_ply, args.out_ply)
+    print("INFILL", json.dumps({"skipped": reason, "added_gaussians": 0}))
+    print(f"[infill] SKIP ({reason}); splat passed through -> {args.out_ply}")
 
 
 def umeyama(src, dst):
@@ -43,7 +57,8 @@ def cam_pose(img):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--lidar-cloud", required=True)
+    ap.add_argument("--depth-cloud", "--lidar-cloud", dest="depth_cloud", required=True,
+                    help="metric point cloud in the Z-up world frame (LiDAR or fused RGB-D)")
     ap.add_argument("--splat-ply", required=True)
     ap.add_argument("--colmap-model", required=True)
     ap.add_argument("--gt-model", required=True)
@@ -64,14 +79,14 @@ def main():
     common = sorted(set(C) & set(G))
     s, R, t = umeyama(np.array([C[n] for n in common]), np.array([G[n] for n in common]))
 
-    # LiDAR floor plane + per-cell surface (metric GT frame)
-    pc = o3d.io.read_point_cloud(args.lidar_cloud); L = np.asarray(pc.points)
-    model, inl = pc.segment_plane(0.03, 3, 1000)
-    n = np.array(model[:3]); d = model[3]; k = np.linalg.norm(n); n, d = n / k, d / k
-    if n[2] < 0:
-        n, d = -n, -d
+    # floor plane + per-cell surface (metric Z-up world frame)
+    pc = o3d.io.read_point_cloud(args.depth_cloud); L = np.asarray(pc.points)
+    floor = find_floor_plane(pc, np.array([G[k] for k in G]))
+    if floor is None:
+        passthrough(args, "no clear floor plane below the cameras"); return
+    n, d, finl = floor
     hL = L @ n + d
-    fl = L[np.asarray(inl)]
+    fl = L[finl]
     lo = np.percentile(fl[:, :2], 2, axis=0) - 0.3
     hi = np.percentile(fl[:, :2], 98, axis=0) + 0.3
     nx, ny = np.ceil((hi - lo) / args.cell).astype(int)
@@ -122,7 +137,7 @@ def main():
     P = np.stack([cx, cy, z0], 1) + hmed[fi, fj][:, None] * n[None, :]     # on the LiDAR surface
     print(f"[infill] grid {nx}x{ny} @ {args.cell}m ; interior hole components={nlab-len(edge)} ; fill cells={len(P)}", flush=True)
     if not len(P):
-        print("nothing to fill"); return
+        passthrough(args, "no interior floor holes"); return
 
     # colour: sample real pixels for fill cells AND reconstructed-floor cells (for calibration)
     ci, cj = np.nonzero(cover & lidar_low & ~tall)
@@ -176,15 +191,14 @@ def main():
     use_fit = bool(r2.min() > 0.3 and len(Xc) > 50)
     print(f"[infill] colour calib on {len(Xc)} cells: slope={a_.round(3).tolist()} int={b_.round(3).tolist()} "
           f"R2={r2.round(2).tolist()} (SH-C0 convention would be slope {1/C0:.3f}, int {-0.5/C0:.3f}) "
-          f"-> {'fit' if use_fit else 'C0 convention'}", flush=True)
+          f"-> {'pixel colours' if use_fit else 'fit too weak: nearest reconstructed floor colours'}", flush=True)
 
+    # Pixel colours only through a fit that actually holds; the textbook SH-C0 conversion is NOT used
+    # as a fallback because trainers disagree on the DC convention (3DGRUT's is ~3x off from C0).
     fill_fdc = np.zeros((nf, 3))
-    seen = cnt[:nf] >= 3
-    if use_fit:
-        fill_fdc[seen] = med[:nf][seen] * a_ + b_
-    else:
-        fill_fdc[seen] = (med[:nf][seen] - 0.5) / C0
-    # never-seen cells: nearest reconstructed floor gaussian's colour
+    seen = (cnt[:nf] >= 3) & use_fit
+    fill_fdc[seen] = med[:nf][seen] * a_ + b_
+    # never-seen cells (or no reliable fit): nearest reconstructed floor gaussian's colour
     if (~seen).any():
         tree = cKDTree(Xg[gsel][:, :2])
         _, nn = tree.query(P[~seen][:, :2])
