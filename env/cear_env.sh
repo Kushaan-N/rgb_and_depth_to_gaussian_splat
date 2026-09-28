@@ -21,6 +21,10 @@ export CEAR_VENV="${CEAR_VENV:-$CEAR_WS/venv-cpu}"  # CPU venv (Phases 1-5)
 
 mkdir -p "$CEAR_DATA" "$CEAR_OUT"
 
+# --- cluster / GPU env (site-specific; override per user or site) -----------
+export CEAR_SLURM_ACCOUNT="${CEAR_SLURM_ACCOUNT:-pi_donghyunkim_umass_edu}"  # used by scripts/run_pipeline.sh
+export THREEDGRUT_DIR="${THREEDGRUT_DIR:-$CEAR_WS/3dgrut}"                   # 3DGRUT checkout + its .venv
+
 # --- python env -----------------------------------------------------------
 if [ -f "$CEAR_VENV/bin/activate" ]; then
   # shellcheck disable=SC1091
