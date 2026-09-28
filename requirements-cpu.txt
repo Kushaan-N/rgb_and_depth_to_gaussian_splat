@@ -14,6 +14,7 @@ open3d==0.20.0
 pycolmap==4.2.0
 rosbags==0.11.5               # LiDAR/any rosbag1+2 ingestion (build_lidar_cloud.py)
 plyfile==1.1.5                # 3DGS .ply read/write (Sim3 align, floor fill, coverage)
+gdown==6.4.0                  # Google Drive files/folders for fetch_sequence.py (large-file confirm)
 pillow
 imageio
 tqdm
