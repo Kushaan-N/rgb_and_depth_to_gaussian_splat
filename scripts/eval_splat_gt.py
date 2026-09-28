@@ -42,6 +42,7 @@ def main():
     ap.add_argument("--val-json", default=None, help="gating/val_frames.json (default from config out_root)")
     ap.add_argument("--colmap-model", default=None, help="if set, map GT poses into this model's frame via Sim3")
     ap.add_argument("--gt-model", default=None, help="GT COLMAP model for the Sim3 reference (colmap_train/sparse/0)")
+    ap.add_argument("--sim3-json", default=None, help="Sim3 from sim3_align_splat.py --sim3-json (preferred)")
     ap.add_argument("--tag", default="eval")
     args = ap.parse_args()
 
@@ -53,15 +54,22 @@ def main():
     cfg = pu.load_config(args.config)
     out_root = cfg["paths"]["out_root"]
     precond = os.path.join(out_root, "precond", cfg["sequence"].get("rgb_dir", "rgb"))
-    K = np.array(yaml.safe_load(open(cfg["intrinsics"]["calib_file"]))["K"], dtype=float)
+    cal = yaml.safe_load(open(cfg["intrinsics"]["calib_file"]))
+    K = np.array(cal["K"], dtype=float)
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+    W = int(cal.get("width") or cfg["intrinsics"]["image_width"])
+    H = int(cal.get("height") or cfg["intrinsics"]["image_height"])
     val_json = args.val_json or os.path.join(out_root, "gating", "val_frames.json")
     val = json.load(open(val_json))
     print(f"[eval-gt] {len(val)} held-out frames; tag={args.tag}", flush=True)
 
     s, R, t = 1.0, np.eye(3), np.zeros(3)
-    if args.colmap_model:
+    if args.sim3_json:                      # preferred: solved once by sim3_align_splat.py (no pycolmap needed here)
+        j = json.load(open(args.sim3_json))
+        s, R, t = float(j["scale"]), np.array(j["R"]), np.array(j["t"])
+    elif args.colmap_model:
         s, R, t = sim3_from_models(args.colmap_model, args.gt_model)
+    if args.sim3_json or args.colmap_model:
         print(f"[eval-gt] Sim3 colmap->gt scale={s:.4f}", flush=True)
 
     def gt_to_model_wc(Twc_gt):
@@ -76,7 +84,7 @@ def main():
     os.makedirs(os.path.join(ds, "sparse", "0"), exist_ok=True)
     os.makedirs(os.path.join(ds, "images"), exist_ok=True)
     with open(os.path.join(ds, "sparse", "0", "cameras.txt"), "w") as f:
-        f.write(f"1 PINHOLE 640 480 {fx} {fy} {cx} {cy}\n")
+        f.write(f"1 PINHOLE {W} {H} {fx} {fy} {cx} {cy}\n")
     with open(os.path.join(ds, "sparse", "0", "images.txt"), "w") as f:
         for i, fr in enumerate(val, 1):
             Rwc, twc = gt_to_model_wc(fr["T_world_cam"])
