@@ -40,7 +40,8 @@ def cam_pose(img):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--lidar-cloud", required=True)
+    ap.add_argument("--depth-cloud", "--lidar-cloud", dest="lidar_cloud", required=True,
+                    help="metric point cloud (LiDAR or fused RGB-D)")
     ap.add_argument("--splat-ply", required=True)
     ap.add_argument("--colmap-model", required=True)
     ap.add_argument("--gt-model", required=True)
