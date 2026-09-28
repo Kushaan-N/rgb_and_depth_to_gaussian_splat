@@ -22,7 +22,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--matcher", choices=["exhaustive", "sequential"], default="exhaustive")
+    ap.add_argument("--matcher", choices=["auto", "exhaustive", "sequential"], default="auto",
+                    help="auto = exhaustive up to --exhaustive-max frames (robust, O(n^2)), sequential beyond")
+    ap.add_argument("--exhaustive-max", type=int, default=600)
     ap.add_argument("--refine-intrinsics", type=int, default=1, help="1=let BA refine focal/pp (the optimization arm)")
     ap.add_argument("--frame-stride", type=int, default=0,
                     help="0=use the gated set (default); N>0=use every Nth precond frame (denser coverage)")
@@ -63,8 +65,9 @@ def main():
     print("[colmap] extract_features (CPU SIFT)...", flush=True)
     pycolmap.extract_features(db, precond, image_names=names, camera_mode=pycolmap.CameraMode.SINGLE,
                               reader_options=ro, device=pycolmap.Device.cpu)
-    print(f"[colmap] match ({args.matcher})...", flush=True)
-    if args.matcher == "exhaustive":
+    matcher = args.matcher if args.matcher != "auto" else ("exhaustive" if len(names) <= args.exhaustive_max else "sequential")
+    print(f"[colmap] match ({matcher}, {len(names)} frames)...", flush=True)
+    if matcher == "exhaustive":
         pycolmap.match_exhaustive(db, device=pycolmap.Device.cpu)
     else:
         pycolmap.match_sequential(db, device=pycolmap.Device.cpu)
