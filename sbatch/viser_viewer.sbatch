@@ -43,6 +43,6 @@ nvidia-smi --query-gpu=name --format=csv,noheader
 cd "$THREEDGRUT_DIR"
 # resume the finished ckpt, 0 extra iters, serve the viser GUI (blocks in the render loop)
 python train.py --config-name apps/colmap_3dgut.yaml \
-  path="$DATASET" out_dir="$OUT/train_3dgrut" experiment_name="$SEQ" \
+  path="$DATASET" out_dir="$OUT/viser_run" experiment_name="viser" \
   dataset.downsample_factor=1 resume="$CKPT" with_viser_gui=true n_iterations=30000
 echo "VISER_VIEWER_DONE"
