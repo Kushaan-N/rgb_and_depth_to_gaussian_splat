@@ -75,16 +75,28 @@ def main():
     os.makedirs(stage, exist_ok=True); os.makedirs(root, exist_ok=True)
     print(f"[fetch] {name} ({size_gb} GB) -> {root}  (missing: {missing})", flush=True)
 
+    # optional signed-in Google session (Netscape cookie file) — lifts Drive's anonymous download quota
+    cookies = os.environ.get("GDRIVE_COOKIES") or None
+    kw = dict(quiet=True, retries=3, cookies_file=cookies)
     for item, src in entry.items():
         if item == "size_gb":
             continue
-        if "gdrive_folder" in src:
-            print(f"[fetch] {item}: Drive folder -> {root}", flush=True)
-            gdown.download_folder(id=src["gdrive_folder"], output=root, quiet=True, retries=3)
-            continue
-        print(f"[fetch] {item}: downloading", flush=True)
-        path = (gdown.download(id=src["gdrive"], output=stage + os.sep, quiet=True, retries=3)
-                if "gdrive" in src else gdown.download(url=src["url"], output=stage + os.sep, quiet=True, retries=3))
+        try:
+            if "gdrive_folder" in src:
+                print(f"[fetch] {item}: Drive folder -> {root}", flush=True)
+                gdown.download_folder(id=src["gdrive_folder"], output=root, **kw)
+                continue
+            print(f"[fetch] {item}: downloading", flush=True)
+            path = (gdown.download(id=src["gdrive"], output=stage + os.sep, **kw) if "gdrive" in src
+                    else gdown.download(url=src["url"], output=stage + os.sep, **kw))
+        except Exception as ex:  # noqa: BLE001 — gdown raises several types for quota / permission
+            reason = str(ex).strip().splitlines()[0] if str(ex).strip() else type(ex).__name__
+            print(f"[fetch] ERROR: the host refused '{item}' for {name}: {reason}\n"
+                  f"  This is the dataset host's download limit, not a pipeline error. Either:\n"
+                  f"    - rerun later (Drive quotas reset within ~24 h; finished steps are skipped), or\n"
+                  f"    - use a signed-in Google session: export Drive cookies (Netscape format) to a file\n"
+                  f"      and rerun with GDRIVE_COOKIES=<that file>")
+            return 3
         if not path or not os.path.exists(path):
             print(f"[fetch] ERROR: download of {item} failed (Drive quota or link change?)"); return 1
         if _unpack(path, os.path.join(stage, "unpacked")):
