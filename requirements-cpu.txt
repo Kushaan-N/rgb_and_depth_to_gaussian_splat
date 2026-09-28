@@ -12,6 +12,8 @@ scipy==1.17.1
 opencv-python-headless==5.0.0
 open3d==0.20.0
 pycolmap==4.2.0
+rosbags==0.11.5               # LiDAR/any rosbag1+2 ingestion (build_lidar_cloud.py)
+plyfile==1.1.5                # 3DGS .ply read/write (Sim3 align, floor fill, coverage)
 pillow
 imageio
 tqdm
