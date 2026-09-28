@@ -1,5 +1,12 @@
 # Fetching CEAR data (Phase 1)
 
+**This is automatic now.** `scripts/run_pipeline.sh <seq>` downloads a missing sequence
+(`scripts/fetch_sequence.py`, using the catalog in `configs/datasets/cear_index.yaml`) and the
+calibration release (`scripts/fetch_calibration.py`, validated, idempotent), then builds the camera
+file. Both can be run on their own with `--config configs/<seq>.yaml`. Regenerate the catalog with
+`python scripts/build_cear_index.py --out configs/datasets/cear_index.yaml` if CEAR changes links.
+The manual steps below are kept only as a fallback.
+
 CEAR is hosted on Google Drive (project site: https://daroslab.github.io/cear/,
 Downloads: https://daroslab.github.io/cear/Downloads/). Download **into `$CEAR_DATA`**
 (scratch), never into the repo or `$HOME`.
@@ -39,7 +46,8 @@ python scripts/inventory.py --config configs/mocap1_well-lit_trot.yaml    # Gate
 ```
 
 Notes:
-- `lidar.bag` may be present in the download; it is **never read** (project constraint).
+- `lidar.bag` is read by the pipeline (LiDAR cloud, collider, splat init, floor fill); its topic,
+  time offset and extrinsic chain come from the dataset config.
 - VERIFY at Gate 1: depth is 16-bit, 1 mm/unit, 0 = invalid; image size 640x480;
   which pose file exists (`MoCap.txt` inside the OptiTrack volume, else `FasterLIO.txt`).
 - Compute-node egress may be blocked — download from the login/data-transfer node.
