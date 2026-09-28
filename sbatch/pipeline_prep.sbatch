@@ -1,6 +1,6 @@
 #!/bin/bash
 # Pipeline stage 1/3 (CPU). Submitted by scripts/run_pipeline.sh — use that, not this directly.
-#   calibration -> poses/depth/gating -> LiDAR cloud -> metric depth cloud -> collider
+#   raw data -> calibration -> poses/depth/gating -> LiDAR cloud -> metric depth cloud -> collider
 #   -> COLMAP poses -> Sim3 (COLMAP -> metric) -> training dataset (depth-seeded init)
 # Every step is idempotent and skips itself when its input is absent (no LiDAR bag, no depth, ...).
 #SBATCH -J pipe-prep
@@ -19,6 +19,9 @@ GT="$OUT/colmap_train/sparse/0"
 mkdir -p "$P/report"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-16}"
 echo "== [prep] $(get sequence.name) -> $P =="
+
+echo "-- raw data"
+python3 scripts/fetch_sequence.py --config "$CFG"
 
 echo "-- calibration"
 python3 scripts/fetch_calibration.py --config "$CFG"
