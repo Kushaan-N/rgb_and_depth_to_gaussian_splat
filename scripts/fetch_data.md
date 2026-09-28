@@ -7,6 +7,11 @@ file. Both can be run on their own with `--config configs/<seq>.yaml`. Regenerat
 `python scripts/build_cear_index.py --out configs/datasets/cear_index.yaml` if CEAR changes links.
 The manual steps below are kept only as a fallback.
 
+If Google Drive refuses a file ("Too many users have viewed or downloaded this file recently"), that
+is Drive's per-file quota on CEAR's hosting: rerun later (finished steps are skipped), or export
+signed-in Drive cookies (Netscape format, e.g. via a browser cookie-export extension) to a file and
+rerun with `GDRIVE_COOKIES=/path/to/cookies.txt bash scripts/run_pipeline.sh <seq>`.
+
 CEAR is hosted on Google Drive (project site: https://daroslab.github.io/cear/,
 Downloads: https://daroslab.github.io/cear/Downloads/). Download **into `$CEAR_DATA`**
 (scratch), never into the repo or `$HOME`.
