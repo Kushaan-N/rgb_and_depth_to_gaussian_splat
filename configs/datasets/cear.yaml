@@ -1,0 +1,159 @@
+# CEAR dataset config — facts shared by EVERY CEAR sequence (one rig, one calibration release).
+#
+# Sequence configs inherit this with `base: datasets/cear.yaml` and set only `sequence.name`
+# (plus any genuine per-sequence override, e.g. pose_file for SLAM sequences). `{seq}` below is
+# replaced by that name. This is the SINGLE SOURCE OF TRUTH for every convention the plan's TRAPs
+# warn about (quaternion order, timestamp units, sensor offsets, frame directions, up-axis) —
+# scripts read conventions from here and never hardcode them.
+#
+# To support another robot dataset, copy this file, change the facts, and point its sequence
+# configs at it. No code changes.
+
+sequence:
+  data_root: "${CEAR_DATA}/{seq}"
+  pose_file: MoCap.txt          # OptiTrack ground truth (mocap sequences). SLAM seqs: FasterLIO.txt
+  rgb_dir: rgb                 # CEAR ships only rgb/ (processed stream; no raw_rgb/)
+  depth_dir: depth             # holds BOTH *_depth_rgb (used) and *_depth_event projections;
+                               #   the pipeline reads the depth_rgb file named per frame (§6.1).
+  raw_depth_dir: raw_depth     # depth in the DEPTH camera frame (not used by default).
+  timestamp_table: realsense_timestamp.txt
+  imu_file: vectornav.txt
+  joint_file: mini_cheetah_joint.txt
+
+# --- timestamps -----------------------------------------------------------
+# Everything is converted to float SECONDS on the EVENT-camera clock.
+timestamps:
+  units:                       # TRAP 2: units differ between files
+    rgb: microseconds
+    imu: microseconds
+    joints: microseconds
+    pose: seconds
+  # TRAP 3: per-sensor offsets (seconds), t_event = t_sensor + offset. These are the dataset-wide
+  # constants published on the CEAR calibration page (https://daroslab.github.io/cear/Calibration/).
+  # No hardware sync; a sequence may override one if its own Gate 2 / diagnose_time_offset.py says so.
+  # The rgb offset applies to BOTH the RGB and depth columns of realsense_timestamp.txt (same
+  # RealSense clock); the two columns still differ by up to 8.33 ms (TRAP 7), each posed at its own time.
+  offsets_s:
+    event: 0.0                 # reference clock
+    rgb: 0.004611              # RealSense (RGB + depth) — CRITICAL
+    imu: -0.004012             # VectorNav
+    joints: 0.004611
+    velodyne: 0.003044         # Velodyne VLP-16 LiDAR
+
+# --- rotation conventions -------------------------------------------------
+quaternions:                   # TRAP 1 / 1b
+  pose_order: xyzw             # MoCap.txt / FasterLIO.txt: scalar-LAST
+  imu_order: wxyz              # vectornav.txt: scalar-FIRST
+  colmap_order: wxyz           # COLMAP images.txt: scalar-FIRST, world-to-camera
+
+# --- coordinate frames ----------------------------------------------------
+frames:
+  world_up: y                  # OptiTrack world is Y-up (§5.4).
+  target_up: z                 # pipeline converts everything to Z-up (USD/Isaac, floor z=0)
+  pose_frame: marker           # TRAP 4: MoCap reports the MARKER frame, not the RGB optical frame
+                               #   (confirmed by diagnose_conventions.py: robot frame is 3-4x worse).
+  # Extrinsic direction of each stored calibration transform. CONFIRMED from the CEAR
+  # calibration headers (2026-09-20): T_rgb_marker/T_rgb_robot "take a point FROM the
+  # marker/robot frame TO the RGB frame", i.e. marker→rgb / robot→rgb == marker_to_cam.
+  extrinsic:
+    rgb_marker_direction: marker_to_cam
+    rgb_robot_direction: robot_to_cam
+    # §5.3 constant-extrinsic correction ΔT (16-elem row-major 4x4), applied as
+    # T_world_cam = T_world_marker @ T_marker_cam @ ΔT. Identity unless refine_extrinsic.py finds a
+    # SMALL correction; a large ΔT means something else is wrong (go back to TRAP 4).
+    delta_T: null
+
+# --- calibration ----------------------------------------------------------
+calibration:
+  dir: "${CEAR_DATA}/_calib"
+  # Fetched automatically by scripts/fetch_calibration.py when missing (CEAR release, Google Drive).
+  # `expect` is text that must appear in the file — a wrong or corrupt download fails loudly.
+  fetch:
+    - {file: realsense_intrinsics,  gdrive: 18vLEDh_gjX25PapgfI6racGMKtI7e5Sw, expect: RGB_cam}
+    - {file: rgb_depth_extrinsic,   gdrive: 18xIn3x1EH-1tZ43yl0fJzC9MNRfRLt40, expect: T_rgb_depth}
+    - {file: rgb_robot_extrinsic,   gdrive: 1Vlr01SkgorLVqzUNas3tWOe4E1WJ8HK8, expect: T_rgb_robot}
+    - {file: rgb_marker_extrinsic,  gdrive: 11s58CDnDjQP7XAzR9B6eRVkaSElQPuoQ, expect: T_rgb_marker}
+    - {file: event_rgb_extrinsic,   gdrive: 1sAij16MgFDjAzZAkVyfcUnNn_sH6cOpN, expect: T_event_rgb}
+    - {file: event_lidar_extrinsic, gdrive: 13E0TcEdK7u-YI4HmLRvHlZMndmbR9B7o, expect: T_event_lidar}
+    - {file: robot_links,           gdrive: 1b-tvjlJe6tQa-d5bC0vY5_CTV81R7IHq, expect: mini_cheetah}
+
+# --- camera intrinsics ----------------------------------------------------
+intrinsics:
+  # Generated from calibration.dir by scripts/convert_calibration.py (the pipeline does this when
+  # missing); undistortion (§7.2) then writes a plain PINHOLE camera for the trainer.
+  calib_file: "${CEAR_DATA}/{seq}/calibration/rgb_intrinsics.yaml"
+  image_width: 640
+  image_height: 480
+
+# --- LiDAR (optional; every LiDAR stage auto-skips if the bag is absent) ----
+lidar:
+  bag: lidar.bag               # relative to data_root (glob allowed); rosbag1 or rosbag2
+  topic: /velodyne_points      # sensor_msgs/PointCloud2
+  time_offset_key: velodyne    # REQUIRED key in timestamps.offsets_s — no silent default
+  # T_cam_lidar (a LiDAR point -> RGB camera frame), composed left-to-right from calibration.dir.
+  # CEAR publishes the LiDAR relative to the event camera: T_rgb_lidar = inv(T_event_rgb) @ T_event_lidar.
+  extrinsic_chain:
+    - {file: event_rgb_extrinsic,   key: T_event_rgb,   invert: true}
+    - {file: event_lidar_extrinsic, key: T_event_lidar, invert: false}
+  min_range_m: 0.5
+  max_range_m: 12.0
+  voxel_m: 0.02
+
+# --- photometric (Phase 4, §7.2) -----------------------------------------
+photometric:
+  # Auto-exposure was CONFIRMED ON in the paper — brightness varies along the trajectory
+  # by construction. precondition_frames.py quantifies the drift.
+  auto_exposure_confirmed: true
+
+# --- depth ----------------------------------------------------------------
+depth:
+  units_per_meter: 1000.0      # 16-bit, 1 mm/unit (RealSense)
+  invalid_value: 0             # 0 = invalid/no-return
+  min_range_m: 0.2
+  max_range_m: 4.0             # §2.7 range truncation to bound D455 noise growth; tune 3-5
+
+# --- depth fusion (Phase 3) ----------------------------------------------
+fusion:
+  voxel_size_m: 0.025          # TSDF voxel (2-3 cm)
+  sdf_trunc_m: 0.10
+  seed_downsample_m: 0.03      # voxel-downsample for points3D.txt seed
+
+# --- blur / motion gating (Phase 4) --------------------------------------
+gating:
+  omega_percentile_keep: 50    # keep the sharpest ~50% by |omega|; then tune
+  laplacian_min: 50.0          # variance-of-Laplacian floor (sharpness); tune
+  spatial_min_sep_m: 0.03      # drop near-duplicate viewpoints
+  holdout_every: 8             # §7.4: hold out every 8th GATED frame (split after gating)
+  # TRAP 8: every sequence starts with a pitch-swing + thrown-ball sync preamble; exclude
+  # it from training and fusion. Auto-detected from the IMU pitch signature; set
+  # preamble_end_s (event-clock seconds) in a sequence config to override if detection is wrong.
+  exclude_preamble: true
+  preamble_end_s: null
+  preamble_swing_factor: 2.0
+
+# --- clock sync / drift (TRAP 3) ------------------------------------------
+sync:
+  drift_check: true
+  drift_tolerance_ms: 2.0
+
+# --- collider (Phase 5) ---------------------------------------------------
+collider:
+  method: tsdf_marching_cubes  # tsdf_marching_cubes | poisson (nvblox is Option B, external)
+  max_triangles: 50000
+  floor_patch: true            # patch unobserved floor holes with the RANSAC plane (§8)
+  flatten_floor: true          # snap near-floor vertices to the RANSAC plane (clean foot-contact
+  flatten_floor_band_m: 0.04   #   surface; real-depth floor noise makes the drop test marginal)
+
+# --- splat pipeline (scripts/run_pipeline.sh) ---------------------------------
+pipeline:
+  sfm_matcher: auto            # auto = exhaustive up to 600 frames, sequential beyond
+  sfm_refine_intrinsics: true
+  train_iterations: 30000
+  init_from_depth: true        # seed gaussians from the metric depth cloud (LiDAR, else RGB-D); auto-skips
+  init_max_points: 400000
+  floor_fill: true             # fill floor the camera never viewed, where a depth source measured it; auto-skips
+  depth_sources: [lidar, rgbd] # preference order for the metric depth cloud (init, floor fill, collider)
+
+# --- outputs --------------------------------------------------------------
+paths:
+  out_root: "${CEAR_OUT}/{seq}"
