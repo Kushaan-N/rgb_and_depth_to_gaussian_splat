@@ -6,6 +6,8 @@
 #   bash scripts/run_pipeline.sh path/to/config.yaml
 #   bash scripts/run_pipeline.sh <seq> --force                         # delete <out_root>/pipeline, rerun
 #   bash scripts/run_pipeline.sh <seq> --variant mcmc [--force]        # A/B: configs/variants/mcmc.yaml
+#   bash scripts/run_pipeline.sh fused_<name>                          # config with fuse.members: one
+#                                                                      #   splat from several recordings
 #
 # Submits chained SLURM jobs (CPU prep -> GPU train -> CPU post) so the GPU is only held while
 # training. Stages are idempotent and skip themselves when an input is absent (no LiDAR bag, no depth).
@@ -13,7 +15,7 @@
 # New dataset = new configs/datasets/<name>.yaml; new experiment = new configs/variants/<name>.yaml.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"; cd "$REPO"
-[ $# -ge 1 ] || { sed -n '2,14p' "$0"; exit 2; }
+[ $# -ge 1 ] || { sed -n '2,16p' "$0"; exit 2; }
 SEQARG="$1"; shift
 FORCE=""; VARIANT=""
 while [ $# -gt 0 ]; do
@@ -31,6 +33,8 @@ source env/cear_env.sh >/dev/null
 OUT="$(python3 scripts/cfg_get.py "$CFG" paths.out_root)"; P="$OUT/pipeline"
 ACC=(); if [ -n "${CEAR_SLURM_ACCOUNT:-}" ]; then ACC=(-A "$CEAR_SLURM_ACCOUNT"); fi
 LOGS="$OUT/logs"; mkdir -p "$LOGS"
+MEMBERS="$(python3 scripts/cfg_get.py "$CFG" fuse.members)"
+PREP=sbatch/pipeline_prep.sbatch; if [ -n "$MEMBERS" ]; then PREP=sbatch/pipeline_prep_fuse.sbatch; fi
 
 if [ -n "$VARIANT" ]; then
   VCFG="$REPO/configs/variants/$VARIANT.yaml"
@@ -43,8 +47,8 @@ if [ -n "$VARIANT" ]; then
   printf 'base: [%s, %s]\nvariant: %s\npipeline:\n  run_dir: %s\n' "$CFG" "$VCFG" "$VARIANT" "$R" > "$R/config.yaml"
   DEP=()
   if [ ! -e "$P/train_data" ]; then
-    J1=$(sbatch --parsable "${ACC[@]}" -o "$LOGS/pipe-prep_%j.out" sbatch/pipeline_prep.sbatch "$CFG")
-    DEP=(--dependency="afterok:$J1"); echo "prep not done yet -> queued prep=$J1 first"
+    J1=$(sbatch --parsable "${ACC[@]}" -o "$LOGS/pipe-prep_%j.out" "$PREP" "$CFG")
+    DEP=(--dependency="afterok:$J1"); echo "prep not done yet -> queued prep=$J1 first (members must be prepped)"
   fi
   J2=$(sbatch --parsable "${ACC[@]}" "${DEP[@]}" -o "$LOGS/pipe-train-${VARIANT}_%j.out" sbatch/pipeline_train.sbatch "$R/config.yaml")
   J3=$(sbatch --parsable "${ACC[@]}" --dependency="afterok:$J2" -o "$LOGS/pipe-post-${VARIANT}_%j.out" sbatch/pipeline_post.sbatch "$R/config.yaml")
@@ -54,7 +58,23 @@ if [ -n "$VARIANT" ]; then
 fi
 
 if [ -n "$FORCE" ]; then echo "removing $P"; rm -rf "$P"; fi
-J1=$(sbatch --parsable "${ACC[@]}" -o "$LOGS/pipe-prep_%j.out" sbatch/pipeline_prep.sbatch "$CFG")
+if [ -n "$MEMBERS" ]; then
+  # fused config: prep every member that isn't prepped yet, then fuse them into one training set
+  DEPS=""
+  for m in $MEMBERS; do
+    MCFG="$m"; [ -f "$MCFG" ] || MCFG="$REPO/configs/$m.yaml"
+    [ -f "$MCFG" ] || { echo "no config for fuse member '$m'"; exit 2; }
+    MP="$(python3 scripts/cfg_get.py "$MCFG" paths.out_root)/pipeline"
+    if [ ! -f "$MP/sim3.json" ] || [ ! -d "$MP/dataset/sparse/0" ]; then
+      JM=$(sbatch --parsable "${ACC[@]}" -o "$LOGS/pipe-prep-${m}_%j.out" sbatch/pipeline_prep.sbatch "$MCFG")
+      DEPS="$DEPS:$JM"; echo "member $m not prepped -> prep=$JM"
+    fi
+  done
+  DEP=(); if [ -n "$DEPS" ]; then DEP=(--dependency="afterok$DEPS"); fi
+  J1=$(sbatch --parsable "${ACC[@]}" "${DEP[@]}" -o "$LOGS/pipe-prep_%j.out" "$PREP" "$CFG")
+else
+  J1=$(sbatch --parsable "${ACC[@]}" -o "$LOGS/pipe-prep_%j.out" sbatch/pipeline_prep.sbatch "$CFG")
+fi
 J2=$(sbatch --parsable "${ACC[@]}" --dependency="afterok:$J1" -o "$LOGS/pipe-train_%j.out" sbatch/pipeline_train.sbatch "$CFG")
 J3=$(sbatch --parsable "${ACC[@]}" --dependency="afterok:$J2" -o "$LOGS/pipe-post_%j.out" sbatch/pipeline_post.sbatch "$CFG")
 cat <<EOF
