@@ -60,8 +60,11 @@ def _load_config_raw(path: str) -> dict:
         cfg = yaml.safe_load(f) or {}
     base = cfg.pop("base", None)
     if base:
-        bpath = base if os.path.isabs(base) else os.path.join(os.path.dirname(os.path.abspath(path)), base)
-        cfg = _deep_merge(_load_config_raw(bpath), cfg)
+        merged = {}
+        for b in (base if isinstance(base, list) else [base]):   # a list merges in order (e.g. sequence, variant)
+            bpath = b if os.path.isabs(b) else os.path.join(os.path.dirname(os.path.abspath(path)), b)
+            merged = _deep_merge(merged, _load_config_raw(bpath))
+        cfg = _deep_merge(merged, cfg)
     return cfg
 
 
