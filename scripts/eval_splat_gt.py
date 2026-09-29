@@ -11,28 +11,12 @@ Sim3 (Umeyama) solved from COLMAP<->GT camera centres, with the TRUE intrinsics 
         [--colmap-model <ds>/sparse/0 --gt-model <out>/colmap_train/sparse/0]   # omit for a GT-frame model
 """
 from __future__ import annotations
-import argparse, os, tempfile
+import argparse, os, sys, tempfile
 import numpy as np
 
 
-def umeyama(src, dst):
-    mu_s, mu_d = src.mean(0), dst.mean(0)
-    S, D = src - mu_s, dst - mu_d
-    U, d, Vt = np.linalg.svd((D.T @ S) / len(src))
-    W = np.eye(3)
-    if np.linalg.det(U) * np.linalg.det(Vt) < 0:
-        W[2, 2] = -1
-    R = U @ W @ Vt
-    s = np.trace(np.diag(d) @ W) / ((S ** 2).sum() / len(src))
-    return float(s), R, mu_d - s * R @ mu_s
-
-
-def sim3_from_models(colmap_model, gt_model):
-    import pycolmap
-    C = {i.name: np.asarray(i.projection_center()) for i in pycolmap.Reconstruction(colmap_model).images.values()}
-    G = {i.name: np.asarray(i.projection_center()) for i in pycolmap.Reconstruction(gt_model).images.values()}
-    common = sorted(set(C) & set(G))
-    return umeyama(np.array([C[n] for n in common]), np.array([G[n] for n in common]))  # colmap->gt
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from sim3_utils import get_sim3
 
 
 def main():
@@ -64,11 +48,8 @@ def main():
     print(f"[eval-gt] {len(val)} held-out frames; tag={args.tag}", flush=True)
 
     s, R, t = 1.0, np.eye(3), np.zeros(3)
-    if args.sim3_json:                      # preferred: solved once by sim3_align_splat.py (no pycolmap needed here)
-        j = json.load(open(args.sim3_json))
-        s, R, t = float(j["scale"]), np.array(j["R"]), np.array(j["t"])
-    elif args.colmap_model:
-        s, R, t = sim3_from_models(args.colmap_model, args.gt_model)
+    if args.sim3_json or args.colmap_model:   # sim3.json preferred (no pycolmap needed in the trainer venv)
+        s, R, t = get_sim3(args.sim3_json, args.colmap_model, args.gt_model)
     if args.sim3_json or args.colmap_model:
         print(f"[eval-gt] Sim3 colmap->gt scale={s:.4f}", flush=True)
 
