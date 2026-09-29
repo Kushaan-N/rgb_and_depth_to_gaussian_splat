@@ -20,6 +20,8 @@ OUT="$(get paths.out_root)"; P="$OUT/pipeline"; R="$(get pipeline.run_dir "$P")"
 ITERS="$(get pipeline.train_iterations 30000)"; APP="$(get pipeline.trainer_app apps/colmap_3dgut.yaml)"
 read -r -a OVR <<< "$(get pipeline.trainer_overrides)"
 mkdir -p "$R"
+# fused run: members' held-out frames are already excluded from train_data and scored separately
+if [ -f "$P/fuse.json" ]; then OVR+=(dataset.test_split_interval=0); fi
 echo "== [train] $SEQ  app=$APP  overrides=[${OVR[*]}]  ($ITERS iters) -> $R =="
 
 deactivate 2>/dev/null || true
@@ -37,4 +39,19 @@ else
 fi
 CKPT="$(ls -t "$R"/train/*/*/ckpt_last.pt | head -1)"
 python3 "$REPO/scripts/export_gaussian_ply.py" --checkpoint "$CKPT" --out "$R/splat.ply"
+
+# fused run: score the fused splat and each member's own splat on that member's held-out frames
+# (same frames, same COLMAP-derived poses; eval/<member>/{fused,single} are written by the fuse prep)
+if [ -d "$P/eval" ]; then
+  for d in "$P"/eval/*/; do
+    M="$(basename "$d")"
+    python3 "$REPO/scripts/eval_views.py" --checkpoint "$CKPT" --dataset "$d/fused" --tag "fused:$M" \
+      --json-out "$R/report/eval/$M.fused.json"
+    MCKPT="$(ls -t $(python3 -c "import json;print(json.load(open('$P/members/$M.json'))['ckpt_glob'])") 2>/dev/null | head -1 || true)"
+    if [ -n "$MCKPT" ] && [ ! -f "$R/report/eval/$M.single.json" ]; then
+      python3 "$REPO/scripts/eval_views.py" --checkpoint "$MCKPT" --dataset "$d/single" --tag "single:$M" \
+        --json-out "$R/report/eval/$M.single.json"
+    fi
+  done
+fi
 echo "PIPELINE_TRAIN_DONE"
