@@ -159,8 +159,8 @@ def main():
     cfg = pu.load_config(args.config)
     fz = cfg.get("fuse") or {}
     members = fz.get("members") or []
-    if len(members) < 2:
-        raise SystemExit("[fuse] fuse.members needs at least two sequences")
+    if not members:     # one member is allowed: it re-expresses that sequence in the metric frame (a check)
+        raise SystemExit("[fuse] fuse.members is empty")
     P = os.path.join(cfg["paths"]["out_root"], "pipeline")
     interval = int(fz.get("holdout_interval", 8))            # = the trainer's test_split_interval
     align = fz.get("align", "icp")
