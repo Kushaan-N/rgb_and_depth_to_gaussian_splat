@@ -55,6 +55,7 @@ adopted must stay automatic and config-driven (see docs/RUN.md §6) — no per-s
    the loop at two heights; that is the only source of real texture where no camera looked.
 
 ## Pipeline hygiene still open
-- Five copies of the Umeyama/Sim3 solve across scripts → one shared module, and every step reads
-  the single `sim3.json` the prep writes (consistency + less code).
+- ~~Five copies of the Umeyama/Sim3 solve~~ — done: `scripts/sim3_utils.py`, and every stage reads
+  the single `sim3.json` from prep (regression-tested: identical outputs).
+- ~~Collider and COLMAP ran back-to-back in prep~~ — done: they now overlap (independent steps).
 - COLMAP feature extraction/matching on the GPU would cut the slowest CPU step.
