@@ -1,0 +1,6 @@
+# Variant: 3DGS-MCMC densification (3DGRUT's colmap_3dgut_mcmc app). Dead gaussians are RELOCATED to
+# where they are needed under a fixed budget instead of pruned; init scales come from neighbour
+# spacing rather than camera distance. Train-stage only — reuses the sequence's prep outputs.
+#   bash scripts/run_pipeline.sh <seq> --variant mcmc
+pipeline:
+  trainer_app: apps/colmap_3dgut_mcmc.yaml
