@@ -1,0 +1,6 @@
+# Variant: MCMC + opacity/scale regularisation (the values NVIDIA ships in cusfm_3dgut_mcmc), which
+# pushes unneeded gaussians transparent/small — aimed at mid-air floaters. Train-stage only.
+#   bash scripts/run_pipeline.sh <seq> --variant mcmc_reg
+pipeline:
+  trainer_app: apps/colmap_3dgut_mcmc.yaml
+  trainer_overrides: [loss.use_opacity=true, loss.lambda_opacity=0.0001, loss.use_scale=true, loss.lambda_scale=0.005]
