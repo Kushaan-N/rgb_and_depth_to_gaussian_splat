@@ -17,6 +17,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sim3_utils import get_sim3
+from eval_views import score_dataset
 
 
 def main():
@@ -30,7 +31,7 @@ def main():
     ap.add_argument("--tag", default="eval")
     args = ap.parse_args()
 
-    import json, yaml, torch
+    import json, yaml
     from scipy.spatial.transform import Rotation
     import sys; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import pose_utils as pu
@@ -77,37 +78,9 @@ def main():
                 os.symlink(src, dst)
     open(os.path.join(ds, "sparse", "0", "points3D.txt"), "w").close()
 
-    # load model + render all frames (test_split_interval<=0 -> all frames used), score vs GT image
-    from threedgrut.render import Renderer
-    import threedgrut.datasets as datasets
-    from threedgrut.datasets.utils import configure_dataloader_for_platform
-    from torchmetrics import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
-    from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
-
-    r = Renderer.from_checkpoint(checkpoint_path=args.checkpoint, path=ds, out_dir=ds,
-                                 save_gt=False, computes_extra_metrics=False)
-    model = r.model
-    conf = r.conf
-    conf.dataset.test_split_interval = 0            # use every frame
-    dataset, _ = datasets.make(conf.dataset.type, conf, ray_jitter=None)
-    loader = torch.utils.data.DataLoader(dataset, **configure_dataloader_for_platform(
-        {"num_workers": 4, "batch_size": 1, "shuffle": False, "collate_fn": None}))
-    psnr_m = PeakSignalNoiseRatio(data_range=1.0).cuda()
-    ssim_m = StructuralSimilarityIndexMeasure(data_range=1.0).cuda()
-    lpips_m = LearnedPerceptualImagePatchSimilarity(net_type="vgg", normalize=True).cuda()
-    P, S, L = [], [], []
-    for batch in loader:
-        gb = dataset.get_gpu_batch_with_intrinsics(batch)
-        with torch.no_grad():
-            out = model(gb)
-        pred = out["pred_features"][..., :3].clip(0, 1)      # (1,H,W,3)
-        gt = gb.rgb_gt[..., :3]
-        P.append(psnr_m(pred, gt).item())
-        pchw = pred.permute(0, 3, 1, 2); gchw = gt.permute(0, 3, 1, 2)
-        S.append(ssim_m(pchw, gchw).item())
-        L.append(lpips_m(pchw, gchw).item())
-    print(f"[eval-gt] {args.tag}: N={len(P)}  PSNR={np.mean(P):.3f}  SSIM={np.mean(S):.4f}  LPIPS={np.mean(L):.4f}", flush=True)
-    print(f"EVAL_GT_RESULT tag={args.tag} psnr={np.mean(P):.3f} ssim={np.mean(S):.4f} lpips={np.mean(L):.4f} n={len(P)}")
+    m = score_dataset(args.checkpoint, ds)
+    print(f"[eval-gt] {args.tag}: N={m['n']}  PSNR={m['psnr']:.3f}  SSIM={m['ssim']:.4f}  LPIPS={m['lpips']:.4f}", flush=True)
+    print(f"EVAL_GT_RESULT tag={args.tag} psnr={m['psnr']:.3f} ssim={m['ssim']:.4f} lpips={m['lpips']:.4f} n={m['n']}")
 
 
 if __name__ == "__main__":
