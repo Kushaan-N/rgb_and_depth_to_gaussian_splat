@@ -26,6 +26,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from floor_plane import find_floor_plane
+from sim3_utils import get_sim3
 
 
 def passthrough(args, reason):
@@ -35,16 +36,6 @@ def passthrough(args, reason):
     print("INFILL", json.dumps({"skipped": reason, "added_gaussians": 0}))
     print(f"[infill] SKIP ({reason}); splat passed through -> {args.out_ply}")
 
-
-def umeyama(src, dst):
-    mu_s, mu_d = src.mean(0), dst.mean(0)
-    U, d, Vt = np.linalg.svd(((dst - mu_d).T @ (src - mu_s)) / len(src))
-    W = np.eye(3)
-    if np.linalg.det(U) * np.linalg.det(Vt) < 0:
-        W[2, 2] = -1
-    R = U @ W @ Vt
-    s = np.trace(np.diag(d) @ W) / (((src - mu_s) ** 2).sum() / len(src))
-    return float(s), R, mu_d - s * R @ mu_s
 
 
 def cam_pose(img):
@@ -60,7 +51,8 @@ def main():
     ap.add_argument("--depth-cloud", "--lidar-cloud", dest="depth_cloud", required=True,
                     help="metric point cloud in the Z-up world frame (LiDAR or fused RGB-D)")
     ap.add_argument("--splat-ply", required=True)
-    ap.add_argument("--colmap-model", required=True)
+    ap.add_argument("--colmap-model", default=None, help="only needed without --sim3-json")
+    ap.add_argument("--sim3-json", default=None, help="COLMAP->metric Sim3 from sim3_align_splat.py (preferred)")
     ap.add_argument("--gt-model", required=True)
     ap.add_argument("--images", required=True)
     ap.add_argument("--out-ply", required=True)
@@ -73,11 +65,9 @@ def main():
     from scipy.spatial import cKDTree
     from scipy.spatial.transform import Rotation
 
-    Crec = pycolmap.Reconstruction(args.colmap_model); Grec = pycolmap.Reconstruction(args.gt_model)
-    C = {i.name: np.asarray(i.projection_center()) for i in Crec.images.values()}
+    Grec = pycolmap.Reconstruction(args.gt_model)
     G = {i.name: np.asarray(i.projection_center()) for i in Grec.images.values()}
-    common = sorted(set(C) & set(G))
-    s, R, t = umeyama(np.array([C[n] for n in common]), np.array([G[n] for n in common]))
+    s, R, t = get_sim3(args.sim3_json, args.colmap_model, args.gt_model)
 
     # floor plane + per-cell surface (metric Z-up world frame)
     pc = o3d.io.read_point_cloud(args.depth_cloud); L = np.asarray(pc.points)
