@@ -52,3 +52,13 @@ def test_config_without_base_is_unchanged(tmp_path, monkeypatch):
     cfg = pu.load_config(p)
     assert cfg["sequence"]["data_root"] == "/x/d"
     assert cfg["other"] == "s1 stays literal only with a name"
+
+
+def test_base_list_merges_in_order(tmp_path):
+    """A generated variant config = [sequence config, variant overlay] + its own run_dir."""
+    _write(tmp_path / "seq.yaml", "sequence: {name: s}\npipeline: {trainer_app: a.yaml, iters: 30000}\npaths: {out_root: '/o/{seq}'}\n")
+    _write(tmp_path / "var.yaml", "pipeline: {trainer_app: b.yaml, trainer_overrides: [x=1]}\n")
+    run = _write(tmp_path / "run.yaml", f"base: [{tmp_path/'seq.yaml'}, {tmp_path/'var.yaml'}]\npipeline: {{run_dir: /o/s/v}}\n")
+    cfg = pu.load_config(run)
+    assert cfg["pipeline"] == {"trainer_app": "b.yaml", "iters": 30000, "trainer_overrides": ["x=1"], "run_dir": "/o/s/v"}
+    assert cfg["paths"]["out_root"] == "/o/s"
