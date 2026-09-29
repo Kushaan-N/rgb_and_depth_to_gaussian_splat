@@ -14,26 +14,8 @@ import argparse, os, sys
 import numpy as np
 
 
-def umeyama(src, dst):
-    """Least-squares similarity (s,R,t) mapping src->dst (Nx3). dst ~= s*R@src + t."""
-    mu_s, mu_d = src.mean(0), dst.mean(0)
-    S, D = src - mu_s, dst - mu_d
-    cov = (D.T @ S) / len(src)
-    U, d, Vt = np.linalg.svd(cov)
-    W = np.eye(3)
-    if np.linalg.det(U) * np.linalg.det(Vt) < 0:
-        W[2, 2] = -1
-    R = U @ W @ Vt
-    var_s = (S ** 2).sum() / len(src)
-    s = np.trace(np.diag(d) @ W) / var_s
-    t = mu_d - s * R @ mu_s
-    return float(s), R, t
-
-
-def centers(model_path):
-    import pycolmap
-    rec = pycolmap.Reconstruction(model_path)
-    return {img.name: np.asarray(img.projection_center()) for img in rec.images.values()}
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from sim3_utils import solve_sim3
 
 
 def main():
@@ -45,19 +27,16 @@ def main():
     ap.add_argument("--sim3-json", default=None, help="write {scale, R, t, residual} (COLMAP -> metric)")
     args = ap.parse_args()
 
-    C = centers(args.colmap_model); G = centers(args.gt_model)
-    common = sorted(set(C) & set(G))
-    if len(common) < 10:
-        print(f"only {len(common)} shared frames — cannot align"); return 2
-    src = np.array([C[n] for n in common]); dst = np.array([G[n] for n in common])
-    s, R, t = umeyama(src, dst)
-    resid = np.linalg.norm((s * (R @ src.T).T + t) - dst, axis=1)
-    print(f"[sim3] {len(common)} correspondences  scale={s:.4f}  "
+    try:
+        s, R, t, resid = solve_sim3(args.colmap_model, args.gt_model)
+    except ValueError as e:
+        print(f"[sim3] {e} — cannot align"); return 2
+    print(f"[sim3] {len(resid)} correspondences  scale={s:.4f}  "
           f"residual mean={resid.mean()*1000:.1f}mm p95={np.percentile(resid,95)*1000:.1f}mm", flush=True)
     if args.sim3_json:
         import json
         os.makedirs(os.path.dirname(os.path.abspath(args.sim3_json)), exist_ok=True)
-        json.dump({"scale": s, "R": R.tolist(), "t": t.tolist(), "n_frames": len(common),
+        json.dump({"scale": s, "R": R.tolist(), "t": t.tolist(), "n_frames": len(resid),
                    "residual_mean_m": float(resid.mean()), "residual_p95_m": float(np.percentile(resid, 95))},
                   open(args.sim3_json, "w"), indent=2)
         print(f"[sim3] wrote {args.sim3_json}", flush=True)
