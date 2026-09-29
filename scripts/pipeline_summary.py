@@ -84,6 +84,15 @@ def main():
                 "heldout_single": _json(os.path.join(R, "report", "eval", f"{m}.single.json")),
                 "floor_fused": cov.get("splat_has_floor"),
                 "floor_single": (own.get("floor_coverage") or {}).get("splat_has_floor")}
+    if fz:   # verdict: a fused splat should match each member's own splat on that member's held-out frames
+        drops = {m: round(v["heldout_single"]["psnr"] - v["heldout_fused"]["psnr"], 2)
+                 for m, v in s["fuse"]["members"].items() if v["heldout_fused"] and v["heldout_single"]}
+        lim = float((cfg.get("fuse") or {}).get("max_heldout_drop_db", 1.0))
+        bad = {m: d for m, d in drops.items() if d > lim}
+        s["fuse"]["verdict"] = {"psnr_drop_db": drops, "ok": not bad, "limit_db": lim,
+                                "note": None if not bad else "fused splat is worse than the members' own splats: "
+                                "the recordings disagree (moved objects / changed scene, or misaligned poses); "
+                                "use the member splats"}
     json.dump(s, open(os.path.join(R, "summary.json"), "w"), indent=2)
     print(json.dumps(s, indent=2))
     return 0
