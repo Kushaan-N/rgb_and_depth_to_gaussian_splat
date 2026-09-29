@@ -17,7 +17,8 @@ adopted must stay automatic and config-driven (see docs/RUN.md §6) — no per-s
 | Re-syncing the RGB time offset | best offset −2.5 ms → only 6.2% warp gain | marginal |
 | Exposure / colour compensation (PPISP) | colour-corrected PSNR only +0.04–0.15 dB above plain | ruled out without a run |
 | Floor fill from depth | floor 78% → 83% coverage, objects left alone | **adopted (optional stage)** |
-| MCMC densification, MCMC + opacity/scale reg | running (`--variant mcmc`, `mcmc_reg`) | see docs/experiments/ |
+| MCMC densification | PSNR +0.8–2.3 dB but LPIPS worse and floor 83% → 64% (3/3 seqs) | rejected as default |
+| MCMC + opacity/scale regularisation | best LPIPS (−0.006–0.009), floor unchanged, PSNR −0.8 dB | available: `--variant mcmc_reg` |
 
 ## Next, ranked by expected value per cost
 
