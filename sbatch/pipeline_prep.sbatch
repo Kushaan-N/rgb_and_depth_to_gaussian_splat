@@ -81,8 +81,7 @@ if [ ! -e "$P/train_data" ]; then
     mkdir -p "$P/train_data/sparse/0"
     cp "$P/dataset/sparse/0/cameras.bin" "$P/dataset/sparse/0/images.bin" "$P/train_data/sparse/0/"
     ln -sfn "$P/dataset/images" "$P/train_data/images"
-    python3 scripts/lidar_to_colmap_points.py --cloud "$P/depth_cloud.ply" \
-      --colmap-model "$P/dataset/sparse/0" --gt-model "$GT" \
+    python3 scripts/lidar_to_colmap_points.py --cloud "$P/depth_cloud.ply" --sim3-json "$P/sim3.json" \
       --out-points3d "$P/train_data/sparse/0/points3D.txt" --max-points "$(get pipeline.init_max_points 400000)"
   else
     echo "-- training dataset: COLMAP points (no depth init)"
