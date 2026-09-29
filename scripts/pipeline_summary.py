@@ -71,6 +71,19 @@ def main():
             "collider": (P, "collider/collider.obj"), "floor_coverage_fig": (R, "report/floor_coverage.png")}.items()
             if os.path.exists(os.path.join(d, v))},
     }
+    fz = _json(os.path.join(P, "fuse.json"))
+    if fz:   # fused run: per member, fused splat vs the member's own splat on the member's data
+        s["train_metrics"] = None      # trainer's own val = training views here; held-out is per member below
+        s["fuse"] = {"frames_total": fz["frames_total"], "frames_train": fz["frames_train"], "members": {}}
+        for m, info in fz["members"].items():
+            own = _json(os.path.join(info["pipeline"], "summary.json")) or {}
+            cov = _json(os.path.join(R, "report", f"floor_coverage_{m}.json")) or {}
+            s["fuse"]["members"][m] = {
+                "alignment": info["alignment"], "held_out": info["held_out"],
+                "heldout_fused": _json(os.path.join(R, "report", "eval", f"{m}.fused.json")),
+                "heldout_single": _json(os.path.join(R, "report", "eval", f"{m}.single.json")),
+                "floor_fused": cov.get("splat_has_floor"),
+                "floor_single": (own.get("floor_coverage") or {}).get("splat_has_floor")}
     json.dump(s, open(os.path.join(R, "summary.json"), "w"), indent=2)
     print(json.dumps(s, indent=2))
     return 0
