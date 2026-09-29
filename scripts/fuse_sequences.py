@@ -48,7 +48,7 @@ def to_reference(Rwc, C, s, R, t, T):
     return A @ R @ Rwc, A @ (s * R @ C + t) + b
 
 
-def icp_align(src_path, ref_path, voxel, max_m, max_deg, min_fitness):
+def icp_align(src_path, ref_path, voxel, max_m, max_deg, min_fitness, min_gain=0.1):
     """Rigid src->ref correction from the depth clouds, coarse-to-fine point-to-plane ICP."""
     import open3d as o3d
     src, ref = o3d.io.read_point_cloud(src_path), o3d.io.read_point_cloud(ref_path)
@@ -68,10 +68,61 @@ def icp_align(src_path, ref_path, voxel, max_m, max_deg, min_fitness):
     st = {"fitness": round(float(res.fitness), 3), "rmse_m": round(float(res.inlier_rmse), 4),
           "translation_m": round(float(np.linalg.norm(T[:3, 3])), 4), "rotation_deg": round(ang, 3),
           "nn_median_before_m": round(float(np.median(d0)), 4), "nn_median_after_m": round(float(np.median(d1)), 4)}
+    # members that already share a frame sit within the clouds' noise; ICP then fits noise/moving
+    # objects and can move them by centimetres (measured: 1.5 cm -> 4-5 cm shifts, 3x worse
+    # cross-recording epipolar error). Keep the correction only if it clearly tightens the clouds.
+    if np.median(d1) > (1 - min_gain) * np.median(d0):
+        return np.eye(4), {**st, "applied": False, "reason": f"ICP did not reduce the NN median by {min_gain:.0%}"}
+    st["applied"] = True
     if st["translation_m"] > max_m or ang > max_deg or res.fitness < min_fitness:
         raise SystemExit(f"[fuse] {src_path} does not align with the reference ({st}); members must share "
                          f"a world frame (limits: {max_m} m, {max_deg} deg, fitness >= {min_fitness})")
     return T, st
+
+
+def cross_consistency(imgs, cams, image_dir, n_pairs=25, seed=0):
+    """Median epipolar error (px) of SIFT matches between overlapping frames, within one recording vs
+    across recordings, under the fused poses. Poses that are consistent across recordings give
+    cross ~ within; a misplaced member shows up here before any GPU time is spent."""
+    import cv2
+    sift, bf, rng = cv2.SIFT_create(2000), cv2.BFMatcher(), np.random.default_rng(seed)
+    K = {cid: np.array([[p[0], 0, p[2]], [0, p[1], p[3]], [0, 0, 1]]) for cid, (_, _, _, p) in cams.items()}
+
+    def err(a, b):
+        ia, ib = (cv2.imread(os.path.join(image_dir, x[0]), 0) for x in (a, b))
+        (ka, da), (kb, db) = sift.detectAndCompute(ia, None), sift.detectAndCompute(ib, None)
+        if da is None or db is None:
+            return None
+        good = [m for m, n in bf.knnMatch(da, db, k=2) if m.distance < 0.7 * n.distance]
+        if len(good) < 40:
+            return None
+        pa = np.float32([ka[m.queryIdx].pt for m in good]); pb = np.float32([kb[m.trainIdx].pt for m in good])
+        _, inl = cv2.findFundamentalMat(pa, pb, cv2.FM_RANSAC, 3.0)     # inliers independent of our poses
+        if inl is None:
+            return None
+        pa, pb = pa[inl.ravel() > 0], pb[inl.ravel() > 0]
+        Rab = b[2].T @ a[2]; tab = b[2].T @ (a[3] - b[3])               # x_b = Rab x_a + tab
+        tx = np.array([[0, -tab[2], tab[1]], [tab[2], 0, -tab[0]], [-tab[1], tab[0], 0]])
+        Fm = np.linalg.inv(K[b[1]]).T @ tx @ Rab @ np.linalg.inv(K[a[1]])
+        l = np.c_[pa, np.ones(len(pa))] @ Fm.T
+        return float(np.median(np.abs(np.sum(l * np.c_[pb, np.ones(len(pb))], 1)) / np.hypot(l[:, 0], l[:, 1])))
+
+    out = {}
+    for kind in ("within", "cross"):
+        v, tries = [], 0
+        while len(v) < n_pairs and tries < 5000:
+            tries += 1
+            a, b = imgs[rng.integers(len(imgs))], imgs[rng.integers(len(imgs))]
+            same = a[0].split("/")[0] == b[0].split("/")[0]
+            if a is b or same != (kind == "within"):
+                continue
+            if not (0.3 < np.linalg.norm(a[3] - b[3]) < 1.5 and a[2][:, 2] @ b[2][:, 2] > 0.8):
+                continue                                                  # overlapping views, real baseline
+            e = err(a, b)
+            if e is not None:
+                v.append(e)
+        out[kind] = {"pairs": len(v), "median_px": round(float(np.median(v)), 3) if v else None}
+    return out
 
 
 def write_model(d, cams, imgs, points3d=None):
@@ -131,7 +182,7 @@ def main():
         elif align == "icp" and cloud and ref_cloud:
             T, st = icp_align(cloud, ref_cloud, float(fz.get("icp_voxel_m", 0.05)),
                               float(fz.get("max_align_m", 0.3)), float(fz.get("max_align_deg", 5.0)),
-                              float(fz.get("min_icp_fitness", 0.5)))
+                              float(fz.get("min_icp_fitness", 0.5)), float(fz.get("min_icp_gain", 0.1)))
         print(f"[fuse] {seq}: {rec.num_reg_images()} frames  align={st}", flush=True)
 
         cid_map = {}
@@ -183,8 +234,15 @@ def main():
         fused = fused.voxel_down_sample(float(fz.get("cloud_voxel_m", 0.01)))
         o3d.io.write_point_cloud(os.path.join(P, "lidar_cloud.ply"), fused)
         print(f"[fuse] depth cloud: {n0:,} -> {len(fused.points):,} points", flush=True)
-    json.dump({"members": info, "frames_total": len(all_imgs), "frames_train": len(train_imgs)},
-              open(os.path.join(P, "fuse.json"), "w"), indent=2)
+    cons = cross_consistency(all_imgs, cams, os.path.join(P, "dataset", "images"))
+    print(f"[fuse] epipolar error: within {cons['within']}  cross {cons['cross']}", flush=True)
+    json.dump({"members": info, "frames_total": len(all_imgs), "frames_train": len(train_imgs),
+               "epipolar": cons}, open(os.path.join(P, "fuse.json"), "w"), indent=2)
+    lim = float(fz.get("max_cross_epipolar_px", 1.5))
+    if cons["cross"]["median_px"] is not None and cons["cross"]["median_px"] > lim:
+        os.rename(os.path.join(P, "fuse.json"), os.path.join(P, "fuse_rejected.json"))
+        raise SystemExit(f"[fuse] recordings disagree: cross-recording epipolar error "
+                         f"{cons['cross']['median_px']} px > {lim} px -> not training on inconsistent poses")
     print(f"[fuse] {len(all_imgs)} frames ({len(train_imgs)} train) from {len(members)} members -> {P}", flush=True)
     return 0
 
