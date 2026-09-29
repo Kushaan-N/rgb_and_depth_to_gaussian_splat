@@ -53,9 +53,15 @@ else
   rm -f "$P/depth_cloud.ply"; echo "-- depth source: none (init / floor fill / depth collider will skip)"
 fi
 
+# collider and COLMAP are independent: build the collider in the background on ~1/3 of the cores
+# while COLMAP runs, and join before the stage ends (a collider failure still fails the stage).
+NCPU="${SLURM_CPUS_PER_TASK:-16}"; COLLIDER_PID=""
 if [ -n "$DEPTH" ] && [ ! -f "$P/collider/collider.obj" ]; then
-  echo "-- collider from the depth cloud"
-  python3 scripts/build_lidar_collider.py --cloud "$P/depth_cloud.ply" --out "$P/collider"
+  echo "-- collider from the depth cloud (background, overlapping COLMAP; log: report/collider.log)"
+  OMP_NUM_THREADS=$(( NCPU / 3 > 0 ? NCPU / 3 : 1 )) \
+    python3 scripts/build_lidar_collider.py --cloud "$P/depth_cloud.ply" --out "$P/collider" \
+    > "$P/report/collider.log" 2>&1 &
+  COLLIDER_PID=$!
 fi
 
 if [ ! -d "$P/dataset/sparse/0" ]; then
@@ -81,6 +87,13 @@ if [ ! -e "$P/train_data" ]; then
   else
     echo "-- training dataset: COLMAP points (no depth init)"
     ln -sfn "$P/dataset" "$P/train_data"
+  fi
+fi
+if [ -n "$COLLIDER_PID" ]; then
+  if wait "$COLLIDER_PID"; then
+    echo "-- collider: $(grep -E 'wrote collider' "$P/report/collider.log" | tail -1)"
+  else
+    echo "-- collider FAILED:"; tail -20 "$P/report/collider.log"; exit 1
   fi
 fi
 echo "PIPELINE_PREP_DONE"
