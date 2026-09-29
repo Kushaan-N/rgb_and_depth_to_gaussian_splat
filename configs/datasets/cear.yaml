@@ -156,6 +156,8 @@ pipeline:
   sfm_matcher: auto            # auto = exhaustive up to 600 frames, sequential beyond
   sfm_refine_intrinsics: true
   train_iterations: 30000
+  trainer_app: apps/colmap_3dgut.yaml   # 3DGRUT hydra app (3DGUT rasterizer + default densification)
+  trainer_overrides: []                 # extra hydra overrides, e.g. [loss.use_opacity=true]
   init_from_depth: true        # seed gaussians from the metric depth cloud (LiDAR, else RGB-D); auto-skips
   init_max_points: 400000
   floor_fill: true             # fill floor the camera never viewed, where a depth source measured it; auto-skips
