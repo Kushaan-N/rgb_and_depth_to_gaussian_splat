@@ -21,7 +21,7 @@ echo "== [post] $(get sequence.name) -> $R =="
 if [ "$(get pipeline.floor_fill 1)" = 1 ] && [ -e "$P/depth_cloud.ply" ]; then
   echo "-- floor fill"
   python3 scripts/infill_floor.py --depth-cloud "$P/depth_cloud.ply" --splat-ply "$R/splat.ply" \
-    --colmap-model "$P/dataset/sparse/0" --gt-model "$GT" --images "$OUT/precond/$RGB" \
+    --sim3-json "$P/sim3.json" --gt-model "$GT" --images "$OUT/precond/$RGB" \
     --out-ply "$R/splat_filled.ply" | tee "$R/report/infill.log"
 else
   cp "$R/splat.ply" "$R/splat_filled.ply"
@@ -36,7 +36,7 @@ python3 scripts/sim3_align_splat.py --colmap-model "$P/dataset/sparse/0" --gt-mo
 if [ -e "$P/depth_cloud.ply" ]; then
   echo "-- floor coverage report"
   python3 scripts/floor_coverage.py --depth-cloud "$P/depth_cloud.ply" --splat-ply "$R/splat_filled.ply" \
-    --colmap-model "$P/dataset/sparse/0" --gt-model "$GT" --out "$R/report/floor_coverage.png" \
+    --sim3-json "$P/sim3.json" --gt-model "$GT" --out "$R/report/floor_coverage.png" \
     | tee "$R/report/floor_coverage.log"
   grep '^FLOOR_COVERAGE ' "$R/report/floor_coverage.log" | tail -1 | sed 's/^FLOOR_COVERAGE //' > "$R/report/floor_coverage.json"
 fi
