@@ -35,7 +35,9 @@ def main():
     ap.add_argument("--config", required=True)
     args = ap.parse_args()
     cfg = pu.load_config(args.config)
-    out = cfg["paths"]["out_root"]; P = os.path.join(out, "pipeline")
+    out = cfg["paths"]["out_root"]; P = os.path.join(out, "pipeline")      # shared prep outputs
+    pl = cfg.get("pipeline") or {}
+    R = pl.get("run_dir") or P                                              # this run (variant) outputs
 
     sfm = None
     try:
@@ -46,28 +48,30 @@ def main():
                "camera": [round(float(x), 2) for x in list(rec.cameras.values())[0].params]}
     except Exception as e:  # noqa: BLE001
         sfm = {"error": str(e)}
-    metrics = sorted(glob.glob(os.path.join(P, "train", "**", "metrics.json"), recursive=True), key=os.path.getmtime)
+    metrics = sorted(glob.glob(os.path.join(R, "train", "**", "metrics.json"), recursive=True), key=os.path.getmtime)
     m = _json(metrics[-1]) if metrics else None
     depth = os.path.realpath(os.path.join(P, "depth_cloud.ply")) if os.path.exists(os.path.join(P, "depth_cloud.ply")) else None
     sim3 = _json(os.path.join(P, "sim3.json"))
 
     s = {
         "sequence": cfg["sequence"]["name"],
+        "variant": cfg.get("variant", "default"),
+        "trainer": {"app": pl.get("trainer_app"), "overrides": pl.get("trainer_overrides") or []},
         "sfm": sfm,
         "sim3": None if not sim3 else {k: sim3[k] for k in ("scale", "n_frames", "residual_mean_m", "residual_p95_m")},
         "depth_source": depth,
         "train_metrics": None if not m else {k: round(m[k], 4) for k in ("mean_psnr", "mean_ssim", "mean_lpips") if k in m},
-        "gaussians": {"splat": _ply_count(os.path.join(P, "splat.ply")),
-                      "splat_filled": _ply_count(os.path.join(P, "splat_filled.ply"))},
-        "floor_fill": _json(os.path.join(P, "report", "infill.json")),
-        "floor_coverage": _json(os.path.join(P, "report", "floor_coverage.json")),
+        "gaussians": {"splat": _ply_count(os.path.join(R, "splat.ply")),
+                      "splat_filled": _ply_count(os.path.join(R, "splat_filled.ply"))},
+        "floor_fill": _json(os.path.join(R, "report", "infill.json")),
+        "floor_coverage": _json(os.path.join(R, "report", "floor_coverage.json")),
         "collider": _json(os.path.join(P, "collider", "collider_meta.json")),
-        "outputs": {k: os.path.join(P, v) for k, v in {
-            "splat_supersplat": "splat_filled.ply", "splat_metric_isaac": "splat_metric.ply",
-            "collider": "collider/collider.obj", "floor_coverage_fig": "report/floor_coverage.png"}.items()
-            if os.path.exists(os.path.join(P, v))},
+        "outputs": {k: os.path.join(d, v) for k, (d, v) in {
+            "splat_supersplat": (R, "splat_filled.ply"), "splat_metric_isaac": (R, "splat_metric.ply"),
+            "collider": (P, "collider/collider.obj"), "floor_coverage_fig": (R, "report/floor_coverage.png")}.items()
+            if os.path.exists(os.path.join(d, v))},
     }
-    json.dump(s, open(os.path.join(P, "summary.json"), "w"), indent=2)
+    json.dump(s, open(os.path.join(R, "summary.json"), "w"), indent=2)
     print(json.dumps(s, indent=2))
     return 0
 
