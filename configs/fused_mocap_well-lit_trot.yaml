@@ -1,0 +1,13 @@
+# Fused: the three mocap recordings of the same lab as ONE splat. They share the OptiTrack world
+# frame, so members are placed by their own Sim3s and only ICP-checked/corrected against member 0.
+# Each path's blind spots (e.g. the centre of mocap2's loop) can be filled by the others.
+#   bash scripts/run_pipeline.sh fused_mocap_well-lit_trot
+base: datasets/cear.yaml
+sequence:
+  name: fused_mocap_well-lit_trot
+fuse:
+  members: [mocap1_well-lit_trot, mocap2_well-lit_trot, mocap3_well-lit_trot]
+  align: icp               # icp | none  (ICP refines the shared frame; fails loudly beyond the limits)
+  max_align_m: 0.3
+  max_align_deg: 5.0
+  holdout_interval: 8      # each member's held-out frames = the trainer's usual every-8th split
