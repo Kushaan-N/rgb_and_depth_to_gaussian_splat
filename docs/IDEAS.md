@@ -19,6 +19,7 @@ adopted must stay automatic and config-driven (see docs/RUN.md §6) — no per-s
 | Floor fill from depth | floor 78% → 83% coverage, objects left alone | **adopted (optional stage)** |
 | MCMC densification | PSNR +0.8–2.3 dB but LPIPS worse and floor 83% → 64% (3/3 seqs) | rejected as default |
 | Fuse mocap1–3 into one splat | held-out −9 to −12 dB: objects were rearranged between recordings | rejected (stage kept, with gates) |
+| Difix3D+ (NVIDIA) on a 1 m spatial hold-out | +0.7 dB / LPIPS −0.07 off-path, but fills unseen content with wrong objects | not adopted (benchmark kept) |
 | MCMC + opacity/scale regularisation | best LPIPS (−0.006–0.009), floor unchanged, PSNR −0.8 dB | available: `--variant mcmc_reg` |
 
 ## Next, ranked by expected value per cost
@@ -50,6 +51,18 @@ adopted must stay automatic and config-driven (see docs/RUN.md §6) — no per-s
 8. **Static-only use of other recordings.** Fusion failed because movable objects differ between
    recordings (docs/experiments/2026-09-29_fusion.md). Walls/floor still agree to ~1 cm, so the other
    members' LiDAR floor could feed the floor fill/collider. Low priority: per-member floor is ~83%.
+
+9. **Generative fill of unseen regions — anchored, not free.** Difix3D+ showed off-path quality is
+   limited by content no camera saw (13 dB on a 1 m hold-out), and that a diffusion fixer fills it
+   with plausible fiction. Candidates from the literature review (2026-10-02): ArtiFixer (NVIDIA,
+   SIGGRAPH 2026; video diffusion that fills low-opacity regions, ships a 3DGRUT fork; needs an
+   80 GB A100 and its MoGe scale step bypassed), GSFix3D (indoor, refines an existing splat,
+   conditions on a mesh — our LiDAR mesh), object-level amodal completion (RecGen, SAM 3D Objects)
+   for the backs of stacks vs a LiDAR cuboid baseline. Any generated gaussians must be tagged, kept
+   out of the collider and checked against LiDAR free space. Evaluate with the off-path split plus a
+   co-visibility mask and a consistency metric (TSED / MEt3R).
+10. **Real observations beat priors.** A short extra recording that looks at the backs of the
+   stacks, fused like IGFuse (multi-scan fusion that tolerates moved objects), is the faithful fix.
 
 ## Pipeline hygiene still open
 - ~~Five copies of the Umeyama/Sim3 solve~~ — done: `scripts/sim3_utils.py`, and every stage reads
