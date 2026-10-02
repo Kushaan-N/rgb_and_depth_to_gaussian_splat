@@ -24,6 +24,9 @@ mkdir -p "$CEAR_DATA" "$CEAR_OUT"
 # --- cluster / GPU env (site-specific; override per user or site) -----------
 export CEAR_SLURM_ACCOUNT="${CEAR_SLURM_ACCOUNT:-pi_donghyunkim_umass_edu}"  # used by scripts/run_pipeline.sh
 export THREEDGRUT_DIR="${THREEDGRUT_DIR:-$CEAR_WS/3dgrut}"                   # 3DGRUT checkout + its .venv
+export DIFIX_VENV="${DIFIX_VENV:-$CEAR_WS/venv-difix}"   # Difix3D+ venv (env/make_difix_venv.sh)
+export DIFIX_DIR="${DIFIX_DIR:-$CEAR_WS/Difix3D}"        # Difix3D checkout (pipeline_difix)
+export HF_HOME="${HF_HOME:-$CEAR_WS/hf-cache}"           # Hugging Face weights, off /home
 
 # --- python env -----------------------------------------------------------
 if [ -f "$CEAR_VENV/bin/activate" ]; then
