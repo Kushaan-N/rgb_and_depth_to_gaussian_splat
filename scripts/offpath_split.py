@@ -51,7 +51,7 @@ def main():
         shutil.rmtree(O)
     for kind, sel in (("train_data", ~test), ("test", test)):
         part = [x for x, k in zip(imgs, sel) if k]
-        write_model(os.path.join(O, kind, "sparse", "0"), cams, part, points3d=(kind == "train_data"))
+        write_model(os.path.join(O, kind, "sparse", "0"), cams, part, points3d=True if kind == "train_data" else None)
         link_images(os.path.join(O, kind, "images"), os.path.join(P, "dataset", "images"), [x[0] for x in part])
     init = os.path.join(P, "train_data", "sparse", "0", "points3D.txt")
     if os.path.exists(init):
