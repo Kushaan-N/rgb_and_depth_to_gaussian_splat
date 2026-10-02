@@ -29,6 +29,7 @@ ROUND_ITERS="${ROUND_ITERS:-1500}"; STEP_M="${STEP_M:-0.3}"; EXTRA_ROUNDS="${EXT
 hostname; date
 module load cuda/12.4.1 gcc/9.4.0 2>/dev/null || true
 export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"
+export PATH="$THREEDGRUT_DIR/.venv/bin:$PATH"     # 3DGRUT JIT-compiles kernels with its venv's slangc
 nvidia-smi --query-gpu=name --format=csv,noheader
 mkdir -p "$W" "$REP"
 
