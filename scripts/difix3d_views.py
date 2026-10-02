@@ -4,6 +4,7 @@ sbatch/offpath_difix.sbatch:
   novel     move each novel camera one step toward its target view and write it as a COLMAP text
             dataset to render (images are placeholders), plus refs.json = the real training image
             nearest to each novel camera (Difix's reference)
+  refs      refs.json for an existing view set (e.g. the held-out test views, for Difix3D+ post-render)
   trainset  the next round's training set: the real training frames (repeated `--real-repeat` times)
             + this round's Difix-fixed novel views
 
@@ -78,6 +79,15 @@ def cmd_novel(a):
     print("DIFIX3D_ALL_REACHED" if reached == len(new) else "DIFIX3D_MOVING", flush=True)
 
 
+def cmd_refs(a):
+    _, train = load(os.path.join(a.train, "sparse", "0"))
+    _, views = load(os.path.join(a.views, "sparse", "0"))
+    refs = {os.path.splitext(n)[0] + ".png": os.path.realpath(os.path.join(a.train, "images", nearest_ref(R, C, train)[0]))
+            for n, _, R, C in views}
+    json.dump(refs, open(a.out, "w"), indent=1)
+    print(f"[difix3d] refs for {len(refs)} views -> {a.out}", flush=True)
+
+
 def cmd_trainset(a):
     cams, train = load(os.path.join(a.train, "sparse", "0"))
     ncams, novel = load(os.path.join(a.novel, "sparse", "0"))
@@ -105,12 +115,14 @@ def main():
     n.add_argument("--train", required=True); n.add_argument("--targets", required=True)
     n.add_argument("--state", required=True); n.add_argument("--out", required=True)
     n.add_argument("--step-m", type=float, default=0.3); n.add_argument("--scale", type=float, required=True)
+    r = sub.add_parser("refs")
+    r.add_argument("--train", required=True); r.add_argument("--views", required=True); r.add_argument("--out", required=True)
     t = sub.add_parser("trainset")
     t.add_argument("--train", required=True); t.add_argument("--fixed", required=True)
     t.add_argument("--novel", required=True); t.add_argument("--out", required=True)
     t.add_argument("--real-repeat", type=int, default=3)
     a = ap.parse_args()
-    {"novel": cmd_novel, "trainset": cmd_trainset}[a.cmd](a)
+    {"novel": cmd_novel, "refs": cmd_refs, "trainset": cmd_trainset}[a.cmd](a)
 
 
 if __name__ == "__main__":
