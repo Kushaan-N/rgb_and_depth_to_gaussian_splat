@@ -6,6 +6,7 @@ images are only placeholders (novel views).
     python scripts/eval_views.py --checkpoint ckpt.pt --dataset <dir with sparse/0 + images> \
         [--tag name] [--json-out result.json] [--save-dir renders/] [--no-metrics]
     python scripts/eval_views.py --pred-dir fixed/ --dataset <dir> ...   # score saved images instead
+    python scripts/eval_views.py --pred-dir pred/ --gt-dir gt/ ...       # ... against a folder of real images
 """
 from __future__ import annotations
 import argparse, json, os
@@ -58,17 +59,19 @@ def _metrics():
             LearnedPerceptualImagePatchSimilarity(net_type="vgg", normalize=True).cuda())
 
 
-def score_images(pred_dir, ds):
-    """Same metrics as score_dataset, for images already on disk: <pred_dir>/<name> vs <ds>/images/<name>."""
+def score_images(pred_dir, ds=None, gt_dir=None):
+    """Same metrics as score_dataset, for images already on disk: <pred_dir>/<name> vs <ds>/images/<name>
+    (or vs <gt_dir>/<name>)."""
     import torch
     from PIL import Image
     psnr_m, ssim_m, lpips_m = _metrics()
     load = lambda p: torch.from_numpy(np.asarray(Image.open(p).convert("RGB"), dtype=np.float32) / 255.0) \
         .permute(2, 0, 1)[None].cuda()
-    names = sorted(os.listdir(os.path.join(ds, "images")))
+    gdir = gt_dir or os.path.join(ds, "images")
+    names = sorted(os.listdir(gdir))
     P, S, L = [], [], []
     for n in names:
-        pr, gt = load(os.path.join(pred_dir, os.path.splitext(n)[0] + ".png")), load(os.path.join(ds, "images", n))
+        pr, gt = load(os.path.join(pred_dir, os.path.splitext(n)[0] + ".png")), load(os.path.join(gdir, n))
         P.append(psnr_m(pr, gt).item()); S.append(ssim_m(pr, gt).item()); L.append(lpips_m(pr, gt).item())
     return {"psnr": round(float(np.mean(P)), 3), "ssim": round(float(np.mean(S)), 4),
             "lpips": round(float(np.mean(L)), 4), "n": len(P)}
@@ -78,14 +81,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", default=None)
     ap.add_argument("--pred-dir", default=None, help="score these saved images instead of rendering")
-    ap.add_argument("--dataset", required=True)
+    ap.add_argument("--dataset", default=None)
+    ap.add_argument("--gt-dir", default=None, help="with --pred-dir: real images to score against")
     ap.add_argument("--tag", default="eval")
     ap.add_argument("--json-out", default=None)
     ap.add_argument("--save-dir", default=None)
     ap.add_argument("--no-metrics", action="store_true")
     args = ap.parse_args()
     if args.pred_dir:
-        res = {"tag": args.tag, "pred_dir": args.pred_dir, **score_images(args.pred_dir, args.dataset)}
+        res = {"tag": args.tag, "pred_dir": args.pred_dir, **score_images(args.pred_dir, args.dataset, args.gt_dir)}
     else:
         res = {"tag": args.tag, "checkpoint": args.checkpoint,
                **score_dataset(args.checkpoint, args.dataset, args.save_dir, not args.no_metrics)}
