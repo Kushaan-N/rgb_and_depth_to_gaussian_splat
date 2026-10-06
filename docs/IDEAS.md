@@ -20,6 +20,7 @@ adopted must stay automatic and config-driven (see docs/RUN.md §6) — no per-s
 | MCMC densification | PSNR +0.8–2.3 dB but LPIPS worse and floor 83% → 64% (3/3 seqs) | rejected as default |
 | Fuse mocap1–3 into one splat | held-out −9 to −12 dB: objects were rearranged between recordings | rejected (stage kept, with gates) |
 | Difix3D+ (NVIDIA) on a 1 m spatial hold-out | +0.7 dB / LPIPS −0.07 off-path, but fills unseen content with wrong objects | not adopted (benchmark kept) |
+| ArtiFixer world-model fill (NVIDIA) on the same hold-out | 13.0 → 17.4 dB, LPIPS 0.55 → 0.47; fills unseen regions mostly faithfully | **promising — next: on our splat + planned off-path trajectories** |
 | MCMC + opacity/scale regularisation | best LPIPS (−0.006–0.009), floor unchanged, PSNR −0.8 dB | available: `--variant mcmc_reg` |
 
 ## Next, ranked by expected value per cost
