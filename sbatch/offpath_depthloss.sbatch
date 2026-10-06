@@ -2,7 +2,8 @@
 # LiDAR depth supervision for 3DGRUT, on the off-path benchmark (same split as offpath_difix.sbatch).
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o <log> sbatch/offpath_depthloss.sbatch configs/<seq>.yaml
 #
-#  1. clean the LiDAR cloud of the robot's own path (clear_robot_path.py)
+#  1. static LiDAR cloud: remove moving things by visibility (remove_dynamic_lidar.py), then the
+#     robot's own corridor (clear_robot_path.py)
 #  2. per-frame LiDAR depth targets for train + held-out frames (build_depth_targets.py)
 #  3. co-visibility masks of the held-out frames (covis_masks.py)
 #  4. gradient check of 3DGRUT's rendered depth (check_depth_grad.py) — stops here if it fails
@@ -38,9 +39,12 @@ bash env/make_3dgrut_depth.sh
 CK0="$(ls -t "$W"/baseline/run/*/ckpt_last.pt 2>/dev/null | head -1 || true)"
 [ -n "$CK0" ] || { echo "no baseline checkpoint: run sbatch/offpath_difix.sbatch first"; exit 1; }
 
-echo "== 1. clean the robot's path out of the LiDAR cloud"
-[ -f "$DD/lidar_static.ply" ] || "$CPUPY" scripts/clear_robot_path.py --cloud "$P/depth_cloud.ply" \
-  --gt-model "$OUT/colmap_train/sparse/0" --out "$DD/lidar_static.ply"
+echo "== 1. static LiDAR cloud: drop moving things (people, the robot's body) by visibility, then the robot's corridor"
+[ -f "$DD/lidar_nodyn.ply" ] || "$CPUPY" scripts/remove_dynamic_lidar.py --config "$CFG" --cloud "$P/depth_cloud.ply" \
+  --out "$DD/lidar_nodyn.ply"
+[ -f "$DD/lidar_static.ply" ] && [ "$DD/lidar_static.ply" -nt "$DD/lidar_nodyn.ply" ] || \
+  "$CPUPY" scripts/clear_robot_path.py --cloud "$DD/lidar_nodyn.ply" --gt-model "$OUT/colmap_train/sparse/0" \
+  --out "$DD/lidar_static.ply"
 echo "== 2. depth targets"
 for ds in "$O/train_data" "$O/test"; do
   "$GPY" scripts/build_depth_targets.py --dataset "$ds" --cloud "$DD/lidar_static.ply" --sim3-json "$P/sim3.json"
