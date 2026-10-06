@@ -65,6 +65,63 @@ def read_xyz(msg, min_r, max_r):
     return np.stack([x[ok], y[ok], z[ok]], axis=1)
 
 
+class LidarSkip(Exception):
+    """No LiDAR to process (no lidar section / no bag): stages print SKIP and exit 0."""
+
+
+def registered_scans(cfg, bag=None, calib_dir=None, min_range=None, max_range=None, stride=1, log=print):
+    """Every scan of the sequence's LiDAR bag with its pose: list of (T_world_lidar 4x4, xyz in the
+    sensor frame), range-filtered. Raises LidarSkip when there is nothing to do, ValueError on a
+    configuration error (missing time offset, wrong topic, no overlap with the poses)."""
+    lid = cfg.get("lidar")
+    if not lid:
+        raise LidarSkip("config has no lidar section")
+    root = cfg["sequence"]["data_root"]
+    pattern = bag or lid.get("bag", "")
+    hits = sorted(glob.glob(pattern if os.path.isabs(pattern) else os.path.join(root, pattern)))
+    if not hits:
+        raise LidarSkip(f"no bag matching {pattern!r} under {root}")
+    bag = hits[0]
+    key = lid.get("time_offset_key")
+    offsets = (cfg.get("timestamps") or {}).get("offsets_s") or {}
+    if not key or offsets.get(key) is None:
+        raise ValueError(f"timestamps.offsets_s.{key} is not set. Set it explicitly (0.0 if the "
+                         f"LiDAR is hardware-synced) — a silent default would misalign every scan.")
+    voff = float(offsets[key])
+    T_cam_lidar = cam_from_lidar(lid["extrinsic_chain"], calib_dir or (cfg.get("calibration") or {}).get("dir"))
+    min_r = min_range if min_range is not None else float(lid.get("min_range_m", 0.5))
+    max_r = max_range if max_range is not None else float(lid.get("max_range_m", 12.0))
+    log(f"[lidar] bag={os.path.basename(bag)} topic={lid['topic']} |t_cam_lidar|="
+        f"{np.linalg.norm(T_cam_lidar[:3, 3]):.3f} m  offset={voff*1000:.3f} ms")
+
+    from pathlib import Path
+    from rosbags.highlevel import AnyReader
+    from rosbags.typesys import Stores, get_typestore
+    stamps, scans = [], []
+    with AnyReader([Path(bag)], default_typestore=get_typestore(Stores.LATEST)) as r:
+        conns = [c for c in r.connections if c.topic == lid["topic"]]
+        if not conns:
+            raise ValueError(f"topic {lid['topic']} not in bag (topics: {sorted({c.topic for c in r.connections})})")
+        for i, (conn, _t, raw) in enumerate(r.messages(connections=conns)):
+            if i % stride:
+                continue
+            m = r.deserialize(raw, conn.msgtype)
+            stamps.append(m.header.stamp.sec + m.header.stamp.nanosec * 1e-9 + voff)
+            scans.append(read_xyz(m, min_r, max_r))
+    stamps = np.array(stamps)
+    log(f"[lidar] {len(scans)} scans; time [{stamps.min():.2f},{stamps.max():.2f}]")
+
+    mocap = pu.parse_mocap(os.path.join(root, cfg["sequence"]["pose_file"]), cfg)
+    interp = pu.PoseInterpolator(mocap)
+    calib = pu.load_calibration(cfg["intrinsics"]["calib_file"], cfg)
+    inr = interp.in_range(stamps)
+    log(f"[lidar] {int(inr.sum())}/{len(stamps)} scans within the pose time range")
+    if not inr.any():
+        raise ValueError("no scan overlaps the poses — check the time offset / units")
+    Twc = pu.build_world_to_cam_track(mocap, interp, calib, cfg, stamps[inr])
+    return [(Twc[k] @ T_cam_lidar, scans[i]) for k, i in enumerate(np.nonzero(inr)[0]) if len(scans[i])]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
@@ -78,66 +135,17 @@ def main():
     args = ap.parse_args()
 
     cfg = pu.load_config(args.config)
-    lid = cfg.get("lidar")
-    if not lid:
-        print("[lidar] SKIP: config has no lidar section"); return 0
-    root = cfg["sequence"]["data_root"]
-    pattern = args.bag or lid.get("bag", "")
-    hits = sorted(glob.glob(pattern if os.path.isabs(pattern) else os.path.join(root, pattern)))
-    if not hits:
-        print(f"[lidar] SKIP: no bag matching {pattern!r} under {root}"); return 0
-    bag = hits[0]
-
-    key = lid.get("time_offset_key")
-    offsets = (cfg.get("timestamps") or {}).get("offsets_s") or {}
-    if not key or offsets.get(key) is None:
-        print(f"[lidar] ERROR: timestamps.offsets_s.{key} is not set. Set it explicitly (0.0 if the "
-              f"LiDAR is hardware-synced) — a silent default would misalign every scan.")
-        return 2
-    voff = float(offsets[key])
-    calib_dir = args.calib_dir or (cfg.get("calibration") or {}).get("dir")
-    T_cam_lidar = cam_from_lidar(lid["extrinsic_chain"], calib_dir)
-    min_r = args.min_range if args.min_range is not None else float(lid.get("min_range_m", 0.5))
-    max_r = args.max_range if args.max_range is not None else float(lid.get("max_range_m", 12.0))
-    voxel = args.voxel if args.voxel is not None else float(lid.get("voxel_m", 0.02))
-    print(f"[lidar] bag={os.path.basename(bag)} topic={lid['topic']} |t_cam_lidar|="
-          f"{np.linalg.norm(T_cam_lidar[:3, 3]):.3f} m  offset={voff*1000:.3f} ms", flush=True)
+    log = lambda msg: print(msg, flush=True)
+    try:
+        scans = registered_scans(cfg, args.bag, args.calib_dir, args.min_range, args.max_range, args.stride, log)
+    except LidarSkip as e:
+        print(f"[lidar] SKIP: {e}"); return 0
+    except ValueError as e:
+        print(f"[lidar] ERROR: {e}"); return 2
+    voxel = args.voxel if args.voxel is not None else float(cfg["lidar"].get("voxel_m", 0.02))
 
     import open3d as o3d
-    from pathlib import Path
-    from rosbags.highlevel import AnyReader
-    from rosbags.typesys import Stores, get_typestore
-
-    stamps, scans = [], []
-    with AnyReader([Path(bag)], default_typestore=get_typestore(Stores.LATEST)) as r:
-        conns = [c for c in r.connections if c.topic == lid["topic"]]
-        if not conns:
-            print(f"[lidar] ERROR: topic {lid['topic']} not in bag (topics: {sorted({c.topic for c in r.connections})})")
-            return 2
-        for i, (conn, _t, raw) in enumerate(r.messages(connections=conns)):
-            if i % args.stride:
-                continue
-            m = r.deserialize(raw, conn.msgtype)
-            stamps.append(m.header.stamp.sec + m.header.stamp.nanosec * 1e-9 + voff)
-            scans.append(read_xyz(m, min_r, max_r))
-    stamps = np.array(stamps)
-    print(f"[lidar] {len(scans)} scans; time [{stamps.min():.2f},{stamps.max():.2f}]", flush=True)
-
-    mocap = pu.parse_mocap(os.path.join(root, cfg["sequence"]["pose_file"]), cfg)
-    interp = pu.PoseInterpolator(mocap)
-    calib = pu.load_calibration(cfg["intrinsics"]["calib_file"], cfg)
-    inr = interp.in_range(stamps)
-    print(f"[lidar] {int(inr.sum())}/{len(stamps)} scans within the pose time range", flush=True)
-    if not inr.any():
-        print("[lidar] ERROR: no scan overlaps the poses — check the time offset / units"); return 2
-    Twc = pu.build_world_to_cam_track(mocap, interp, calib, cfg, stamps[inr])
-
-    pts = []
-    for k, i in enumerate(np.nonzero(inr)[0]):
-        if len(scans[i]):
-            T = Twc[k] @ T_cam_lidar
-            pts.append(scans[i] @ T[:3, :3].T + T[:3, 3])
-    W = np.concatenate(pts)
+    W = np.concatenate([p @ T[:3, :3].T + T[:3, 3] for T, p in scans])
     pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(W)).voxel_down_sample(voxel)
     pc, _ = pc.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
