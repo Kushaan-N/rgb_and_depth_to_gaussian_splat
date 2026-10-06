@@ -36,6 +36,13 @@ export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"
 export PATH="$AFX_VENV/bin:$PATH"            # slangc for the 3DGRUT fork's kernel JIT
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 "$APY" -c "import torch; assert torch.cuda.is_available(), 'torch cannot see the GPU'; print('torch', torch.__version__, torch.version.cuda, torch.cuda.get_device_name())"
+# fused-ssim (3DGRUT fork's SSIM loss) is a CUDA extension: build it here, on a GPU node, once
+if ! "$APY" -c "import fused_ssim" 2>/dev/null; then
+  UV="$(command -v uv || echo /modules/opt/linux-ubuntu24.04-x86_64/uv/uv)"
+  TORCH_CUDA_ARCH_LIST="8.0" "$UV" pip install --python "$APY" --no-build-isolation \
+    "git+https://github.com/rahul-goel/fused-ssim@1272e21a282342e89537159e4bad508b19b34157"
+  "$APY" -c "import fused_ssim; print('fused_ssim built')"
+fi
 mkdir -p "$A" "$REP"
 
 [ -f "$O/split.json" ] || "$CPUPY" scripts/offpath_split.py --config "$CFG"
