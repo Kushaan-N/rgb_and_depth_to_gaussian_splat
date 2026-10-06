@@ -21,6 +21,8 @@ adopted must stay automatic and config-driven (see docs/RUN.md §6) — no per-s
 | Fuse mocap1–3 into one splat | held-out −9 to −12 dB: objects were rearranged between recordings | rejected (stage kept, with gates) |
 | Difix3D+ (NVIDIA) on a 1 m spatial hold-out | +0.7 dB / LPIPS −0.07 off-path, but fills unseen content with wrong objects | not adopted (benchmark kept) |
 | ArtiFixer world-model fill (NVIDIA) on the same hold-out | 13.0 → 17.4 dB, LPIPS 0.55 → 0.47; fills unseen regions mostly faithfully | **promising — next: on our splat + planned off-path trajectories** |
+| LiDAR depth loss (patched 3DGRUT, λ=0.05) | off-path depth error −42%; +0.5 dB on observed pixels; unseen unchanged | **adopt as option** (on-path check pending) |
+| Dynamic-point removal from the LiDAR cloud | removes the operator + robot-body ghosts (879k of 3.7M pts) | needed for depth targets; pipeline default = next A/B |
 | MCMC + opacity/scale regularisation | best LPIPS (−0.006–0.009), floor unchanged, PSNR −0.8 dB | available: `--variant mcmc_reg` |
 
 ## Next, ranked by expected value per cost
@@ -35,10 +37,8 @@ adopted must stay automatic and config-driven (see docs/RUN.md §6) — no per-s
    sweep, most of it outside the room, and they start grey. Cropping to the room box gives ~5–9×
    denser seeding where it matters; colouring them by projecting into the camera images gives a
    better start. Cheap: prep-stage only.
-3. **LiDAR depth loss during training.** Seeding sets where gaussians start; a depth loss keeps
-   them there. Expected: fewer floaters, better geometry (and a better splat-derived collider).
-   3DGRUT has no depth loss, so this needs its dataloader to serve per-frame depth and an L1 term on
-   `pred_dist`. Complements the seeding rather than replacing it (depth only constrains what cameras see).
+3. ~~LiDAR depth loss during training~~ — done (`docs/experiments/2026-10-06_lidar_depth_loss.md`):
+   −42% depth error off-path, +0.5 dB where observed. Next: combine with ArtiFixer3D distillation.
 4. **Fix the Z-down metric frame at the source.** On CEAR the pipeline frame is Z-down despite
    `target_up: z`. The floor tools derive up from the data and warn; anything else that assumes
    +z = up must too. A deliberate one-time change to the pose chain plus a full rerun.
