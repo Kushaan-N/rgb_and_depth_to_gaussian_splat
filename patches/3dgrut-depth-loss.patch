@@ -1,0 +1,131 @@
+diff --git a/configs/base_gs.yaml b/configs/base_gs.yaml
+index 66fb18c..56b4957 100644
+--- a/configs/base_gs.yaml
++++ b/configs/base_gs.yaml
+@@ -183,6 +183,10 @@ loss:
+ 
+   use_scale: false
+   lambda_scale: 0.0
++  use_depth: false             # supervise rendered ray distance with <image>_depth.npy where present
++  lambda_depth: 0.05
++  lambda_depth_opacity: 0.0    # push accumulated opacity to 1 where depth was measured
++  depth_trim: 0.95             # drop the worst 5% of per-pixel depth errors (edges, misalignment)
+ 
+ # Post-processing configuration
+ post_processing:
+diff --git a/threedgrut/datasets/dataset_colmap.py b/threedgrut/datasets/dataset_colmap.py
+index 6dcc764..97a6b0f 100644
+--- a/threedgrut/datasets/dataset_colmap.py
++++ b/threedgrut/datasets/dataset_colmap.py
+@@ -182,6 +182,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
+         # numpy str array of image paths and mask paths
+         self.image_paths = self.image_paths[indices]
+         self.mask_paths = self.mask_paths[indices]
++        self.depth_paths = self.depth_paths[indices]
+ 
+         self.camera_centers = self.camera_centers[indices]
+         self.center, self.length_scale, self.scene_bbox = self.compute_spatial_extents()
+@@ -544,6 +545,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
+         self.poses = []
+         self.image_paths = []
+         self.mask_paths = []
++        self.depth_paths = []
+ 
+         cam_centers = []
+         for extr in logger.track(
+@@ -567,6 +569,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
+                 image_path = os.path.join(self.path, self.get_images_folder(), extr.name)
+             self.image_paths.append(image_path)
+             self.mask_paths.append(os.path.splitext(image_path)[0] + "_mask.png")
++            self.depth_paths.append(os.path.splitext(image_path)[0] + "_depth.npy")
+ 
+         self.camera_centers = np.array(cam_centers)
+         _, diagonal = get_center_and_diag(self.camera_centers)
+@@ -576,6 +579,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
+ 
+         self.image_paths = np.stack(self.image_paths, dtype=str)
+         self.mask_paths = np.stack(self.mask_paths, dtype=str)
++        self.depth_paths = np.stack(self.depth_paths, dtype=str)
+ 
+     def _lazy_worker_intrinsics_cache(self):
+         """Create intrinsics cache for a specific worker."""
+@@ -729,6 +733,10 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
+             mask = torch.from_numpy(np.array(Image.open(mask_path).convert("L"))).reshape(1, actual_h, actual_w, 1)
+             output_dict["mask"] = mask
+ 
++        # Optional depth target (ray distance in world units, 0 = none), same size as the image
++        if os.path.exists(depth_path := self.depth_paths[idx]):
++            output_dict["depth"] = torch.from_numpy(np.load(depth_path).astype(np.float32)).reshape(1, actual_h, actual_w, 1)
++
+         # Add EXIF exposure if available for this frame
+         if self.exif_exposures is not None and self.exif_exposures[idx] is not None:
+             output_dict["exposure"] = torch.tensor(self.exif_exposures[idx], dtype=torch.float32)
+@@ -766,6 +774,9 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
+             mask = (mask > 0.5).to(torch.float32)
+             sample["mask"] = mask
+ 
++        if "depth" in batch:
++            sample["depth_gt"] = batch["depth"][0].to(self.device, non_blocking=True)
++
+         # Add exposure prior from EXIF if available (move to GPU)
+         if "exposure" in batch and batch["exposure"][0] is not None:
+             sample["exposure"] = batch["exposure"].to(self.device)
+diff --git a/threedgrut/datasets/protocols.py b/threedgrut/datasets/protocols.py
+index 00f1b65..c3ebe3c 100644
+--- a/threedgrut/datasets/protocols.py
++++ b/threedgrut/datasets/protocols.py
+@@ -29,6 +29,7 @@ class Batch:
+     rays_in_world_space: bool = False  # True if rays are already in world space (no transform needed)
+     rgb_gt: Optional[torch.Tensor] = None
+     mask: Optional[torch.Tensor] = None
++    depth_gt: Optional[torch.Tensor] = None  # [B, H, W, 1] target ray distance (world units), 0 = no target
+     intrinsics: Optional[list] = None
+     intrinsics_OpenCVPinholeCameraModelParameters: Optional[dict] = None
+     intrinsics_OpenCVFisheyeCameraModelParameters: Optional[dict] = None
+diff --git a/threedgrut/trainer.py b/threedgrut/trainer.py
+index 4ce21e7..9d1164e 100644
+--- a/threedgrut/trainer.py
++++ b/threedgrut/trainer.py
+@@ -735,8 +735,33 @@ class Trainer3DGRUT:
+                 loss_scale = torch.abs(self.model.get_scale()).mean()
+                 lambda_scale = self.conf.loss.lambda_scale
+ 
++        # Depth supervision (e.g. LiDAR): trimmed L1 between the target ray distance and the rendered one.
++        # pred_dist is accumulated front-to-back without normalisation, so divide by accumulated opacity;
++        # an optional term pushes opacity to 1 where a surface was measured.
++        loss_depth = torch.zeros(1, device=self.device)
++        lambda_depth = 0.0
++        if self.conf.loss.get("use_depth", False) and gpu_batch.depth_gt is not None:
++            with torch.cuda.nvtx.range("loss-depth"):
++                d_gt = gpu_batch.depth_gt
++                valid = d_gt > 0
++                if valid.any():
++                    opac = outputs["pred_opacity"]
++                    d_pred = outputs["pred_dist"] / opac.clamp_min(1e-3)
++                    err = torch.abs(d_pred - d_gt)[valid]
++                    keep = self.conf.loss.get("depth_trim", 0.95)
++                    if keep < 1.0 and err.numel() > 100:
++                        err = err[err <= torch.quantile(err.detach(), keep)]
++                    loss_depth = err.mean()
++                    lam_o = self.conf.loss.get("lambda_depth_opacity", 0.0)
++                    if lam_o > 0:
++                        loss_depth = loss_depth + lam_o / max(self.conf.loss.lambda_depth, 1e-12) * \
++                            torch.nn.functional.binary_cross_entropy(opac[valid].clamp(1e-4, 1 - 1e-4),
++                                                                     torch.ones_like(opac[valid]))
++                    lambda_depth = self.conf.loss.lambda_depth
++
+         # Total loss
+-        loss = lambda_l1 * loss_l1 + lambda_ssim * loss_ssim + lambda_opacity * loss_opacity + lambda_scale * loss_scale
++        loss = lambda_l1 * loss_l1 + lambda_ssim * loss_ssim + lambda_opacity * loss_opacity + lambda_scale * loss_scale \
++            + lambda_depth * loss_depth
+         return dict(
+             total_loss=loss,
+             l1_loss=lambda_l1 * loss_l1,
+@@ -744,6 +769,7 @@ class Trainer3DGRUT:
+             ssim_loss=lambda_ssim * loss_ssim,
+             opacity_loss=lambda_opacity * loss_opacity,
+             scale_loss=lambda_scale * loss_scale,
++            depth_loss=lambda_depth * loss_depth,
+         )
+ 
+     @torch.cuda.nvtx.range("log_validation_iter")
