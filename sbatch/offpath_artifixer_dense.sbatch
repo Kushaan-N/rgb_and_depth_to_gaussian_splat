@@ -30,7 +30,8 @@ A="$O/artifixer_dense$K"; SCENE="$A/prep/$SEQ"; PREP0="$O/artifixer/prep/$SEQ"; 
 CK="$(ls -t "$O"/work/depth_l${LAMBDA}/run/*/ckpt_last.pt 2>/dev/null | head -1 || true)"
 [ -n "$CK" ] || { echo "no depth-supervised checkpoint: run sbatch/offpath_depthloss.sbatch first"; exit 1; }
 [ -f "$PREP0/split.json" ] || { echo "no original ArtiFixer preparation: run sbatch/offpath_artifixer.sbatch first"; exit 1; }
-hostname; date; rm -rf "$A"; mkdir -p "$A" "$REP"
+hostname; date; mkdir -p "$A" "$REP"
+rm -rf "$A/prep" "$A/heldout"         # regenerated below; world-model output in $A/run1 is reused if complete
 SCALE="$("$CPUPY" -c "import json;print(json.load(open('$P/sim3.json'))['scale'])")"
 module load cuda/12.4.1 gcc/9.4.0 2>/dev/null || true
 export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"; export PATH="$THREEDGRUT_DIR/.venv/bin:$PATH"
@@ -96,10 +97,19 @@ PY
 
 echo "== world model along the path, then ArtiFixer3D distillation rendered at the held-out poses"
 cd "$AFX_DIR"
-"$APY" -m model_eval.run_inference --evalset reconstructed_colmap --checkpoint_pt "$CHECKPOINT_PT" \
-  --model_id "$MODEL_ID" --save_dir "$A/run1" --split_path "$SCENE/split.json" --render_trajectory trajectory
-F1="$(dirname "$(find "$A/run1" -type d -path "*frames/batch_0000/pred" | head -1)")"
-"$APY" -m data_processing.run_artifixer3d --scene_root "$SCENE" --artifixer_frames_dir "$F1/pred" \
+NPATH="$("$CPUPY" -c "import json;print(len(json.load(open('$A/traj.json'))['frames']))")"
+F1="$(dirname "$(find "$A/run1" -type d -path "*frames/batch_0000/pred" 2>/dev/null | head -1)" 2>/dev/null || true)"
+if [ -z "$F1" ] || [ "$(ls "$F1/pred" 2>/dev/null | wc -l)" -ne "$NPATH" ]; then
+  rm -rf "$A/run1"
+  "$APY" -m model_eval.run_inference --evalset reconstructed_colmap --checkpoint_pt "$CHECKPOINT_PT" \
+    --model_id "$MODEL_ID" --save_dir "$A/run1" --split_path "$SCENE/split.json" --render_trajectory trajectory
+  F1="$(dirname "$(find "$A/run1" -type d -path "*frames/batch_0000/pred" | head -1)")"
+else
+  echo "reusing $NPATH world-model frames in $F1"
+fi
+# a custom render path needs the distill and render phases called separately
+"$APY" -m data_processing.run_artifixer3d --scene_root "$SCENE" --artifixer_frames_dir "$F1/pred" --phases distill
+"$APY" -m data_processing.run_artifixer3d --scene_root "$SCENE" --artifixer_frames_dir "$F1/pred" --phases render \
   --render_trajectory_path "$A/val.json"
 cd "$REPO"
 VR="$(find "$SCENE/artifixer3d" -type d -name renders -path "*val*" | head -1)"
