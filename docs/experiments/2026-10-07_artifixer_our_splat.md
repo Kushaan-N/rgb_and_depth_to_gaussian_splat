@@ -39,6 +39,30 @@ supervised with LiDAR depth at the held-out poses.)
 - Our depth distillation is the first method to lift never-observed pixels (9.0 → 10.8 dB) and the
   best on observed pixels (18.4), but trails ArtiFixer's own distillation overall.
 
-**Next.** Prune our splat's gaussians that no training camera observed before rendering for the world
-model, so never-seen regions are genuinely empty (clean generation) while measured geometry stays —
-expected to combine the sharpness of the first run with the faithful structure of this one.
+## Follow-up: prune the unobserved gaussians instead (`OPACITY=prune`) — worse
+
+`scripts/prune_unobserved.py` removes gaussians whose centre no training camera sees in front of its
+LiDAR surface (84k of 866k, 9.7%); the pruned splat is rendered for the world model with its own
+(now informative) opacity. (Zero-opacity gaussians crash 3DGUT's tracer, so they are removed; the
+base render runs with `CUDA_LAUNCH_BLOCKING=1` to avoid an asynchronous race the pruned splat
+triggers — all 423 frames verified.)
+
+| Version (our splat) | PSNR | SSIM | LPIPS ↓ | PSNR observed | PSNR never observed |
+|---|---|---|---|---|---|
+| pruned splat itself | 12.45 | 0.406 | 0.525 | – | – |
+| pruned → world model views | 12.55 | 0.522 | 0.490 | – | – |
+| pruned → ArtiFixer3D | 14.05 | 0.587 | 0.467 | – | – |
+| pruned → our depth distillation | 12.95 | 0.559 | 0.510 | 16.75 | 9.14 |
+| visibility → ArtiFixer3D (above) | **16.35** | **0.611** | **0.454** | – | – |
+
+What happened (`img/2026-10-07_artifixer_prune.jpg`: real · pruned splat · from pruned · from
+visibility): pruning does empty the never-seen region (it renders black), and the world model fills it
+— the ramp becomes a clean A-frame — but with generic content: the brick stacks only the held-out
+cameras saw vanish into blank white wall. With the visibility mask the LiDAR-seeded gaussians stay as
+structural hints the model regenerates over, so the stacks survive (hazily).
+
+**Conclusion.** Keep the LiDAR-anchored geometry and *tell* the world model it is unverified (the
+visibility mask) — do not delete it. Best overall remains a trade-off: ArtiFixer3D on its own base
+(sharpest, 17.36 dB) vs on our splat with the visibility mask (best SSIM/LPIPS, structure anchored by
+LiDAR, but hazy). Next lever on the haze: generate along a smoother, denser camera path (fewer,
+more consistent world-model views to average), or weight real views higher in distillation.
