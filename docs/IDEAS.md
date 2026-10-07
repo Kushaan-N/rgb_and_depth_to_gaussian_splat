@@ -21,8 +21,8 @@ adopted must stay automatic and config-driven (see docs/RUN.md §6) — no per-s
 | Fuse mocap1–3 into one splat | held-out −9 to −12 dB: objects were rearranged between recordings | rejected (stage kept, with gates) |
 | Difix3D+ (NVIDIA) on a 1 m spatial hold-out | +0.7 dB / LPIPS −0.07 off-path, but fills unseen content with wrong objects | not adopted (benchmark kept) |
 | ArtiFixer world-model fill (NVIDIA) on the same hold-out | 13.0 → 17.4 dB, LPIPS 0.55 → 0.47; fills unseen regions mostly faithfully | **promising — next: on our splat + planned off-path trajectories** |
-| LiDAR depth loss (patched 3DGRUT, λ=0.05) | off-path depth error −42%; +0.5 dB on observed pixels; unseen unchanged | **adopt as option** (on-path check pending) |
-| Dynamic-point removal from the LiDAR cloud | removes the operator + robot-body ghosts (879k of 3.7M pts) | needed for depth targets; pipeline default = next A/B |
+| LiDAR depth loss (patched 3DGRUT, λ=0.05) | off-path depth error −42%, +0.5 dB observed; on-path depth error 0.046 → 0.007 for −0.2 dB | **adopt as option** |
+| Dynamic-point removal from the LiDAR cloud | removes the operator + robot-body ghosts (879k of 3.7M pts); as splat init: no gain (floor −1.5 pts) | used for depth targets; init unchanged |
 | MCMC + opacity/scale regularisation | best LPIPS (−0.006–0.009), floor unchanged, PSNR −0.8 dB | available: `--variant mcmc_reg` |
 
 ## Next, ranked by expected value per cost
