@@ -102,11 +102,22 @@ def score_images(pred_dir, ds=None, gt_dir=None):
     names = sorted(n for n in os.listdir(gdir) if n.lower().endswith((".png", ".jpg", ".jpeg"))
                    and not n.endswith(("_mask.png", "_covis.png")))
     P, S, L = [], [], []
+    sq = {"psnr_observed": [0.0, 0], "psnr_unobserved": [0.0, 0]}
     for n in names:
         pr, gt = load(os.path.join(pred_dir, os.path.splitext(n)[0] + ".png")), load(os.path.join(gdir, n))
         P.append(psnr_m(pr, gt).item()); S.append(ssim_m(pr, gt).item()); L.append(lpips_m(pr, gt).item())
-    return {"psnr": round(float(np.mean(P)), 3), "ssim": round(float(np.mean(S)), 4),
-            "lpips": round(float(np.mean(L)), 4), "n": len(P)}
+        cov = os.path.join(gdir, os.path.splitext(n)[0] + "_covis.png")
+        if os.path.exists(cov):                                    # observed / never-observed split
+            cm = torch.from_numpy(np.asarray(Image.open(cov))).cuda()
+            se = ((pr - gt) ** 2).mean(1)[0]
+            for key, val in (("psnr_observed", 255), ("psnr_unobserved", 128)):
+                m = cm == val; sq[key][0] += se[m].sum().item(); sq[key][1] += int(m.sum().item())
+    res = {"psnr": round(float(np.mean(P)), 3), "ssim": round(float(np.mean(S)), 4),
+           "lpips": round(float(np.mean(L)), 4), "n": len(P)}
+    for key, (tot, cnt) in sq.items():
+        if cnt:
+            res[key] = round(float(-10 * np.log10(tot / cnt)), 3)
+    return res
 
 
 def main():
