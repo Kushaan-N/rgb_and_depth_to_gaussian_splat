@@ -6,7 +6,9 @@
 #                      views, LiDAR depth targets for both
 # OPACITY=render (default) feeds the world model our splat's opacity; OPACITY=covis feeds measured
 # visibility instead: training views opaque, held-out pixels no training camera saw transparent (a
-# LiDAR-seeded splat is opaque everywhere, so its opacity no longer marks what was never seen).
+# LiDAR-seeded splat is opaque everywhere, so its opacity no longer marks what was never seen);
+# OPACITY=prune first makes the gaussians no training camera observed transparent
+# (prune_unobserved.py), so the rendered opacity itself marks never-seen regions again.
 # Needs offpath_depthloss.sbatch (the depth-supervised checkpoint + targets) and the ArtiFixer venv.
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o <log> sbatch/offpath_artifixer_ours.sbatch configs/<seq>.yaml
 #SBATCH -J offpath-afx-ours
@@ -28,7 +30,7 @@ export CHECKPOINT_PT="${CHECKPOINT_PT:-$CEAR_WS/artifixer-checkpoints/artifixer-
 export MODEL_ID="${MODEL_ID:-Wan-AI/Wan2.1-T2V-1.3B-Diffusers}"
 get() { "$CPUPY" scripts/cfg_get.py "$CFG" "$@"; }
 OUT="$(get paths.out_root)"; P="$OUT/pipeline"; O="$P/offpath"; REP="$O/report"; SEQ="$(get sequence.name)"
-OPAC="${OPACITY:-render}"; SUF=""; [ "$OPAC" = covis ] && SUF="_covis"
+OPAC="${OPACITY:-render}"; SUF=""; [ "$OPAC" != render ] && SUF="_$OPAC"
 A="$O/artifixer_ours$SUF"; SCENE="$A/prep/$SEQ"; ITERS="$(get pipeline.train_iterations 30000)"
 APP="$(get pipeline.trainer_app apps/colmap_3dgut.yaml)"
 CK="$(ls -t "$O"/work/depth_l${LAMBDA}/run/*/ckpt_last.pt 2>/dev/null | head -1 || true)"
@@ -53,7 +55,12 @@ PREP0="$O/artifixer/prep/$SEQ"
 [ -f "$PREP0/split.json" ] || { echo "no original ArtiFixer preparation: run sbatch/offpath_artifixer.sbatch first"; exit 1; }
 mkdir -p "$(dirname "$SCENE")"; cp -r "$PREP0" "$SCENE"
 rm -rf "$SCENE/artifixer3d" "$SCENE/split_artifixer3d_plus.json"   # outputs of the original run: recompute
-"$GPY" scripts/eval_views.py --checkpoint "$CK" --dataset "$P/dataset" --no-metrics \
+CKR="$CK"
+if [ "$OPAC" = prune ]; then
+  "$GPY" scripts/prune_unobserved.py --checkpoint "$CK" --train "$O/train_data" --out "$A/ckpt_pruned.pt"
+  CKR="$A/ckpt_pruned.pt"
+fi
+"$GPY" scripts/eval_views.py --checkpoint "$CKR" --dataset "$P/dataset" --no-metrics \
   --save-dir "$A/ours_render/rgb" --save-opacity-dir "$A/ours_render/opacity" | tail -1
 "$CPUPY" - "$SCENE" "$P/dataset/sparse/0" "$A/ours_render" "$OPAC" "$O/test/images" <<'PY'
 import json, os, shutil, sys
