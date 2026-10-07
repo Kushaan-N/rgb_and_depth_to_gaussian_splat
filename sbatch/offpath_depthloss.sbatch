@@ -36,8 +36,7 @@ nvidia-smi --query-gpu=name --format=csv,noheader
 mkdir -p "$W" "$REP" "$DD"
 bash env/make_3dgrut_depth.sh
 [ -f "$O/split.json" ] || "$CPUPY" scripts/offpath_split.py --config "$CFG"
-CK0="$(ls -t "$W"/baseline/run/*/ckpt_last.pt 2>/dev/null | head -1 || true)"
-[ -n "$CK0" ] || { echo "no baseline checkpoint: run sbatch/offpath_difix.sbatch first"; exit 1; }
+CK0="$(ls -t "$W"/baseline/run/*/ckpt_last.pt 2>/dev/null | head -1 || true)"   # from offpath_difix.sbatch, else trained below
 
 echo "== 1. static LiDAR cloud: drop moving things (people, the robot's body) by visibility, then the robot's corridor"
 [ -f "$DD/lidar_nodyn.ply" ] || "$CPUPY" scripts/remove_dynamic_lidar.py --config "$CFG" --cloud "$P/depth_cloud.ply" \
@@ -62,6 +61,13 @@ cv2.imwrite(sys.argv[3], cv2.resize(np.vstack(rows), None, fx=0.5, fy=0.5)); pri
 PY
 echo "== 3. co-visibility of the held-out frames"
 "$GPY" scripts/covis_masks.py --train "$O/train_data" --test "$O/test"
+if [ -z "$CK0" ]; then
+  echo "== baseline (stock behaviour: depth loss off)"
+  ( cd "$DEPTH_DIR" && "$GPY" train.py --config-name "$APP" path="$O/train_data" out_dir="$W/baseline" experiment_name=run \
+      dataset.downsample_factor=1 n_iterations="$ITERS" dataset.test_split_interval=100000 loss.use_depth=false ) \
+    > "$W/baseline.log" 2>&1 || { tail -40 "$W/baseline.log"; exit 1; }
+  CK0="$(ls -t "$W"/baseline/run/*/ckpt_last.pt | head -1)"
+fi
 echo "== 4. gradient check of the rendered depth"
 ( cd "$DEPTH_DIR" && "$GPY" -c "import threedgrut; print('trainer code:', threedgrut.__file__)" )
 ( cd "$DEPTH_DIR" && PYTHONPATH="$DEPTH_DIR" "$GPY" "$REPO/scripts/check_depth_grad.py" --checkpoint "$CK0" --dataset "$O/train_data" )
