@@ -38,23 +38,38 @@ names = sorted(i.name for i in pycolmap.Reconstruction(sys.argv[2]).images.value
 open(sys.argv[3], "w").write("\n".join(names) + "\n")
 PY
 
-echo "== ArtiFixer from our splat ($CK)"
+echo "== our splat's renders + opacity for every frame ($CK)"
+# ArtiFixer's 3DGRUT fork cannot load our checkpoints (different gaussian feature layout), but the world
+# model only consumes renders/NNNNN.png + opacity/NNNNN.png (8-bit), indexed in sorted-image order. So:
+# reuse the original ArtiFixer preparation (captions, cameras, split) and swap in OUR renders.
+module load cuda/12.4.1 gcc/9.4.0 2>/dev/null || true
+export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"; export PATH="$THREEDGRUT_DIR/.venv/bin:$PATH"
+rm -rf "$SCENE" "$A/run1" "$A/run2" "$A/ours_render"            # never reuse a previous attempt
+PREP0="$O/artifixer/prep/$SEQ"
+[ -f "$PREP0/split.json" ] || { echo "no original ArtiFixer preparation: run sbatch/offpath_artifixer.sbatch first"; exit 1; }
+mkdir -p "$(dirname "$SCENE")"; cp -r "$PREP0" "$SCENE"
+"$GPY" scripts/eval_views.py --checkpoint "$CK" --dataset "$P/dataset" --no-metrics \
+  --save-dir "$A/ours_render/rgb" --save-opacity-dir "$A/ours_render/opacity" | tail -1
+"$CPUPY" - "$SCENE" "$P/dataset/sparse/0" "$A/ours_render" <<'PY'
+import json, os, shutil, sys
+import pycolmap
+from PIL import Image
+scene, model, src = sys.argv[1:4]
+e = json.load(open(os.path.join(scene, "split.json")))["test"][os.path.basename(scene)]
+names = sorted(i.name for i in pycolmap.Reconstruction(model).images.values())
+for kind, key in (("rgb", "render_dir"), ("opacity", "opacity_dir")):
+    dst = os.path.join(scene, e[key]); ref = Image.open(os.path.join(dst, "00000.png"))
+    for i, n in enumerate(names):
+        im = Image.open(os.path.join(src, kind, os.path.splitext(n)[0] + ".png")).convert(ref.mode)
+        assert im.size == ref.size, (im.size, ref.size)
+        im.save(os.path.join(dst, f"{i:05d}.png"))
+    print(f"replaced {len(names)} {kind} frames in {dst}")
+PY
+BASE=ours
+echo "base reconstruction used by the world model: $BASE" | tee "$REP/afx_ours_base.txt"
 module purge 2>/dev/null || true; module load cuda/12.8 2>/dev/null || true
 export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"; export PATH="$AFX_VENV/bin:$PATH"
-rm -rf "$SCENE" "$A/run1" "$A/run2"                      # never reuse a previous attempt's renders
-export AFX_DIR
-"$APY" scripts/ckpt_for_artifixer.py --checkpoint "$CK" --out "$A/ckpt_for_artifixer.pt"
 cd "$AFX_DIR"
-BASE=ours
-if ! "$APY" -m data_processing.prepare_colmap_artifixer_inputs --colmap_dir "$P/dataset" --output_root "$SCENE" \
-     --selected_image_names_file "$A/train_images.txt" --metric_scale "$SCALE" \
-     --reconstruction_checkpoint "$A/ckpt_for_artifixer.pt"; then
-  echo "!! ArtiFixer could not render our checkpoint; falling back to its own reconstruction"; BASE=theirs
-  rm -rf "$SCENE"
-  "$APY" -m data_processing.prepare_colmap_artifixer_inputs --colmap_dir "$P/dataset" --output_root "$SCENE" \
-    --selected_image_names_file "$A/train_images.txt" --metric_scale "$SCALE"
-fi
-echo "base reconstruction used by the world model: $BASE" | tee "$REP/afx_ours_base.txt"
 "$APY" -m model_eval.run_inference --evalset reconstructed_colmap --checkpoint_pt "$CHECKPOINT_PT" \
   --model_id "$MODEL_ID" --save_dir "$A/run1" --split_path "$SCENE/split.json" --render_trajectory val_frames
 F1="$(dirname "$(find "$A/run1" -type d -path "*frames/batch_0000/pred" | head -1)")"
