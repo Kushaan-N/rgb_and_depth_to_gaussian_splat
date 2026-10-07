@@ -41,10 +41,14 @@ PY
 echo "== ArtiFixer from our splat ($CK)"
 module purge 2>/dev/null || true; module load cuda/12.8 2>/dev/null || true
 export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"; export PATH="$AFX_VENV/bin:$PATH"
+rm -rf "$SCENE" "$A/run1" "$A/run2"                      # never reuse a previous attempt's renders
+export AFX_DIR
+"$APY" scripts/ckpt_for_artifixer.py --checkpoint "$CK" --out "$A/ckpt_for_artifixer.pt"
 cd "$AFX_DIR"
 BASE=ours
 if ! "$APY" -m data_processing.prepare_colmap_artifixer_inputs --colmap_dir "$P/dataset" --output_root "$SCENE" \
-     --selected_image_names_file "$A/train_images.txt" --metric_scale "$SCALE" --reconstruction_checkpoint "$CK"; then
+     --selected_image_names_file "$A/train_images.txt" --metric_scale "$SCALE" \
+     --reconstruction_checkpoint "$A/ckpt_for_artifixer.pt"; then
   echo "!! ArtiFixer could not render our checkpoint; falling back to its own reconstruction"; BASE=theirs
   rm -rf "$SCENE"
   "$APY" -m data_processing.prepare_colmap_artifixer_inputs --colmap_dir "$P/dataset" --output_root "$SCENE" \
