@@ -52,7 +52,8 @@ def main():
     n_un = int((~seen).sum()); keep = seen.cpu(); N = len(X)
     for k, v in list(ck.items()):
         if torch.is_tensor(v) and v.dim() > 0 and v.shape[0] == N:
-            ck[k] = v.detach()[keep].clone()
+            f = v.detach()[keep].clone()
+            ck[k] = torch.nn.Parameter(f, requires_grad=v.requires_grad) if isinstance(v, torch.nn.Parameter) else f
     ck.pop("optimizer", None)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     torch.save(ck, args.out)
