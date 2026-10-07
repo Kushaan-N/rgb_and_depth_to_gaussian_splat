@@ -60,7 +60,9 @@ if [ "$OPAC" = prune ]; then
   "$GPY" scripts/prune_unobserved.py --checkpoint "$CK" --train "$O/train_data" --out "$A/ckpt_pruned.pt"
   CKR="$A/ckpt_pruned.pt"
 fi
-"$GPY" scripts/eval_views.py --checkpoint "$CKR" --dataset "$P/dataset" --no-metrics \
+# synchronous CUDA for this render: the pruned splat triggers an asynchronous illegal-memory-access in
+# 3DGUT's tracer that does not occur with blocking launches (all 423 frames verified); a few minutes slower
+CUDA_LAUNCH_BLOCKING=1 "$GPY" scripts/eval_views.py --checkpoint "$CKR" --dataset "$P/dataset" --no-metrics \
   --save-dir "$A/ours_render/rgb" --save-opacity-dir "$A/ours_render/opacity" | tail -1
 "$CPUPY" - "$SCENE" "$P/dataset/sparse/0" "$A/ours_render" "$OPAC" "$O/test/images" <<'PY'
 import json, os, shutil, sys
