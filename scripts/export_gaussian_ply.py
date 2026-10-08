@@ -18,9 +18,18 @@ def main():
     args = ap.parse_args()
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
 
-    from threedgrut.export.scripts.export_usd import load_model_from_checkpoint
-    from threedgrut.export.formats.ply import PLYExporter
-    model, conf, _bg, _pp = load_model_from_checkpoint(args.checkpoint)
+    try:
+        from threedgrut.export.scripts.export_usd import load_model_from_checkpoint
+        from threedgrut.export.formats.ply import PLYExporter
+        model, conf, _bg, _pp = load_model_from_checkpoint(args.checkpoint)
+    except ImportError:   # 3DGRUT versions without export_usd (e.g. ArtiFixer's fork): load as its renderer does
+        import torch
+        from threedgrut.model.model import MixtureOfGaussians
+        from threedgrut.export.ply_exporter import PLYExporter
+        ck = torch.load(args.checkpoint, weights_only=False)
+        conf = ck["config"]
+        model = MixtureOfGaussians(conf)
+        model.init_from_checkpoint(ck)
     n = model.get_positions().shape[0]
     print(f"[export_ply] {n} gaussians -> {args.out}", flush=True)
     PLYExporter().export(model, args.out, conf=conf)
