@@ -5,9 +5,10 @@
 #  1. find_objects.py      free-standing objects in the dynamic-free LiDAR cloud
 #  2. complete_objects.py  2.5D surfaces, unseen samples filled by mirror/row copy, junk removed, discs added
 #                          (base = the all-frames splat with LiDAR depth loss from worldmodel_full.sbatch)
-#  3. exports: <out>/exports/objects_completed{,_metric}.ply
 #  4. evaluation: the other recording's frames mapped into this splat's frame; pixels showing completed
 #     surfaces (unseen here) vs pixels this recording observed; base and completed splats scored on both
+#  5. acceptance gate (accept_gate.py): exports <out>/exports/objects_completed{,_metric}.ply ONLY if the
+#     completed splat is not worse than the base on real images; otherwise the base stays the deliverable
 #SBATCH -J object-completion
 #SBATCH -p gpu
 #SBATCH --gres=gpu:a100:1
@@ -36,10 +37,6 @@ echo "== 1. objects"
 echo "== 2. completion (base: $CK)"
 "$GPY" scripts/complete_objects.py --objects "$B/objects" --checkpoint "$CK" --dataset "$DATA" \
   --sim3-json "$P/sim3.json" --out "$B/completed.pt"
-echo "== 3. exports"
-"$GPY" scripts/export_gaussian_ply.py --checkpoint "$B/completed.pt" --out "$E/objects_completed.ply"
-"$CPUPY" scripts/sim3_align_splat.py --colmap-model "$P/dataset/sparse/0" --gt-model "$GT" \
-  --in-ply "$E/objects_completed.ply" --out-ply "$E/objects_completed_metric.ply"
 
 echo "== 4. evaluation against $(get "$OTHER" sequence.name)"
 "$CPUPY" scripts/cross_recording_views.py --src-dataset "$OP/dataset" --src-sim3 "$OP/sim3.json" \
@@ -54,6 +51,15 @@ export CUDA_LAUNCH_BLOCKING=1
 "$GPY" scripts/eval_views.py --checkpoint "$B/completed.pt" --dataset "$B/xviews_backs" --tag completed \
   --json-out "$REP/completed.json" --save-dir "$B/renders_completed" | tail -1
 
+echo "== 5. acceptance gate: ship only if not worse than the base splat on real images"
+rm -f "$E/objects_completed.ply" "$E/objects_completed_metric.ply"
+if "$CPUPY" scripts/accept_gate.py --pair other_recording "$REP/base.json" "$REP/completed.json" --out "$REP/gate.json"; then
+  "$GPY" scripts/export_gaussian_ply.py --checkpoint "$B/completed.pt" --out "$E/objects_completed.ply"
+  "$CPUPY" scripts/sim3_align_splat.py --colmap-model "$P/dataset/sparse/0" --gt-model "$GT" \
+    --in-ply "$E/objects_completed.ply" --out-ply "$E/objects_completed_metric.ply"
+else
+  echo "completion rejected by the gate: no objects_completed export (the base splat stays the deliverable)"
+fi
 "$CPUPY" - "$B" "$REP" "$E/objects_completed_preview.jpg" <<'PY'
 import json, os, sys, cv2, numpy as np
 B, rep, out = sys.argv[1:4]
