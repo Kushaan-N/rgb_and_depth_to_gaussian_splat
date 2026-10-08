@@ -47,6 +47,8 @@ echo "== 4. evaluation against $(get "$OTHER" sequence.name)"
 "$GPY" scripts/build_depth_targets.py --dataset "$B/xviews" --cloud "$STATIC" --sim3-json "$P/sim3.json"
 "$GPY" scripts/covis_masks.py --train "$DATA" --test "$B/xviews"
 "$GPY" scripts/object_back_masks.py --views "$B/xviews" --unseen "$B/completed_unseen.npz" --out "$B/xviews_backs"
+# synchronous CUDA: edited checkpoints trigger an asynchronous illegal-memory-access in 3DGUT's tracer
+export CUDA_LAUNCH_BLOCKING=1
 "$GPY" scripts/eval_views.py --checkpoint "$CK" --dataset "$B/xviews_backs" --tag base --json-out "$REP/base.json" \
   --save-dir "$B/renders_base" | tail -1
 "$GPY" scripts/eval_views.py --checkpoint "$B/completed.pt" --dataset "$B/xviews_backs" --tag completed \
