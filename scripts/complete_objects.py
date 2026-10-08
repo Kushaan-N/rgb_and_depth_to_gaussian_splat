@@ -88,7 +88,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--cell", type=float, default=0.01, help="surface sample spacing (m)")
     ap.add_argument("--hcell", type=float, default=0.02, help="height-map cell (m)")
-    ap.add_argument("--max-incidence", type=float, default=75.0)
+    ap.add_argument("--max-incidence", type=float, default=85.0)   # tops are only ever seen at grazing angles
     ap.add_argument("--depth-tol-m", type=float, default=0.03)
     ap.add_argument("--frame-stride", type=int, default=1)
     ap.add_argument("--prune-margin-m", type=float, default=0.04)
