@@ -20,6 +20,38 @@ from build_depth_targets import quat_to_R, read_text_model
 from fuse_sequences import write_model
 
 
+def read_views(views):
+    """(cams, [(name, R_wc, C)]) of a COLMAP text dataset, in recording (name) order."""
+    cams, imgs = read_text_model(os.path.join(views, "sparse", "0"))
+    out = []
+    for name, cid, q, t in sorted(imgs):
+        Rcw = quat_to_R(q); Rwc = Rcw.T
+        out.append((name, cid, Rwc, -Rwc @ t))
+    return cams, out
+
+
+def write_path(path, cid, cam, views, out):
+    """path = [(placeholder view name, R_wc, C)]; writes <out>.json (ArtiFixer) + <out>_dataset (COLMAP)."""
+    W, H, (fx, fy, cx, cy) = cam
+    flip = np.diag([1.0, -1.0, -1.0, 1.0])
+    frames = []
+    for _, Rwc, C in path:
+        c2w = np.eye(4); c2w[:3, :3] = Rwc; c2w[:3, 3] = C                 # OpenCV camera-to-world
+        frames.append({"transform_matrix": (c2w @ flip).tolist()})        # = inv(W2C) @ flip
+    traj = {"camera_model": "OPENCV", "w": W, "h": H, "fl_x": fx, "fl_y": fy, "cx": cx, "cy": cy,
+            "k1": 0.0, "k2": 0.0, "p1": 0.0, "p2": 0.0, "frames": frames}               # undistorted frames
+    json.dump(traj, open(out + ".json", "w"), indent=1)
+    ds = out + "_dataset"
+    if os.path.isdir(ds):
+        shutil.rmtree(ds)
+    names = [f"traj_{i:05d}.png" for i in range(len(path))]
+    write_model(os.path.join(ds, "sparse", "0"), {cid: ("PINHOLE", W, H, [fx, fy, cx, cy])},
+                [(n, cid, Rwc, C) for n, (_, Rwc, C) in zip(names, path)])
+    os.makedirs(os.path.join(ds, "images"))
+    for n, (src, _, _) in zip(names, path):
+        os.symlink(os.path.realpath(os.path.join(views, "images", src)), os.path.join(ds, "images", n))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--views", required=True, help="COLMAP text dataset whose views define the path")
@@ -30,13 +62,9 @@ def main():
     args = ap.parse_args()
     from scipy.spatial.transform import Rotation, Slerp
 
-    cams, imgs = read_text_model(os.path.join(args.views, "sparse", "0"))
-    imgs = sorted(imgs)                                                   # names are timestamps: recording order
-    cid = imgs[0][1]; W, H, (fx, fy, cx, cy) = cams[cid]
-    poses = []
-    for name, _, q, t in imgs:
-        Rcw = quat_to_R(q); Rwc = Rcw.T; C = -Rwc @ t
-        poses.append((name, Rwc, C))
+    cams, views = read_views(args.views)                                  # recording order
+    cid = views[0][1]
+    poses = [(n, Rwc, C) for n, _, Rwc, C in views]
     path = []
     for k, (name, Rwc, C) in enumerate(poses):
         path.append((name, Rwc, C))
@@ -47,23 +75,7 @@ def main():
                 for j in range(1, args.densify + 1):
                     f = j / (args.densify + 1)
                     path.append((name, sl(f).as_matrix(), (1 - f) * C + f * C2))   # placeholder = earlier view
-    flip = np.diag([1.0, -1.0, -1.0, 1.0])
-    frames = []
-    for _, Rwc, C in path:
-        c2w = np.eye(4); c2w[:3, :3] = Rwc; c2w[:3, 3] = C                 # OpenCV camera-to-world
-        frames.append({"transform_matrix": (c2w @ flip).tolist()})        # = inv(W2C) @ flip
-    traj = {"camera_model": "OPENCV", "w": W, "h": H, "fl_x": fx, "fl_y": fy, "cx": cx, "cy": cy,
-            "k1": 0.0, "k2": 0.0, "p1": 0.0, "p2": 0.0, "frames": frames}               # undistorted frames
-    json.dump(traj, open(args.out + ".json", "w"), indent=1)
-    ds = args.out + "_dataset"
-    if os.path.isdir(ds):
-        shutil.rmtree(ds)
-    names = [f"traj_{i:05d}.png" for i in range(len(path))]
-    write_model(os.path.join(ds, "sparse", "0"), {cid: ("PINHOLE", W, H, [fx, fy, cx, cy])},
-                [(n, cid, Rwc, C) for n, (_, Rwc, C) in zip(names, path)])
-    os.makedirs(os.path.join(ds, "images"))
-    for n, (src, _, _) in zip(names, path):
-        os.symlink(os.path.realpath(os.path.join(args.views, "images", src)), os.path.join(ds, "images", n))
+    write_path(path, cid, cams[cid], args.views, args.out)
     print(f"[trajectory] {len(poses)} views -> {len(path)} path frames (densify {args.densify}) -> {args.out}.json",
           flush=True)
 
