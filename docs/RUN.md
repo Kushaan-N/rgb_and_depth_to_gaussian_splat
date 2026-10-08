@@ -168,3 +168,14 @@ Physics **is** validated, just in a separate stage from the photoreal render:
 - `sbatch/nurec_render_test.sbatch` — photoreal render at recorded poses (walkthrough / proof).
 - `scripts/colmap_to_tum.py` — camera trajectory → TUM for the renderer.
 - `scripts/compose_stage.py` — physics (Gate 5 drop) + geometry nav.
+
+
+## Acceptance gate for any generation / completion stage
+
+A splat produced by a generative or completion stage (world-model fill, object completion, fixers, ...)
+is exported only if it is **not worse than the splat without that stage**, scored against real images at
+their real camera poses (held-out frames of the recording, and frames of another recording of the same,
+unchanged scene): `scripts/accept_gate.py` compares baseline vs candidate `eval_views.py` results on each
+set and rejects any drop in PSNR (overall, observed, completed regions) > 0.05 dB, SSIM > 0.002 or rise in
+LPIPS > 0.002; on rejection the baseline stays the deliverable. Results that failed are kept only as
+`exports/*_REJECTED.ply` (see `exports/README.txt`).
