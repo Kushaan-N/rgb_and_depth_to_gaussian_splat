@@ -5,7 +5,8 @@ For each object from find_objects.py (metric LiDAR points of blocks, boxes, ramp
   1. Shape: a 2.5D surface over the object's footprint (heights from its LiDAR points on a --hcell grid,
      axes aligned to the object by PCA): flat tops, vertical walls at the footprint edge and at steps.
      Stepped brick stacks, boxes and ramps are all 2.5D.
-  2. Surface samples every --cell, each with a normal.
+  2. Surface samples every --cell, each with a normal — kept only where the object's LiDAR returns are
+     within --support-m (measured surface) and no camera sees through them (free-space carving).
   3. Observed?: a sample is observed if some training camera sees it — inside the image, facing the
      camera (< --max-incidence), and not occluded (its ray distance matches that frame's LiDAR depth
      target within tolerance; where the frame has no LiDAR target it counts as observed if it is in
@@ -92,6 +93,7 @@ def main():
     ap.add_argument("--depth-tol-m", type=float, default=0.03)
     ap.add_argument("--frame-stride", type=int, default=1)
     ap.add_argument("--prune-margin-m", type=float, default=0.04)
+    ap.add_argument("--support-m", type=float, default=0.03, help="surface samples need a LiDAR return this close")
     args = ap.parse_args()
     import torch
     from scipy.spatial import cKDTree
@@ -107,14 +109,21 @@ def main():
     cosmax = np.cos(np.deg2rad(args.max_incidence)); tol = args.depth_tol_m / s
     T = lambda a: torch.tensor(np.asarray(a), device=dev, dtype=torch.float64)
 
-    def observed(Xd, Nd=None):
-        """per point: seen by some camera (in view, facing if normals given, not occluded)."""
+    def observed(Xd, Nd=None, through_out=None):
+        """per point: seen by some camera (in view, facing if normals given, not occluded). With through_out,
+        also flags points some camera sees THROUGH (its LiDAR depth lies clearly beyond the point: free space)."""
         X = T(Xd); seen = torch.zeros(len(X), dtype=torch.bool, device=dev)
+        thru = torch.zeros(len(X), dtype=torch.bool, device=dev)
         Nn = T(Nd) if Nd is not None else None
         for (name, W, H, fx, fy, cx, cy, Rcw, tcw, _), D in zip(cams, depth):
             Rc = T(Rcw); Pc = X @ Rc.T + T(tcw); z = Pc[:, 2]
             u = torch.floor(fx * Pc[:, 0] / z + cx).long(); v = torch.floor(fy * Pc[:, 1] / z + cy).long()
             ok = (z > 0.05) & (u >= 0) & (u < W) & (v >= 0) & (v < H)
+            if through_out is not None and D is not None:
+                ia = torch.nonzero(ok, as_tuple=True)[0]
+                if len(ia):
+                    dt = D[v[ia], u[ia]].double(); r = torch.linalg.norm(Pc[ia], dim=1)
+                    thru[ia[(dt > 0) & (dt - r > torch.clamp(0.05 * dt, min=2 * tol))]] = True
             if Nn is not None:
                 Cw = -Rc.T @ T(tcw); vd = Cw[None] - X; vd = vd / torch.linalg.norm(vd, dim=1, keepdim=True)
                 ok &= (vd * Nn).sum(1) > cosmax
@@ -124,6 +133,8 @@ def main():
                 vis = (dt <= 0) | ((r - dt).abs() < torch.clamp(0.03 * dt, min=tol))
                 idx = idx[vis]
             seen[idx] = True
+        if through_out is not None:
+            through_out.append(thru.cpu().numpy())
         return seen.cpu().numpy()
 
     ck = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
@@ -134,8 +145,15 @@ def main():
     for o in meta["objects"]:
         P = pts[f"obj{o['id']}"]
         pos, nor, kind, face, local, centre = object_surface(P, n, d, args.hcell, args.cell)
+        # keep only MEASURED surface: within --support-m of this object's LiDAR returns (the LiDAR scans 360
+        # degrees, so real backs have returns; gaps between blocks and the space under a ramp do not)
+        sup = cKDTree(P).query(pos)[0] < args.support_m
+        pos, nor, kind, face, local = pos[sup], nor[sup], kind[sup], face[sup], local[sup]
         posd, nord = to_ds(pos), nor @ R                               # rotate normals into the dataset frame
-        seen = observed(posd, nord)
+        th = []
+        seen = observed(posd, nord, through_out=th)
+        free = th[0]                                                   # a camera sees through it: not a surface
+        pos, nor, kind, face, local, posd, nord, seen = (a[~free] for a in (pos, nor, kind, face, local, posd, nord, seen))
         # appearance of observed samples = SH colour of the nearest opaque real gaussian
         dist, gi = gtree.query(posd, k=8)
         src = np.full(len(pos), -1)
@@ -176,7 +194,7 @@ def main():
         if len(inside):
             gseen = observed(G[inside])
             remove[inside[~gseen]] = True
-        rep.append({"id": o["id"], "samples": int(len(pos)), "unseen": int(len(un)), "added": int(len(add)),
+        rep.append({"id": o["id"], "samples": int(len(pos)), "dropped_unsupported": int((~sup).sum()), "dropped_free_space": int(free.sum()), "unseen": int(len(un)), "added": int(len(add)),
                     "fill": {"mirror": int((how == 1).sum()), "row": int((how == 2).sum()), "nearest": int((how == 3).sum())},
                     "unseen_fraction": round(len(un) / max(len(pos), 1), 3)})
         print(f"[complete] object {o['id']}: {len(pos)} surface samples, {len(un)} unseen ({len(un)/max(len(pos),1):.0%}); "
