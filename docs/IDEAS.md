@@ -24,6 +24,8 @@ adopted must stay automatic and config-driven (see docs/RUN.md §6) — no per-s
 | LiDAR depth loss (patched 3DGRUT, λ=0.05) | off-path depth error −42%, +0.5 dB observed; on-path depth error 0.046 → 0.007 for −0.2 dB | **adopt as option** |
 | Dynamic-point removal from the LiDAR cloud | removes the operator + robot-body ghosts (879k of 3.7M pts); as splat init: no gain (floor −1.5 pts) | used for depth targets; init unchanged |
 | World model on our splat (LiDAR init + depth) | splat opacity misleads it (12.8 dB views); measured visibility instead: 16.35 dB, best SSIM/LPIPS, ramp shape right but hazy; pruning unobserved gaussians instead: worse (14.05 — loses the LiDAR anchors) | keep anchors + visibility mask; next: denser camera path for the world model |
+| World model along a denser path (K=3) | 16.00 → 13.97 dB: long autoregressive generation drifts | rejected |
+| Replication on mocap2_well-lit_comb | world model on our splat + visibility 17.79 → 21.97 dB (vs 17.12 own base); depth loss replicates; dynamic-free init floor −8.6 pts | **world model on our splat = best method on both** |
 | MCMC + opacity/scale regularisation | best LPIPS (−0.006–0.009), floor unchanged, PSNR −0.8 dB | available: `--variant mcmc_reg` |
 
 ## Next, ranked by expected value per cost
