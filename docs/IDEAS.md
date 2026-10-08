@@ -27,6 +27,7 @@ adopted must stay automatic and config-driven (see docs/RUN.md §6) — no per-s
 | World model along a denser path (K=3) | 16.00 → 13.97 dB: long autoregressive generation drifts | rejected |
 | Replication on mocap2_well-lit_comb | world model on our splat + visibility 17.79 → 21.97 dB (vs 17.12 own base); depth loss replicates; dynamic-free init floor −8.6 pts | **world model on our splat = best method on both** |
 | World-model views in training, scored on-path too | every variant costs seen regions (−0.3–0.4 dB, worse LPIPS); ArtiFixer3D blurriest on-path | **world models dropped**; object-level completion instead |
+| Object completion v1 (2.5D fit + mirror/row copy) | worse on the few cross-recording pixels (completed 18.3 vs 20.2 dB); ramp offset copy, speckled fill | WIP: leave-arc-out GT, register to splat, image textures |
 | MCMC + opacity/scale regularisation | best LPIPS (−0.006–0.009), floor unchanged, PSNR −0.8 dB | available: `--variant mcmc_reg` |
 
 ## Next, ranked by expected value per cost
