@@ -12,8 +12,8 @@ For each object from find_objects.py (metric LiDAR points of blocks, boxes, ramp
      target within tolerance; where the frame has no LiDAR target it counts as observed if it is in
      view and facing, so the real splat keeps authority whenever in doubt).
      With --splat-depth-dir (the base splat's rendered depth per training frame, eval_views.py
-     --save-depth-dir) a point also counts as observed if it is in view and NOT behind the splat's own
-     surface there (either side, any normal): a gaussian placed there would show up in a training view.
+     --save-depth-dir) a point also counts as observed if it is in view, not edge-on (either side) and NOT
+     behind the splat's own surface there: a gaussian placed there would show up in a training view.
      The LiDAR surface and the splat's surface differ by centimetres; without this test added discs
      cover / poke through surfaces the cameras did see (leave-arc-out test: -2.6 dB on seen pixels).
   4. Appearance for unseen samples, copied from observed ones, in order:
@@ -132,7 +132,11 @@ def main():
             u = torch.floor(fx * Pc[:, 0] / z + cx).long(); v = torch.floor(fy * Pc[:, 1] / z + cy).long()
             ok = (z > 0.05) & (u >= 0) & (u < W) & (v >= 0) & (v < H)
             if SD is not None:                                         # would show in this training view
-                ia = torch.nonzero(ok, as_tuple=True)[0]
+                okv = ok
+                if Nn is not None:                                     # (double-sided; edge-on discs are invisible)
+                    Cw = -Rc.T @ T(tcw); vd = Cw[None] - X; vd = vd / torch.linalg.norm(vd, dim=1, keepdim=True)
+                    okv = ok & ((vd * Nn).sum(1).abs() > cosmax)
+                ia = torch.nonzero(okv, as_tuple=True)[0]
                 if len(ia):
                     ds_ = torch.tensor(np.load(SD).astype(np.float32), device=dev).double()[v[ia], u[ia]]
                     r = torch.linalg.norm(Pc[ia], dim=1)
