@@ -1,6 +1,6 @@
 """Render a trained 3DGRUT checkpoint at every camera of a COLMAP-format dataset and score it against
 that dataset's images (3DGRUT venv, GPU). The dataset's poses must be in the checkpoint's frame.
-`--save-dir` also writes each render as <save-dir>/<image name>; `--no-metrics` renders poses whose
+`--save-dir` also writes each render as <save-dir>/<image name>; `--save-depth-dir` writes the rendered depth; `--no-metrics` renders poses whose
 images are only placeholders (novel views). Where <image>_depth.npy (LiDAR target, build_depth_targets.py)
 exists, the rendered depth is scored too (AbsRel, share within 5%); where <image>_covis.png
 (covis_masks.py) exists, PSNR is also split into pixels a training camera observed / never observed.
@@ -15,7 +15,7 @@ import argparse, json, os
 import numpy as np
 
 
-def score_dataset(checkpoint, ds, save_dir=None, metrics=True, opacity_dir=None):
+def score_dataset(checkpoint, ds, save_dir=None, metrics=True, opacity_dir=None, depth_dir=None):
     """{psnr, ssim, lpips, n} over all frames of `ds` (no train/test split); optionally save renders."""
     import torch, torchvision
     from threedgrut.render import Renderer
@@ -48,6 +48,12 @@ def score_dataset(checkpoint, ds, save_dir=None, metrics=True, opacity_dir=None)
             from PIL import Image
             op = (out["pred_opacity"][0, ..., 0].clip(0, 1) * 255).round().to(torch.uint8).cpu().numpy()
             Image.fromarray(op, mode="L").save(dst)                          # 8-bit greyscale
+        if depth_dir:                                                           # ray distance, 0 where opacity < 0.5
+            dst = os.path.join(depth_dir, os.path.splitext(names[k])[0] + "_splatdepth.npy")
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            op = out["pred_opacity"][0, ..., 0]
+            dd = torch.where(op > 0.5, out["pred_dist"][0, ..., 0] / op.clamp_min(1e-3), torch.zeros_like(op))
+            np.save(dst, dd.half().cpu().numpy())
         if not metrics:
             continue
         gt = gb.rgb_gt[..., :3]
@@ -131,12 +137,14 @@ def main():
     ap.add_argument("--save-dir", default=None)
     ap.add_argument("--no-metrics", action="store_true")
     ap.add_argument("--save-opacity-dir", default=None, help="also write accumulated opacity as greyscale PNGs")
+    ap.add_argument("--save-depth-dir", default=None, help="also write rendered ray distance as <image>_splatdepth.npy")
     args = ap.parse_args()
     if args.pred_dir:
         res = {"tag": args.tag, "pred_dir": args.pred_dir, **score_images(args.pred_dir, args.dataset, args.gt_dir)}
     else:
         res = {"tag": args.tag, "checkpoint": args.checkpoint,
-               **score_dataset(args.checkpoint, args.dataset, args.save_dir, not args.no_metrics, args.save_opacity_dir)}
+               **score_dataset(args.checkpoint, args.dataset, args.save_dir, not args.no_metrics, args.save_opacity_dir,
+                                 args.save_depth_dir)}
     print("EVAL_VIEWS", json.dumps(res), flush=True)
     if args.json_out:
         os.makedirs(os.path.dirname(os.path.abspath(args.json_out)), exist_ok=True)
