@@ -11,6 +11,11 @@ For each object from find_objects.py (metric LiDAR points of blocks, boxes, ramp
      camera (< --max-incidence), and not occluded (its ray distance matches that frame's LiDAR depth
      target within tolerance; where the frame has no LiDAR target it counts as observed if it is in
      view and facing, so the real splat keeps authority whenever in doubt).
+     With --splat-depth-dir (the base splat's rendered depth per training frame, eval_views.py
+     --save-depth-dir) a point also counts as observed if it is in view and NOT behind the splat's own
+     surface there (either side, any normal): a gaussian placed there would show up in a training view.
+     The LiDAR surface and the splat's surface differ by centimetres; without this test added discs
+     cover / poke through surfaces the cameras did see (leave-arc-out test: -2.6 dB on seen pixels).
   4. Appearance for unseen samples, copied from observed ones, in order:
        mirror  — the point mirrored across the object's centre on the opposite, parallel face
        row     — the nearest observed sample at the same height on a face with the same orientation
@@ -94,6 +99,8 @@ def main():
     ap.add_argument("--frame-stride", type=int, default=1)
     ap.add_argument("--prune-margin-m", type=float, default=0.04)
     ap.add_argument("--support-m", type=float, default=0.03, help="surface samples need a LiDAR return this close")
+    ap.add_argument("--splat-depth-dir", default=None, help="base splat's rendered depth per training frame (<image>_splatdepth.npy)")
+    ap.add_argument("--splat-tol-rel", type=float, default=0.05, help="behind the splat surface by more than this = hidden")
     args = ap.parse_args()
     import torch
     from scipy.spatial import cKDTree
@@ -107,6 +114,11 @@ def main():
     cams = cams_of(args.dataset)[::args.frame_stride]
     depth = [torch.tensor(np.load(c[9]).astype(np.float32), device=dev) if os.path.exists(c[9]) else None for c in cams]
     cosmax = np.cos(np.deg2rad(args.max_incidence)); tol = args.depth_tol_m / s
+    sdep = [os.path.join(args.splat_depth_dir, os.path.splitext(c[0])[0] + "_splatdepth.npy") if args.splat_depth_dir else None
+            for c in cams]
+    if args.splat_depth_dir:
+        miss = sum(not os.path.exists(f) for f in sdep)
+        assert miss == 0, f"{miss} training frames have no rendered splat depth in {args.splat_depth_dir}"
     T = lambda a: torch.tensor(np.asarray(a), device=dev, dtype=torch.float64)
 
     def observed(Xd, Nd=None, through_out=None):
@@ -115,10 +127,16 @@ def main():
         X = T(Xd); seen = torch.zeros(len(X), dtype=torch.bool, device=dev)
         thru = torch.zeros(len(X), dtype=torch.bool, device=dev)
         Nn = T(Nd) if Nd is not None else None
-        for (name, W, H, fx, fy, cx, cy, Rcw, tcw, _), D in zip(cams, depth):
+        for (name, W, H, fx, fy, cx, cy, Rcw, tcw, _), D, SD in zip(cams, depth, sdep):
             Rc = T(Rcw); Pc = X @ Rc.T + T(tcw); z = Pc[:, 2]
             u = torch.floor(fx * Pc[:, 0] / z + cx).long(); v = torch.floor(fy * Pc[:, 1] / z + cy).long()
             ok = (z > 0.05) & (u >= 0) & (u < W) & (v >= 0) & (v < H)
+            if SD is not None:                                         # would show in this training view
+                ia = torch.nonzero(ok, as_tuple=True)[0]
+                if len(ia):
+                    ds_ = torch.tensor(np.load(SD).astype(np.float32), device=dev).double()[v[ia], u[ia]]
+                    r = torch.linalg.norm(Pc[ia], dim=1)
+                    seen[ia[(ds_ <= 0) | (r < ds_ * (1 + args.splat_tol_rel))]] = True
             if through_out is not None and D is not None:
                 ia = torch.nonzero(ok, as_tuple=True)[0]
                 if len(ia):
@@ -228,7 +246,7 @@ def main():
     base = os.path.splitext(args.out)[0]
     np.savez_compressed(base + "_unseen.npz", unseen=np.concatenate(unseen_all) if unseen_all else np.zeros((0, 6)))
     info = {"gaussians_in": N0, "removed_unobserved_in_objects": int(remove.sum()), "added": m, "objects": rep,
-            "params": {k_: v for k_, v in vars(args).items() if k_ in ("cell", "hcell", "max_incidence", "depth_tol_m", "prune_margin_m")}}
+            "params": {k_: v for k_, v in vars(args).items() if k_ in ("cell", "hcell", "max_incidence", "depth_tol_m", "prune_margin_m", "splat_depth_dir", "splat_tol_rel")}}
     json.dump(info, open(base + "_report.json", "w"), indent=2)
     print(f"[complete] {len(rep)} objects: removed {remove.sum():,} unobserved gaussians, added {m:,} surface gaussians "
           f"-> {args.out}", flush=True)
