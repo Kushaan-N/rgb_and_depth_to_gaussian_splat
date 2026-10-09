@@ -5,7 +5,8 @@
 #                          the full recording did observe (those frames = ground truth for the "backs")
 #  2. base splat           the standard recipe (LiDAR init + depth loss) on the remaining frames only
 #  3. completion           complete_objects.py on that base, observedness from the remaining frames only
-#                          (LiDAR depth + the base splat's rendered depth at every remaining frame)
+#                          (LiDAR depth + the base splat's rendered depth at every remaining frame), then
+#                          harm_filter.py drops added gaussians that change any remaining frame's render
 #  4. scoring              held-out frames: (a) all of them, (b) those showing completed surfaces, with
 #                          psnr_unobserved = pixels of completed surfaces; (c) the remaining (training)
 #                          frames, which completion must leave unchanged; base and completed splats
@@ -62,7 +63,12 @@ export CUDA_LAUNCH_BLOCKING=1
   --json-out "$H/train_base.json" --save-depth-dir "$H/splat_depth" | tail -1
 # shellcheck disable=SC2086
 "$GPY" scripts/complete_objects.py --objects "$H/objects" --checkpoint "$CK" --dataset "$A/train" \
-  --sim3-json "$P/sim3.json" --out "$R/completed.pt" --splat-depth-dir "$H/splat_depth" ${COMPLETE_ARGS:-}
+  --sim3-json "$P/sim3.json" --out "$R/completed_raw.pt" --splat-depth-dir "$H/splat_depth" ${COMPLETE_ARGS:-}
+mv "$R/completed_raw_unseen.npz" "$R/completed_unseen.npz"; mv "$R/completed_raw_report.json" "$R/completed_report.json"
+# measured, not predicted: drop added gaussians that change any training view
+ADDED="$("$CPUPY" -c "import json;print(json.load(open('$R/completed_report.json'))['added'])")"
+"$GPY" scripts/harm_filter.py --base "$CK" --edited "$R/completed_raw.pt" --added "$ADDED" --dataset "$A/train" \
+  --out "$R/completed.pt"
 "$GPY" scripts/object_back_masks.py --views "$A/heldout" --unseen "$R/completed_unseen.npz" --out "$R/heldout_backs"
 
 echo "== 4. scoring on held-out real frames (and the training frames, which must not change)"
