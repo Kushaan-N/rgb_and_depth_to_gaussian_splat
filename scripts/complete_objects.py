@@ -22,8 +22,8 @@ For each object from find_objects.py (metric LiDAR points of blocks, boxes, ramp
        nearest — the nearest observed sample of the same kind (wall/top)
      The copied value is the SH colour of the real gaussian nearest the source sample, so colour
      encoding and exposure match the splat exactly.
-  5. Splat edit: gaussians inside the object's volume that no training camera observed are removed
-     (junk in never-seen space); flat, opaque, matte gaussians are added on the unseen samples only.
+  5. Splat edit: flat, opaque, matte gaussians are added on the unseen samples only; with --prune,
+     gaussians inside the object's volume that no training camera observed are also removed.
      Observed surfaces keep their real gaussians.
 
 Writes a new checkpoint (render/export it like any other), <out>_report.json, and
@@ -97,6 +97,8 @@ def main():
     ap.add_argument("--max-incidence", type=float, default=85.0)   # tops are only ever seen at grazing angles
     ap.add_argument("--depth-tol-m", type=float, default=0.03)
     ap.add_argument("--frame-stride", type=int, default=1)
+    ap.add_argument("--prune", action="store_true", help="also remove unobserved real gaussians inside object volumes "
+                    "(off by default: it changed seen views in the leave-arc-out test)")
     ap.add_argument("--prune-margin-m", type=float, default=0.04)
     ap.add_argument("--support-m", type=float, default=0.03, help="surface samples need a LiDAR return this close")
     ap.add_argument("--splat-depth-dir", default=None, help="base splat's rendered depth per training frame (<image>_splatdepth.npy)")
@@ -213,7 +215,7 @@ def main():
         hG = Gm @ n + d
         inside = np.nonzero((hG > 0.01) & (hG < hi[2] + args.prune_margin_m) &
                             (np.linalg.norm(Gm - np.array(o["centre_m"]), axis=1) < 0.5 * np.hypot(*o["footprint_m"]) + args.prune_margin_m))[0]
-        if len(inside):
+        if args.prune and len(inside):
             gseen = observed(G[inside])
             remove[inside[~gseen]] = True
         rep.append({"id": o["id"], "samples": int(len(pos)), "dropped_unsupported": int((~sup).sum()), "dropped_free_space": int(free.sum()), "unseen": int(len(un)), "added": int(len(add)),
@@ -250,7 +252,7 @@ def main():
     base = os.path.splitext(args.out)[0]
     np.savez_compressed(base + "_unseen.npz", unseen=np.concatenate(unseen_all) if unseen_all else np.zeros((0, 6)))
     info = {"gaussians_in": N0, "removed_unobserved_in_objects": int(remove.sum()), "added": m, "objects": rep,
-            "params": {k_: v for k_, v in vars(args).items() if k_ in ("cell", "hcell", "max_incidence", "depth_tol_m", "prune_margin_m", "splat_depth_dir", "splat_tol_rel")}}
+            "params": {k_: v for k_, v in vars(args).items() if k_ in ("cell", "hcell", "max_incidence", "depth_tol_m", "prune", "prune_margin_m", "splat_depth_dir", "splat_tol_rel")}}
     json.dump(info, open(base + "_report.json", "w"), indent=2)
     print(f"[complete] {len(rep)} objects: removed {remove.sum():,} unobserved gaussians, added {m:,} surface gaussians "
           f"-> {args.out}", flush=True)
