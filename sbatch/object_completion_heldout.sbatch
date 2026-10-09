@@ -5,9 +5,11 @@
 #                          the full recording did observe (those frames = ground truth for the "backs")
 #  2. base splat           the standard recipe (LiDAR init + depth loss) on the remaining frames only
 #  3. completion           complete_objects.py on that base, observedness from the remaining frames only
+#                          (LiDAR depth + the base splat's rendered depth at every remaining frame)
 #  4. scoring              held-out frames: (a) all of them, (b) those showing completed surfaces, with
-#                          psnr_unobserved = pixels of completed surfaces; base and completed splats
-#  5. acceptance gate      accept_gate.py on both sets (never worse than the base on real images)
+#                          psnr_unobserved = pixels of completed surfaces; (c) the remaining (training)
+#                          frames, which completion must leave unchanged; base and completed splats
+#  5. acceptance gate      accept_gate.py on all three sets (never worse than the base on real images)
 # Note: the LiDAR cloud (object geometry) uses every scan; only CAMERA coverage is held out, which is the
 # real situation (the 360° LiDAR hits faces the forward camera never sees).
 # Env: ARC_FRAC (0.2), COMPLETE_ARGS (extra complete_objects.py flags), TAG (output subdir, default v1).
@@ -54,14 +56,18 @@ if [ -z "$CK" ]; then
 fi
 
 echo "== 3. completion (base: $CK)"
-# shellcheck disable=SC2086
-"$GPY" scripts/complete_objects.py --objects "$H/objects" --checkpoint "$CK" --dataset "$A/train" \
-  --sim3-json "$P/sim3.json" --out "$R/completed.pt" ${COMPLETE_ARGS:-}
-"$GPY" scripts/object_back_masks.py --views "$A/heldout" --unseen "$R/completed_unseen.npz" --out "$R/heldout_backs"
-
-echo "== 4. scoring on held-out real frames"
 # synchronous CUDA: edited checkpoints trigger an asynchronous illegal-memory-access in 3DGUT's tracer
 export CUDA_LAUNCH_BLOCKING=1
+[ -f "$H/train_base.json" ] || "$GPY" scripts/eval_views.py --checkpoint "$CK" --dataset "$A/train" --tag base \
+  --json-out "$H/train_base.json" --save-depth-dir "$H/splat_depth" | tail -1
+# shellcheck disable=SC2086
+"$GPY" scripts/complete_objects.py --objects "$H/objects" --checkpoint "$CK" --dataset "$A/train" \
+  --sim3-json "$P/sim3.json" --out "$R/completed.pt" --splat-depth-dir "$H/splat_depth" ${COMPLETE_ARGS:-}
+"$GPY" scripts/object_back_masks.py --views "$A/heldout" --unseen "$R/completed_unseen.npz" --out "$R/heldout_backs"
+
+echo "== 4. scoring on held-out real frames (and the training frames, which must not change)"
+cp "$H/train_base.json" "$REP/train_base.json"
+"$GPY" scripts/eval_views.py --checkpoint "$R/completed.pt" --dataset "$A/train" --tag completed --json-out "$REP/train_completed.json" | tail -1
 for m in base completed; do
   ck="$CK"; [ "$m" = completed ] && ck="$R/completed.pt"
   "$GPY" scripts/eval_views.py --checkpoint "$ck" --dataset "$A/heldout" --tag "$m" --json-out "$REP/all_$m.json" | tail -1
@@ -71,11 +77,12 @@ done
 
 echo "== 5. acceptance gate"
 "$CPUPY" scripts/accept_gate.py --pair heldout_all "$REP/all_base.json" "$REP/all_completed.json" \
-  --pair heldout_backs "$REP/backs_base.json" "$REP/backs_completed.json" --out "$REP/gate.json" || true
+  --pair heldout_backs "$REP/backs_base.json" "$REP/backs_completed.json" \
+  --pair train "$REP/train_base.json" "$REP/train_completed.json" --out "$REP/gate.json" || true
 "$CPUPY" - "$R" "$REP" "$A/arc.json" <<'PY'
 import json, os, sys, cv2, numpy as np
 R, rep, arc = sys.argv[1:4]
-r = {k: json.load(open(os.path.join(rep, k + ".json"))) for k in ("all_base", "all_completed", "backs_base", "backs_completed")}
+r = {k: json.load(open(os.path.join(rep, k + ".json"))) for k in ("all_base", "all_completed", "backs_base", "backs_completed", "train_base", "train_completed")}
 print(f"{'':16s}{'PSNR':>8s}{'SSIM':>8s}{'LPIPS':>8s}{'unseen PSNR':>13s}{'seen PSNR':>11s}")
 for k, v in r.items():
     print(f"{k:16s}{v['psnr']:8.2f}{v['ssim']:8.4f}{v['lpips']:8.4f}{v.get('psnr_unobserved') or float('nan'):13.2f}{v.get('psnr_observed') or float('nan'):11.2f}")
