@@ -68,28 +68,33 @@ export CUDA_LAUNCH_BLOCKING=1
 echo "== 4. scoring on held-out real frames (and the training frames, which must not change)"
 cp "$H/train_base.json" "$REP/train_base.json"
 "$GPY" scripts/eval_views.py --checkpoint "$R/completed.pt" --dataset "$A/train" --tag completed --json-out "$REP/train_completed.json" | tail -1
+BACKS=0; ls "$R"/heldout_backs/images/*_covis.png >/dev/null 2>&1 && BACKS=1
+[ "$BACKS" = 1 ] || echo "no held-out view shows completed surfaces: nothing to score them against (seen-region checks only)"
 for m in base completed; do
   ck="$CK"; [ "$m" = completed ] && ck="$R/completed.pt"
   "$GPY" scripts/eval_views.py --checkpoint "$ck" --dataset "$A/heldout" --tag "$m" --json-out "$REP/all_$m.json" | tail -1
-  "$GPY" scripts/eval_views.py --checkpoint "$ck" --dataset "$R/heldout_backs" --tag "$m" --json-out "$REP/backs_$m.json" \
-    --save-dir "$R/renders_$m" | tail -1
+  if [ "$BACKS" = 1 ]; then
+    "$GPY" scripts/eval_views.py --checkpoint "$ck" --dataset "$R/heldout_backs" --tag "$m" \
+      --json-out "$REP/backs_$m.json" --save-dir "$R/renders_$m" | tail -1
+  fi
 done
 
 echo "== 5. acceptance gate"
 "$CPUPY" scripts/accept_gate.py --pair heldout_all "$REP/all_base.json" "$REP/all_completed.json" \
-  --pair heldout_backs "$REP/backs_base.json" "$REP/backs_completed.json" \
+  $(if [ "$BACKS" = 1 ]; then echo --pair heldout_backs "$REP/backs_base.json" "$REP/backs_completed.json"; fi) \
   --pair train "$REP/train_base.json" "$REP/train_completed.json" --out "$REP/gate.json" || true
 "$CPUPY" - "$R" "$REP" "$A/arc.json" <<'PY'
 import json, os, sys, cv2, numpy as np
 R, rep, arc = sys.argv[1:4]
-r = {k: json.load(open(os.path.join(rep, k + ".json"))) for k in ("all_base", "all_completed", "backs_base", "backs_completed", "train_base", "train_completed")}
+r = {k: json.load(open(os.path.join(rep, k + ".json"))) for k in ("all_base", "all_completed", "backs_base", "backs_completed", "train_base", "train_completed")
+     if os.path.exists(os.path.join(rep, k + ".json"))}
 print(f"{'':16s}{'PSNR':>8s}{'SSIM':>8s}{'LPIPS':>8s}{'unseen PSNR':>13s}{'seen PSNR':>11s}")
 for k, v in r.items():
     print(f"{k:16s}{v['psnr']:8.2f}{v['ssim']:8.4f}{v['lpips']:8.4f}{v.get('psnr_unobserved') or float('nan'):13.2f}{v.get('psnr_observed') or float('nan'):11.2f}")
 json.dump({"scores": r, "arc": json.load(open(arc)), "gate": json.load(open(os.path.join(rep, "gate.json"))),
            "completion": json.load(open(os.path.join(R, "completed_report.json")))}, open(os.path.join(rep, "summary.json"), "w"), indent=2)
 d = os.path.join(R, "heldout_backs", "images")
-cand = sorted(((np.mean(cv2.imread(os.path.join(d, f), 0) == 128), f[:-10]) for f in os.listdir(d) if f.endswith("_covis.png")), reverse=True)
+cand = [] if not os.path.isdir(d) else sorted(((np.mean(cv2.imread(os.path.join(d, f), 0) == 128), f[:-10]) for f in os.listdir(d) if f.endswith("_covis.png")), reverse=True)
 rows = []
 for frac, stem in cand[:6]:
     real = cv2.imread(os.path.join(d, stem + ".png")); m = cv2.imread(os.path.join(d, stem + "_covis.png"), 0) == 128
