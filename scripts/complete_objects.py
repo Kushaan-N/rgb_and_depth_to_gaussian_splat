@@ -16,18 +16,23 @@ For each object from find_objects.py (metric LiDAR points of blocks, boxes, ramp
      behind the splat's own surface there: a gaussian placed there would show up in a training view.
      The LiDAR surface and the splat's surface differ by centimetres; without this test added discs
      cover / poke through surfaces the cameras did see (leave-arc-out test: -2.6 dB on seen pixels).
-  4. Appearance for unseen samples, copied from observed ones, in order:
-       mirror  — the point mirrored across the object's centre on the opposite, parallel face
-       row     — the nearest observed sample at the same height on a face with the same orientation
-       nearest — the nearest observed sample of the same kind (wall/top)
-     The copied value is the SH colour of the real gaussian nearest the source sample, so colour
-     encoding and exposure match the splat exactly.
+  4. Appearance for unseen samples (--color-source):
+       textures (default) — face_textures.py: per-face textures rectified from the REAL training images
+                 (median over frames, occlusion-tested with LiDAR / splat depth), unseen pixels filled by
+                 mirror / lattice tiling / exemplar synthesis; converted to SH DC as 3DGRUT decodes it.
+                 Samples it cannot colour fall back to `nearest`.
+       nearest — copied from observed samples (mirror across the object's centre on the opposite face,
+                 else same height on a same-orientation face, else nearest of the same kind) as the SH
+                 colour of the real gaussian nearest the source sample (speckled: single gaussians).
   5. Splat edit: flat, opaque, matte gaussians are added on the unseen samples only; with --prune,
      gaussians inside the object's volume that no training camera observed are also removed.
      Observed surfaces keep their real gaussians.
 
-Writes a new checkpoint (render/export it like any other), <out>_report.json, and
-<out>_unseen.npz (unseen sample positions + normals, dataset frame) for cross-recording evaluation.
+Writes a new checkpoint (render/export it like any other; the added gaussians are its LAST `added` rows),
+<out>_report.json, <out>_unseen.npz (unseen sample positions + normals, dataset frame) for cross-recording
+evaluation, <out>_samples.npz (every surface sample: object, position, normal, kind, face, local metric
+coords, seen, added — input of face_textures.py) and with textures <out>_textures/ (per-object face
+texture montages: observed | filled | fill source).
 
     python scripts/complete_objects.py --objects objects --checkpoint ckpt.pt --dataset <all frames with *_depth.npy> \
         --sim3-json <pipeline>/sim3.json --out completed.pt
@@ -103,6 +108,9 @@ def main():
     ap.add_argument("--support-m", type=float, default=0.03, help="surface samples need a LiDAR return this close")
     ap.add_argument("--splat-depth-dir", default=None, help="base splat's rendered depth per training frame (<image>_splatdepth.npy)")
     ap.add_argument("--splat-tol-rel", type=float, default=0.05, help="behind the splat surface by more than this = hidden")
+    ap.add_argument("--color-source", choices=("textures", "nearest"), default="textures")
+    ap.add_argument("--tex-max-incidence", type=float, default=70.0)
+    ap.add_argument("--tex-min-views", type=int, default=2)
     args = ap.parse_args()
     import torch
     from scipy.spatial import cKDTree
@@ -166,6 +174,7 @@ def main():
     opac = torch.sigmoid(ck["density"].detach()).numpy().ravel()
     gtree = cKDTree(G); alb = ck["features_albedo"].detach().numpy()
     remove = np.zeros(N0, bool); new_pos, new_nor, new_alb, rep, unseen_all = [], [], [], [], []
+    SS = {k_: [] for k_ in ("obj", "posd", "nord", "kind", "face", "local", "seen", "added")}
     for o in meta["objects"]:
         P = pts[f"obj{o['id']}"]
         pos, nor, kind, face, local, centre = object_surface(P, n, d, args.hcell, args.cell)
@@ -209,6 +218,10 @@ def main():
         add = un[fill[un] >= 0]
         new_pos.append(posd[add]); new_nor.append(nord[add]); new_alb.append(alb[src[fill[add]]])
         unseen_all.append(np.c_[posd[un], nord[un]])
+        isadd = np.zeros(len(pos), bool); isadd[add] = True
+        for k_, v_ in (("obj", np.full(len(pos), o["id"])), ("posd", posd), ("nord", nord), ("kind", kind), ("face", face),
+                       ("local", local), ("seen", seen), ("added", isadd)):
+            SS[k_].append(v_)
         # junk in never-seen space inside the object's volume: unobserved real gaussians there
         hi = local.max(0)
         Gm = G @ (s * R).T + t                                             # gaussians in metres
@@ -225,6 +238,17 @@ def main():
               f"filled mirror {rep[-1]['fill']['mirror']} / row {rep[-1]['fill']['row']} / nearest {rep[-1]['fill']['nearest']}", flush=True)
     NP = np.concatenate(new_pos) if new_pos else np.zeros((0, 3)); NN = np.concatenate(new_nor) if new_nor else np.zeros((0, 3))
     NA = np.concatenate(new_alb) if new_alb else np.zeros((0, alb.shape[1]))
+    SS = {k_: np.concatenate(v_) for k_, v_ in SS.items()} if rep else None
+    base = os.path.splitext(args.out)[0]; tex_stats = None
+    if args.color_source == "textures" and SS is not None and SS["added"].any():
+        from face_textures import HOW, gather_colours, rgb2sh, texture_colours
+        rgb_obs, _ = gather_colours(SS["posd"], SS["nord"], args.dataset, args.splat_depth_dir, s,
+                                    args.tex_max_incidence, min_views=args.tex_min_views)
+        rgb, how = texture_colours(SS, rgb_obs, SS["added"], args.cell, base + "_textures")
+        ra, ha = rgb[SS["added"]], how[SS["added"]]; ok = ~np.isnan(ra[:, 0])     # added samples, in add order
+        NA = NA.copy(); NA[ok] = rgb2sh(ra[ok]).astype(NA.dtype)
+        tex_stats = {HOW[c_]: int((ha == c_).sum()) for c_ in HOW}; tex_stats["fallback_nearest_gaussian"] = int((~ok).sum())
+        print("[complete] textures: " + ", ".join(f"{k_} {v_:,}" for k_, v_ in tex_stats.items()), flush=True)
     # new flat gaussians: tangent frame from the normal, in-plane sigma ~0.6 cell, 1 mm thick, opaque, matte
     tan = np.cross(NN, np.array([0.0, 0.0, 1.0])); bad = np.linalg.norm(tan, axis=1) < 1e-3
     tan[bad] = np.cross(NN[bad], np.array([1.0, 0.0, 0.0])); tan /= np.linalg.norm(tan, axis=1, keepdims=True)
@@ -249,10 +273,13 @@ def main():
     ck.pop("optimizer", None)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     torch.save(ck, args.out)
-    base = os.path.splitext(args.out)[0]
     np.savez_compressed(base + "_unseen.npz", unseen=np.concatenate(unseen_all) if unseen_all else np.zeros((0, 6)))
+    if SS is not None:
+        np.savez_compressed(base + "_samples.npz", cell=args.cell, scale=s, **SS)
     info = {"gaussians_in": N0, "removed_unobserved_in_objects": int(remove.sum()), "added": m, "objects": rep,
-            "params": {k_: v for k_, v in vars(args).items() if k_ in ("cell", "hcell", "max_incidence", "depth_tol_m", "prune", "prune_margin_m", "splat_depth_dir", "splat_tol_rel")}}
+            "color_source": args.color_source, "texture_fill": tex_stats,
+            "params": {k_: v for k_, v in vars(args).items() if k_ in ("cell", "hcell", "max_incidence", "depth_tol_m", "prune", "prune_margin_m",
+                                                                         "splat_depth_dir", "splat_tol_rel", "color_source", "tex_max_incidence", "tex_min_views")}}
     json.dump(info, open(base + "_report.json", "w"), indent=2)
     print(f"[complete] {len(rep)} objects: removed {remove.sum():,} unobserved gaussians, added {m:,} surface gaussians "
           f"-> {args.out}", flush=True)
