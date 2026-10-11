@@ -1,0 +1,678 @@
+diff --git a/configs/apps/colmap_3dgut_improved.yaml b/configs/apps/colmap_3dgut_improved.yaml
+new file mode 100644
+index 0000000..8483f25
+--- /dev/null
++++ b/configs/apps/colmap_3dgut_improved.yaml
+@@ -0,0 +1,21 @@
++# @package _global_
++
++# 3DGUT on COLMAP data with Improved-GS densification (configs/strategy/improved.yaml)
++defaults:
++  - /base_gs
++  - /dataset: colmap
++  - /initialization: colmap
++  - /render: 3dgut
++  - override /strategy: improved
++  - _self_
++
++val_frequency: 999999 # never validate
++
++# Improved-GS's position learning rate (4x lower than 3DGS; the reference uses it only for this method)
++optimizer:
++  params:
++    positions:
++      lr: 0.00004
++scheduler:
++  positions:
++    lr_final: 0.000002
+diff --git a/configs/strategy/improved.yaml b/configs/strategy/improved.yaml
+new file mode 100644
+index 0000000..065d74a
+--- /dev/null
++++ b/configs/strategy/improved.yaml
+@@ -0,0 +1,54 @@
++# Improved-GS densification (threedgrut/strategy/improved.py; ImprovedGS Non-Commercial Research License).
++# Defaults are the reference implementation's (arguments/__init__.py); only `budget` is scene-dependent.
++method: ImprovedGSStrategy
++
++print_stats: true
++
++budget: 1000000 # Gaussian budget (reference: 1M indoor .. 3M large outdoor Mip-NeRF360 scenes)
++budget_warmup_until_offset: 500 # budget grows as sqrt(progress) until densify.end_iteration - this
++split_distance: 0.45 # long-axis split: children at +-3*split_distance*s_max
++opacity_reduction: 0.6 # children opacity = parent * this
++las: true # long-axis split (false: 3DGS split of gradient-qualified Gaussians)
++
++densify:
++  frequency: 100
++  start_iteration: 500
++  end_iteration: 15000
++  grad_threshold: 0.0003 # on the accumulated per-pixel absolute position gradient (AbsGS-style)
++  # used only by the las=false fallback (GSStrategy.split_gaussians) / GSStrategy.__init__
++  clone_grad_threshold: 0.0002
++  split_grad_threshold: 0.0002
++  relative_size_threshold: 0.01
++  split:
++    n_gaussians: 2
++
++prune:
++  density_threshold: 0.005 # opacity prune after each densification step
++
++eas: # edge-aware densification score
++  enabled: true
++  sample_cams: 10 # training views per densification step (rotating pool); -1 = all
++  full_pass_frequency: 3000 # ... all views when step % frequency == offset and step < until
++  full_pass_offset: 400
++  full_pass_until: 9000
++
++rap: # recovery-aware pruning
++  enabled: true
++  reset_frequency: 3000
++  reset_max_density: 0.05
++  prune_ratio: 0.2 # lowest-opacity share pruned prune_offset iterations after a reset
++  prune_offset: 300
++  rounds: 2
++  early_prune_iteration: 300
++  early_prune_threshold: 0.02
++
++mu: # late multi-step updates (optimizer step every `interval` iterations, gradients accumulate)
++  enabled: true
++  start_iteration: 20000
++  interval: 5
++  second_start_iteration: 24000
++  second_interval: 20
++
++# GSStrategy fields (unused by this strategy)
++reset_density:
++  new_max_density: 0.05
+diff --git a/threedgrut/strategy/LICENSE_ImprovedGS.md b/threedgrut/strategy/LICENSE_ImprovedGS.md
+new file mode 100644
+index 0000000..63935e9
+--- /dev/null
++++ b/threedgrut/strategy/LICENSE_ImprovedGS.md
+@@ -0,0 +1,117 @@
++ImprovedGS Non-Commercial Research License
++==========================================
++
++Copyright (c) 2026 ImprovedGS authors and Zhejiang University.
++
++ImprovedGS authors: Xiaobin Deng, Changyu Diao, Min Li, Ruohan Yu,
++Duanqing Xu.
++
++This license applies to the original ImprovedGS code, documentation, examples,
++configuration files, and other contributions made by the ImprovedGS authors and
++Zhejiang University in this repository (the "ImprovedGS Contributions").
++
++This license does not transfer or relicense third-party code, libraries,
++submodules, pretrained models, datasets, papers, trademarks, or other materials
++that are included in, adapted by, or used together with this repository. Such
++materials remain copyrighted by their respective authors or institutions and
++remain subject to their own licenses and notices.
++
++
++1. Permission
++-------------
++
++Subject to the terms below, permission is granted to use, copy, modify, create
++derivative works from, and distribute the ImprovedGS Contributions for
++non-commercial research, education, and evaluation purposes only.
++
++Academic and industrial research users may use the ImprovedGS Contributions free
++of charge for non-commercial research and evaluation.
++
++
++2. Non-Commercial Restriction
++-----------------------------
++
++Commercial use is not permitted without prior written permission from the
++ImprovedGS authors or Zhejiang University.
++
++Commercial use includes, but is not limited to, using the ImprovedGS
++Contributions or derivative works in commercial products or services, paid
++consulting, revenue-generating systems, commercial model or dataset production,
++commercial benchmarking, or other activities primarily intended for commercial
++advantage or monetary compensation.
++
++
++3. Redistribution
++-----------------
++
++Redistribution of the ImprovedGS Contributions, with or without modification, is
++permitted only if all of the following conditions are met:
++
++- This license is included with the distribution.
++- Copyright, license, and attribution notices are retained.
++- Modified files or derivative works are clearly identified as modified.
++- Third-party license files and attribution notices are retained where present.
++- The redistributed work remains limited to non-commercial research, education,
++  and evaluation use.
++
++
++4. Third-Party Code and Licenses
++--------------------------------
++
++This repository uses, includes, adapts, or refers to code and ideas from
++third-party projects. The copyright of those parts belongs to their respective
++authors or institutions.
++
++The `submodules/diff-gaussian-rasterization` package is distributed as part of
++the ImprovedGS Contributions in this repository and is covered by this license,
++unless an individual file states otherwise.
++
++The following two sub-packages are used directly from third-party projects and
++retain their own licenses:
++
++- `submodules/simple-knn`, from 3D Gaussian Splatting / gaussian-splatting,
++  copyright Inria and the Max Planck Institut for Informatik (MPII), under the
++  Gaussian-Splatting License included in that submodule directory.
++- `submodules/fused-ssim`, copyright Rahul Goel, under the MIT License included
++  in that submodule directory.
++
++Other known third-party components include:
++
++- Portions of `utils/loss_utils.py` based on `pytorch-ssim`, copyright Evan Su,
++  under the MIT License.
++- LPIPS-related code and weights are based on the original LPIPS /
++  PerceptualSimilarity project and remain subject to the original authors'
++  licenses and notices.
++- Other referenced projects, such as Taming 3DGS, Mini-Splatting, 3DGS-MCMC,
++  AbsGS, and Speedy-Splat, retain their own copyrights and licenses.
++
++If a third-party license imposes additional or different obligations, those
++obligations apply to the corresponding third-party component. Nothing in this
++license grants rights that the ImprovedGS authors or Zhejiang University do not
++own or have the right to grant.
++
++
++5. Citation
++-----------
++
++If you use ImprovedGS in a publication or research project, please cite the
++corresponding ImprovedGS paper and acknowledge the relevant third-party projects
++where applicable.
++
++
++6. No Warranty
++--------------
++
++THE IMPROVEDGS CONTRIBUTIONS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, OR
++CORRECTNESS. THE AUTHORS AND ZHEJIANG UNIVERSITY SHALL NOT BE LIABLE FOR ANY
++CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM, OUT OF, OR IN CONNECTION WITH
++THE IMPROVEDGS CONTRIBUTIONS OR THEIR USE.
++
++
++7. Contact
++----------
++
++For commercial licensing or other permissions, please contact the ImprovedGS
++authors.
+diff --git a/threedgrut/strategy/base.py b/threedgrut/strategy/base.py
+index efe0d8b..17e09dc 100644
+--- a/threedgrut/strategy/base.py
++++ b/threedgrut/strategy/base.py
+@@ -65,6 +65,10 @@ class BaseStrategy:
+     def _post_optimizer_step(self, step: int, scene_extent: float, train_dataset, batch=None, writer=None) -> bool:
+         return False
+ 
++    def should_step_optimizer(self, step: int) -> bool:
++        """Whether the trainer steps the Gaussian optimizer at this iteration (else gradients accumulate)."""
++        return True
++
+     def update_gradient_buffer(self, sensor_position: torch.Tensor) -> None:
+         """Callback function to update the gradient buffer."""
+         pass
+diff --git a/threedgrut/strategy/improved.py b/threedgrut/strategy/improved.py
+new file mode 100644
+index 0000000..3384565
+--- /dev/null
++++ b/threedgrut/strategy/improved.py
+@@ -0,0 +1,310 @@
++# Port of the ImprovedGS densification strategy to 3DGRUT (modified from the original):
++#
++#   Improving Densification in 3D Gaussian Splatting for High-Fidelity Rendering (CVPR 2026 Findings)
++#   Xiaobin Deng, Changyu Diao, Min Li, Ruohan Yu, Duanqing Xu -- https://github.com/XiaoBin2001/Improved-GS
++#   Copyright (c) 2026 ImprovedGS authors and Zhejiang University.
++#   ImprovedGS Non-Commercial Research License: non-commercial research, education and evaluation use only.
++#
++# Reference files ported: scene/methods/densification_stage.py, densification_methods.py, pruning_methods.py,
++# scene/gaussian_model_densification.py (densify_and_prune_improved, long_axis_split, only_prune, reset_opacity),
++# scene/training_loop.py (should_run_parameter_update). Components and their switches (strategy.*):
++#   EAS  eas.enabled  edge-aware score: sampled training views are rendered with a Laplacian edge map of the
++#                     real image as pixel weight; per-Gaussian sum of w_pixel * T * alpha, min-max normalised per
++#                     view and averaged, decides WHICH gradient-qualified Gaussians are split
++#   LAS  las          long-axis split: two children offset +-3*0.45*s_max along the longest axis, long axis scaled
++#                     by 0.55 and the others by sqrt(1 - 0.45^2), opacity * 0.6 (no clone; every size splits)
++#   RAP  rap.enabled  recovery-aware pruning: opacity reset to <= 0.05 every 3000 it, then 300 it later the
++#                     lowest-opacity 20% are pruned (first 2 resets); plus an opacity < 0.02 prune at it 300
++#   budget            growth control: splits per step are capped by budget * sqrt(progress) (progress from
++#                     densify start to end - 500); only gradient-qualified Gaussians are candidates
++#   MU   mu.enabled   late multi-step updates: from 20k the optimizer steps every 5th it, from 24k every 20th
++#                     (gradients accumulate in between)
++# Differences forced by 3DGUT (no screen-space means): the candidate gradient is the per-pixel norm of dL/dpos
++# summed over pixels (accumulated in the 3DGUT backward kernel, threedgut_tracer.tracer.last_abs_position_grad)
++# times camera distance / 2 -- the same 3D->view conversion 3DGRUT's GSStrategy uses -- instead of
++# AbsGS's |dL/dx|,|dL/dy| in NDC; the per-Gaussian edge weight is obtained exactly by differentiating an
++# edge-weighted render of constant radiance w.r.t. the DC colour (d C_p / d c_i = T_i alpha_i).
++# Falls back to 3DGRUT's signed gradient norm when the renderer provides no absolute gradient (3DGRT).
++
++import math
++from typing import Optional
++
++import torch
++import torch.nn.functional as F
++
++from threedgrut.model.features import Features
++from threedgrut.model.model import MixtureOfGaussians
++from threedgrut.strategy.gs import GSStrategy
++from threedgrut.utils.logger import logger
++from threedgrut.utils.misc import quaternion_to_so3
++
++SH_C0 = 0.28209479177387814
++_FIND_EDGES_KERNEL = torch.tensor([[[-1.0, -1.0, -1.0], [-1.0, 8.0, -1.0], [-1.0, -1.0, -1.0]]]).unsqueeze(0)
++
++
++def normalize_to_unit_range(x: torch.Tensor) -> torch.Tensor:
++    x = torch.nan_to_num(x.detach().float(), nan=0.0, posinf=0.0, neginf=0.0)
++    if x.numel() == 0:
++        return x
++    lo, hi = x.amin(), x.amax()
++    return torch.zeros_like(x) if float(hi - lo) <= 0.0 else (x - lo) / (hi - lo)
++
++
++def compute_edge_map(rgb: torch.Tensor) -> torch.Tensor:
++    """[H, W, 3] in [0, 1] -> [H, W] edge weights in [0, 1] (8-bit grey, Laplacian 'find edges', min-max)."""
++    rgb = torch.round(rgb.detach().float().permute(2, 0, 1).unsqueeze(0)[:, :3] * 255.0)
++    grey = torch.round((299.0 * rgb[:, 0:1] + 587.0 * rgb[:, 1:2] + 114.0 * rgb[:, 2:3]) / 1000.0)
++    edge = F.conv2d(grey, _FIND_EDGES_KERNEL.to(grey.device), padding=1)
++    return normalize_to_unit_range(torch.clamp(edge, 0.0, 255.0) / 255.0)[0, 0]
++
++
++class _ConstantRadianceView:
++    """The model's geometry (detached) with caller-provided SH features, for the renderer's `gaussians` arg."""
++
++    def __init__(self, model: MixtureOfGaussians, features: torch.Tensor):
++        self._m, self._f = model, features
++        self.positions = model.positions.detach()
++        self.n_active_features = model.n_active_features
++        self.num_gaussians = model.num_gaussians
++        self.ray_feature_dim = model.ray_feature_dim
++
++    def get_rotation(self):
++        return self._m.get_rotation().detach()
++
++    def get_scale(self):
++        return self._m.get_scale().detach()
++
++    def get_density(self):
++        return self._m.get_density().detach()
++
++    def get_features(self):
++        return self._f
++
++
++class ImprovedGSStrategy(GSStrategy):
++    def __init__(self, config, model: MixtureOfGaussians) -> None:
++        super().__init__(config=config, model=model)
++        s = self.conf.strategy
++        self.grad_threshold = s.densify.grad_threshold
++        self.new_max_density = s.rap.reset_max_density  # used by GSStrategy.reset_density
++        self.rap_triggers: set[int] = set()
++        self.rap_reset_count = 0
++        self.edge_pool: list[int] = []
++        self.use_abs_grad: Optional[bool] = None
++        self.eas_checked = False
++        try:
++            from threedgut_tracer.tracer import last_abs_position_grad
++
++            self._abs_grad_fn = last_abs_position_grad
++        except ImportError:
++            self._abs_grad_fn = None
++
++    # ---------------------------------------------------------------- statistics (ImprovedGS: abs gradients)
++    def _in_densify_window(self, step: int) -> bool:
++        return self.conf.strategy.densify.start_iteration < step < self.conf.strategy.densify.end_iteration
++
++    def _post_backward(self, step: int, scene_extent: float, train_dataset, batch=None, writer=None) -> bool:
++        if self._in_densify_window(step):
++            with torch.cuda.nvtx.range(f"train_{step}_grad_buffer"):
++                self.update_gradient_buffer(sensor_position=batch.T_to_world[0, :3, 3])
++        if self.conf.model.density_activation == "none":
++            self.model.clamp_density()
++        return False
++
++    @torch.no_grad()
++    def update_gradient_buffer(self, sensor_position: torch.Tensor) -> None:
++        params_grad = self.model.positions.grad
++        assert params_grad is not None
++        mask = (params_grad != 0).max(dim=1)[0]
++        dist = (self.model.positions[mask] - sensor_position).norm(dim=1, keepdim=True)
++        abs_grad = self._abs_grad_fn() if self._abs_grad_fn is not None else None
++        if self.use_abs_grad is None:  # decided once: does this renderer accumulate |dL/dpos| per pixel?
++            self.use_abs_grad = bool(abs_grad is not None and abs_grad.shape[0] == params_grad.shape[0]
++                                     and float(abs_grad.abs().sum()) > 0)
++            logger.info(f"[ImprovedGS] candidate gradient: {'per-pixel absolute' if self.use_abs_grad else 'signed (fallback)'}")
++        if self.use_abs_grad:
++            g = abs_grad[mask] * dist / 2
++        else:
++            g = torch.norm(params_grad[mask] * dist, dim=-1, keepdim=True) / 2
++        self.densify_grad_norm_accum[mask] += g
++        self.densify_grad_norm_denom[mask] += 1
++
++    # ---------------------------------------------------------------- schedule
++    def should_step_optimizer(self, step: int) -> bool:
++        mu = self.conf.strategy.mu
++        if self._suspended or not mu.enabled or step < mu.start_iteration:
++            return True
++        if step < mu.second_start_iteration:
++            return step % max(int(mu.interval), 1) == 0
++        return step % max(int(mu.second_interval), 1) == 0
++
++    def _post_optimizer_step(self, step: int, scene_extent: float, train_dataset, batch=None, writer=None) -> bool:
++        s = self.conf.strategy
++        updated = False
++        if s.densify.frequency > 0 and self._in_densify_window(step) and step % s.densify.frequency == 0:
++            scores = self.edge_scores(step, train_dataset) if s.eas.enabled else None
++            self.densify_and_prune_improved(scores, step, scene_extent)
++            updated = True
++        # pruning stage (after densification, as in ImprovedGS's loop)
++        if s.rap.enabled:
++            if step == s.rap.early_prune_iteration:
++                self.prune_below(self.model.get_density().squeeze(-1) >= s.rap.early_prune_threshold, "early")
++                updated = True
++            if step in self.rap_triggers:
++                dens = self.model.get_density().detach().flatten()
++                thr = torch.quantile(dens, float(s.rap.prune_ratio)) if dens.numel() < 2**24 else \
++                    dens.kthvalue(max(int(dens.numel() * float(s.rap.prune_ratio)), 1)).values
++                self.prune_below(dens >= thr, "RAP")
++                self.rap_triggers.discard(step)
++                updated = True
++            if self._in_densify_window(step) and step % s.rap.reset_frequency == 0:
++                self.reset_density()
++                if s.rap.prune_ratio > 0 and self.rap_reset_count < s.rap.rounds:
++                    self.rap_triggers.add(step + int(s.rap.prune_offset))
++                self.rap_reset_count += 1
++                if s.print_stats:
++                    logger.info(f"[ImprovedGS] opacity reset to <= {self.new_max_density} at {step}")
++        return updated
++
++    def current_budget(self, step: int) -> int:
++        s = self.conf.strategy
++        budget = int(s.budget)
++        start, end = int(s.densify.start_iteration), int(s.densify.end_iteration) - int(s.budget_warmup_until_offset)
++        if end <= start:
++            return budget
++        progress = min(max((step - start) / float(end - start), 0.0), 1.0)
++        return budget if progress >= 1.0 else max(int(progress**0.5 * budget), 1)
++
++    # ---------------------------------------------------------------- EAS
++    def _accum_edge_weights(self, gpu_batch, edge: torch.Tensor):
++        """Per-Gaussian sum_p edge_p * T_i(p) * alpha_i(p) and the visibility mask for one view."""
++        m = self.model
++        feats = torch.zeros_like(m.get_features()).requires_grad_(True)  # radiance = max(0 + 0.5, 0) everywhere
++        with torch.enable_grad():
++            out = m.renderer.render(_ConstantRadianceView(m, feats), gpu_batch, train=True)
++            (out["pred_features"][0, ..., 0] * edge).sum().backward()
++        w = feats.grad[:, 0].detach() / SH_C0
++        vis = out["mog_visibility"].reshape(-1) > 0
++        if not self.eas_checked:  # sanity check once: sum_i w_i must equal the edge-weighted rendered opacity
++            ref = float((out["pred_opacity"][0, ..., 0].detach() * edge).sum())
++            logger.info(f"[ImprovedGS] EAS check: sum of per-Gaussian weights {float(w.sum()):.1f} vs "
++                        f"edge-weighted opacity {ref:.1f}")
++            self.eas_checked = True
++        return w, vis
++
++    def _sample_views(self, step: int, n_views: int) -> list[int]:
++        s = self.conf.strategy.eas
++        k = int(s.sample_cams)
++        if k == -1 or k >= n_views or (step % s.full_pass_frequency == s.full_pass_offset and step < s.full_pass_until):
++            return list(range(n_views))
++        out = []
++        for _ in range(k):  # rotating pool: every view is used once before any repeats
++            if not self.edge_pool:
++                self.edge_pool = list(range(n_views))
++            out.append(self.edge_pool.pop())
++        return out
++
++    def edge_scores(self, step: int, train_dataset) -> Optional[torch.Tensor]:
++        if self.model.feature_type != Features.Type.SH:
++            return None
++        ids = self._sample_views(step, len(train_dataset))
++        imp = torch.zeros(self.model.num_gaussians, device=self.model.device)
++        seen = torch.zeros_like(imp, dtype=torch.bool)
++        for i in ids:
++            gpu_batch = train_dataset.get_gpu_batch_with_intrinsics(torch.utils.data.default_collate([train_dataset[i]]))
++            w, vis = self._accum_edge_weights(gpu_batch, compute_edge_map(gpu_batch.rgb_gt[0]))
++            imp[vis] += normalize_to_unit_range(w)[vis] / max(len(ids), 1)
++            seen |= vis
++        return imp if bool(seen.any()) else None
++
++    # ---------------------------------------------------------------- densify / prune
++    def densify_and_prune_improved(self, scores: Optional[torch.Tensor], step: int, scene_extent: float) -> None:
++        s = self.conf.strategy
++        grads = self.densify_grad_norm_accum / self.densify_grad_norm_denom
++        grads[grads.isnan()] = 0.0
++        grads = grads.squeeze(-1)
++        budget = self.current_budget(step)
++        min_grad = float(self.grad_threshold)
++        late = max(int(s.densify.end_iteration) - 100, int(s.densify.start_iteration))
++        if scores is None or step > late:
++            scores = grads
++            if self.model.num_gaussians < budget and step > late:
++                min_grad = min_grad / 1.5
++        qualifiers = grads >= min_grad
++        n_cand, n_cur = int(qualifiers.sum()), self.model.num_gaussians
++        split_budget = min(budget, n_cand + n_cur) - n_cur
++        n_split = 0
++        if split_budget > 0:
++            if s.las:
++                n_split = self.long_axis_split(scores, split_budget, qualifiers)
++            else:
++                self.split_gaussians(torch.where(qualifiers, grads, torch.zeros_like(grads)), scene_extent)
++        if s.print_stats:
++            logger.info(f"[ImprovedGS] it {step}: budget {budget}, {n_cand} candidates, split {n_split} -> "
++                        f"{self.model.num_gaussians}")
++        if step < late:
++            self.prune_below(self.model.get_density().squeeze(-1) >= self.prune_density_threshold, "density")
++        torch.cuda.empty_cache()
++
++    @torch.no_grad()
++    def long_axis_split(self, scores: torch.Tensor, budget: int, filter_mask: torch.Tensor) -> int:
++        s = self.conf.strategy
++        n = self.model.num_gaussians
++        imp = torch.zeros(n, dtype=torch.float32, device=self.model.device)
++        imp[: scores.shape[0]] = scores.detach().float().clamp_min(0)
++        imp[~filter_mask] = 0
++        n_pos = int((imp > 0).sum())
++        if budget <= 0 or n_pos == 0:
++            return 0
++        budget = min(int(budget), n_pos)
++        mask = torch.zeros(n, dtype=torch.bool, device=imp.device)
++        mask[torch.multinomial(imp, budget, replacement=False)] = True
++
++        d = float(s.split_distance)
++        stds = self.model.get_scale()[mask]
++        max_v, max_i = torch.max(stds, dim=1, keepdim=True)
++        axis = torch.zeros_like(stds, dtype=torch.bool).scatter(1, max_i, True)
++        offsets = stds * axis * 3.0 * d
++        offsets = torch.cat([offsets, -offsets], dim=0)
++        rots = quaternion_to_so3(self.model.rotation[mask]).repeat(2, 1, 1)
++        new_pos = torch.bmm(rots, offsets.unsqueeze(-1)).squeeze(-1) + self.model.positions[mask].repeat(2, 1)
++        rate_w, rate_h = max(1.0 - d, 1e-6), math.sqrt(max(1.0 - d * d, 1e-6))
++        new_scale = self.model.scale_activation_inv(stds.scatter(1, max_i, max_v * rate_w / rate_h).repeat(2, 1) * rate_h)
++        new_density = self.model.density_activation_inv(
++            self.model.get_density()[mask] * float(s.opacity_reduction)).repeat(2, 1)
++        k = int(mask.sum())
++
++        def update_param_fn(name: str, param: torch.Tensor) -> torch.Tensor:
++            if name == "positions":
++                child = new_pos
++            elif name == "scale":
++                child = new_scale
++            elif name == "density":
++                child = new_density
++            else:
++                child = param[mask].repeat([2] + [1] * (param.dim() - 1))
++            return torch.nn.Parameter(torch.cat([param[~mask], child.to(param.dtype)]), requires_grad=param.requires_grad)
++
++        def update_optimizer_fn(key: str, v: torch.Tensor) -> torch.Tensor:
++            return torch.cat([v[~mask], torch.zeros((2 * k, *v.shape[1:]), device=v.device, dtype=v.dtype)])
++
++        self._update_param_with_optimizer(update_param_fn, update_optimizer_fn)
++        self.reset_densification_buffers()  # ImprovedGS resets its accumulators whenever Gaussians are added
++        return k
++
++    @torch.no_grad()
++    def prune_below(self, keep: torch.Tensor, label: str) -> None:
++        if bool(keep.all()):
++            return
++        if self.conf.strategy.print_stats:
++            n, p = keep.shape[0], int((~keep).sum())
++            logger.info(f"[ImprovedGS] {label}-pruned {p} / {n} ({p / n * 100:.2f}%) gaussians")
++
++        def update_param_fn(name: str, param: torch.Tensor) -> torch.Tensor:
++            return torch.nn.Parameter(param[keep], requires_grad=param.requires_grad)
++
++        def update_optimizer_fn(key: str, v: torch.Tensor) -> torch.Tensor:
++            return v[keep]
++
++        self._update_param_with_optimizer(update_param_fn, update_optimizer_fn)
++        self.prune_densification_buffers(keep)
+diff --git a/threedgrut/trainer.py b/threedgrut/trainer.py
+index 9d1164e..c2ffaa5 100644
+--- a/threedgrut/trainer.py
++++ b/threedgrut/trainer.py
+@@ -261,6 +261,11 @@ class Trainer3DGRUT:
+ 
+                 self.strategy = MCMCStrategy(conf, self.model)
+                 logger.info("🔆 Using MCMC strategy")
++            case "ImprovedGSStrategy":
++                from threedgrut.strategy.improved import ImprovedGSStrategy
++
++                self.strategy = ImprovedGSStrategy(conf, self.model)
++                logger.info("🔆 Using Improved-GS strategy")
+             case _:
+                 raise ValueError(f"unrecognized model.strategy {conf.strategy.method}")
+ 
+@@ -1232,14 +1237,18 @@ class Trainer3DGRUT:
+         # Optimizer step
+         with torch.cuda.nvtx.range(f"train_{global_step}_backprop"):
+             self._zero_color_refine_frozen_grads()
+-            if isinstance(self.model.optimizer, SelectiveAdam):
++            # strategies may skip steps (gradients then accumulate until the next one), e.g. Improved-GS's MU
++            if not self.strategy.should_step_optimizer(global_step):
++                pass
++            elif isinstance(self.model.optimizer, SelectiveAdam):
+                 assert (
+                     outputs["mog_visibility"].shape == self.model.density.shape
+                 ), f"Visibility shape {outputs['mog_visibility'].shape} does not match density shape {self.model.density.shape}"
+                 self.model.optimizer.step(outputs["mog_visibility"])
++                self.model.optimizer.zero_grad()
+             else:
+                 self.model.optimizer.step()
+-            self.model.optimizer.zero_grad()
++                self.model.optimizer.zero_grad()
+ 
+         # Scheduler step
+         with torch.cuda.nvtx.range(f"train_{global_step}_scheduler"):
+diff --git a/threedgrut/utils/jit.py b/threedgrut/utils/jit.py
+index cc56eae..717cf75 100644
+--- a/threedgrut/utils/jit.py
++++ b/threedgrut/utils/jit.py
+@@ -37,6 +37,7 @@ def compile_slang_kernel(kernel_files: list[str], output_file: str, defines: lis
+     except ImportError:
+         print("Slangtorch not found, assuming slangc is in the path")
+ 
++    tmp_file = f"{os.path.splitext(output_file)[0]}.tmp-{os.uname().nodename}-{os.getpid()}{os.path.splitext(output_file)[1]}"
+     subprocess.check_call(
+         [
+             "slangc",
+@@ -50,10 +51,16 @@ def compile_slang_kernel(kernel_files: list[str], output_file: str, defines: lis
+             *defines,
+             *kernel_files,
+             "-o",
+-            output_file,
++            tmp_file,
+         ],
+         env=slang_build_env,
+     )
++    # Replace the header only when its content changed: keeps its mtime (ninja then skips the nvcc rebuild)
++    # and never exposes a half-written header to a concurrent job compiling from the same checkout.
++    if os.path.exists(output_file) and open(output_file, "rb").read() == open(tmp_file, "rb").read():
++        os.remove(tmp_file)
++    else:
++        os.replace(tmp_file, output_file)
+ 
+ 
+ def load(
+diff --git a/threedgut_tracer/include/3dgut/kernels/cuda/models/shRadiativeGaussianParticles.cuh b/threedgut_tracer/include/3dgut/kernels/cuda/models/shRadiativeGaussianParticles.cuh
+index 5c8333a..cd48097 100644
+--- a/threedgut_tracer/include/3dgut/kernels/cuda/models/shRadiativeGaussianParticles.cuh
++++ b/threedgut_tracer/include/3dgut/kernels/cuda/models/shRadiativeGaussianParticles.cuh
+@@ -533,10 +533,17 @@ struct ShRadiativeGaussianVolumetricFeaturesParticles : Params, public ExtParams
+ 
+     template <bool synchedThread = true>
+     __forceinline__ __device__ void processHitBwdUpdateDensityGradient(uint32_t particleIdx, DensityRawParameters& densityRawParameters, uint32_t tileThreadIdx) {
++        // Per-ray (= per-pixel) norm of the position gradient, summed into the unused padding slot of the density
++        // gradient: the 3DGUT analogue of AbsGS / Improved-GS's absolute view-space gradient (no sign cancellation
++        // between pixels). Read by threedgut_tracer.tracer.last_abs_position_grad(); ignored by everything else.
++        float absPositionGrad = sqrtf(densityRawParameters.position.x * densityRawParameters.position.x +
++                                      densityRawParameters.position.y * densityRawParameters.position.y +
++                                      densityRawParameters.position.z * densityRawParameters.position.z);
+         if constexpr (synchedThread) {
+             // Perform warp reduction
+ #pragma unroll
+             for (int mask = 1; mask < warpSize; mask *= 2) {
++                absPositionGrad += __shfl_xor_sync(0xffffffff, absPositionGrad, mask);
+                 densityRawParameters.position.x += __shfl_xor_sync(0xffffffff, densityRawParameters.position.x, mask);
+                 densityRawParameters.position.y += __shfl_xor_sync(0xffffffff, densityRawParameters.position.y, mask);
+                 densityRawParameters.position.z += __shfl_xor_sync(0xffffffff, densityRawParameters.position.z, mask);
+@@ -563,6 +570,7 @@ struct ShRadiativeGaussianVolumetricFeaturesParticles : Params, public ExtParams
+                 atomicAdd(&m_densityRawParameters.gradPtr[particleIdx].scale.x, densityRawParameters.scale.x);
+                 atomicAdd(&m_densityRawParameters.gradPtr[particleIdx].scale.y, densityRawParameters.scale.y);
+                 atomicAdd(&m_densityRawParameters.gradPtr[particleIdx].scale.z, densityRawParameters.scale.z);
++                atomicAdd(&m_densityRawParameters.gradPtr[particleIdx].padding, absPositionGrad);
+             }
+         } else {
+             atomicAdd(&m_densityRawParameters.gradPtr[particleIdx].position.x, densityRawParameters.position.x);
+@@ -576,6 +584,7 @@ struct ShRadiativeGaussianVolumetricFeaturesParticles : Params, public ExtParams
+             atomicAdd(&m_densityRawParameters.gradPtr[particleIdx].scale.x, densityRawParameters.scale.x);
+             atomicAdd(&m_densityRawParameters.gradPtr[particleIdx].scale.y, densityRawParameters.scale.y);
+             atomicAdd(&m_densityRawParameters.gradPtr[particleIdx].scale.z, densityRawParameters.scale.z);
++            atomicAdd(&m_densityRawParameters.gradPtr[particleIdx].padding, absPositionGrad);
+         }
+     }
+ 
+diff --git a/threedgut_tracer/tracer.py b/threedgut_tracer/tracer.py
+index eb05824..c1b952d 100644
+--- a/threedgut_tracer/tracer.py
++++ b/threedgut_tracer/tracer.py
+@@ -154,6 +154,15 @@ class SensorPose3DModel:
+ #
+ 
+ 
++_LAST_ABS_POS_GRAD = [None]
++
++
++def last_abs_position_grad():
++    """[N, 1] sum over the pixels of the last backward pass of the per-pixel norm of dL/d(position)
++    (None before the first backward); the analogue of AbsGS's absolute view-space gradient."""
++    return _LAST_ABS_POS_GRAD[0]
++
++
+ class Tracer:
+     class _Autograd(torch.autograd.Function):
+         @staticmethod
+@@ -264,9 +273,10 @@ class Tracer:
+                 ray_hit_distance_grd,
+             )
+ 
+-            mog_pos_grd, mog_dns_grd, mog_rot_grd, mog_scl_grd, _ = torch.split(
++            mog_pos_grd, mog_dns_grd, mog_rot_grd, mog_scl_grd, mog_abs_pos_grd = torch.split(
+                 particle_density_grd, [3, 1, 4, 3, 1], dim=1
+             )
++            _LAST_ABS_POS_GRAD[0] = mog_abs_pos_grd  # sum over pixels of |dL/dpos| (see last_abs_position_grad)
+             mog_sph_grd = particle_features_grd
+ 
+             return (
