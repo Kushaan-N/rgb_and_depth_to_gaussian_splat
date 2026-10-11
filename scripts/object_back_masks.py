@@ -8,8 +8,14 @@ keeping samples that face the view and are not occluded, and rewrites <image>_co
     0 = anything else
 so eval_views.py reports psnr_unobserved on the completed backs and psnr_observed on seen content.
 Frames where the backs cover at least --min-frac of the image are copied to <out> as a dataset.
+With --checkpoint/--added the back pixels are RENDERED instead of projected point samples: the completed
+splat is rendered with its added gaussians white and all real ones black, so a pixel is a completed-surface
+pixel where the added gaussians carry >= --min-weight of the rendered colour (exactly what survived the
+harm filter, solid instead of point speckle), and — where the view has a LiDAR target — the rendered depth
+there agrees with the LiDAR depth (the real image shows that surface, not an occluder).
 
     python scripts/object_back_masks.py --views <xviews> --unseen completed_unseen.npz --out <xviews_backs>
+    python scripts/object_back_masks.py --views <xviews> --checkpoint completed.pt --added 12345 --out <xviews_backs>
 """
 from __future__ import annotations
 import argparse, os, shutil, sys
@@ -23,7 +29,10 @@ from fuse_sequences import write_model
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--views", required=True)
-    ap.add_argument("--unseen", required=True)
+    ap.add_argument("--unseen", default=None)
+    ap.add_argument("--checkpoint", default=None, help="render mode: completed checkpoint (added = last --added rows)")
+    ap.add_argument("--added", type=int, default=0)
+    ap.add_argument("--min-weight", type=float, default=0.5)
     ap.add_argument("--out", required=True)
     ap.add_argument("--min-frac", type=float, default=0.003)
     ap.add_argument("--max-incidence", type=float, default=80.0)
@@ -34,13 +43,39 @@ def main():
     import torch.nn.functional as F
     from PIL import Image
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    U = np.load(args.unseen)["unseen"]
-    X = torch.tensor(U[:, :3], device=dev); Nn = torch.tensor(U[:, 3:], device=dev)
+    assert args.unseen or args.checkpoint, "need --unseen (projection) or --checkpoint/--added (render)"
     cams, imgs = read_text_model(os.path.join(args.views, "sparse", "0"))
     cosmax = np.cos(np.deg2rad(args.max_incidence)); kept = []
+    rendered = {}
+    if args.checkpoint:
+        from harm_filter import Gauss, load_model, pose_set, render
+        model, _ = load_model(args.checkpoint); N = model.positions.shape[0]
+        ind = torch.zeros(N, 3, device="cuda"); ind[N - args.added:] = 1.0             # white added, black real
+        g = Gauss(model, albedo=((ind - 0.5) / 0.28209479177387814).to(model.features_albedo.dtype),
+                  specular=torch.zeros_like(model.features_specular))
+        for v in pose_set(args.views, "views", "strict"):
+            o = render(g, v); w = o["rgb"][..., 0]
+            m = w >= args.min_weight
+            dep = os.path.join(args.views, "images", v["name"] + "_depth.npy")
+            if os.path.exists(dep):
+                D = torch.tensor(np.load(dep).astype(np.float32), device="cuda")
+                m &= (D <= 0) | ((o["depth"] - D).abs() < args.tol_rel * D)
+            rendered[v["name"]] = m.float()
+        del model, g; torch.cuda.empty_cache()
+    else:
+        U = np.load(args.unseen)["unseen"]
+        X = torch.tensor(U[:, :3], device=dev); Nn = torch.tensor(U[:, 3:], device=dev)
     for name, cid, q, tcw in sorted(imgs):
         W, H, (fx, fy, cx, cy) = cams[cid]
         stem = os.path.splitext(os.path.join(args.views, "images", name))[0]
+        if args.checkpoint:
+            back = rendered[os.path.splitext(os.path.basename(name))[0]]
+            cv = np.asarray(Image.open(stem + "_covis.png")) if os.path.exists(stem + "_covis.png") else np.zeros((H, W), np.uint8)
+            m = np.where(back.cpu().numpy() > 0, 128, np.where(cv == 255, 255, 0)).astype(np.uint8)
+            frac = float((m == 128).mean())
+            if frac >= args.min_frac:
+                kept.append((name, cid, q, tcw, m, frac))
+            continue
         Rc = torch.tensor(quat_to_R(q), device=dev); tc = torch.tensor(tcw, device=dev)
         Pc = X @ Rc.T + tc; z = Pc[:, 2]
         u = torch.floor(fx * Pc[:, 0] / z + cx).long(); v = torch.floor(fy * Pc[:, 1] / z + cy).long()
