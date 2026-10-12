@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+"""Train a 3DGS splat FROM SCRATCH in a rasteriser matched to the viewer that will show it (gsplat venv, GPU).
+
+3DGRUT/3DGUT models score ~3.5 dB lower when the exported PLY is drawn by SuperSplat's engine (PlayCanvas
+2.7.4 gsplat, scripts/viewer_shots.py) than in 3DGUT: unscented vs EWA projection, per-ray vs global sort, no
+kernel cut-off, no minimum-size cull. Here densification and optimisation happen in the viewer's own image
+formation, so the splats allocated are the ones the viewer draws. Rasteriser = gsplat 1.5.3 kernels, run with
+the viewer's conventions (scripts/finetune_ply_viewer.py documents the shader; its pc274 profile was measured
+at ~44.7 dB agreement with the viewer):
+  EWA projection (Jacobian at the centre), screen dilation eps2d px^2 (--viewer pc274: 0.075 = PlayCanvas
+  2.7.4's 0.3 in its 2f units; ss352: 0.3, SuperSplat 3.5.2), per-gaussian view-depth sort (gsplat's per-tile
+  sort by camera z = the viewer's global order), kernel cut at d^2 = 8 / exp(-4) (needs the patched kernels of
+  env/make_gsplat_viewer_venv.sh on PYTHONPATH; warns if stock gsplat is loaded), alpha < 1/255 discarded,
+  splats whose dilated major eigenvalue < 0.125 px^2 (pc274; ss352 0.5) culled, black background, SH degree 3.
+  --sh-band2 zero (default) keeps the two band-2 coefficients that PlayCanvas 2.7.4 multiplies instead of adds
+  (`sh[3]*(C*xy) * +sh[4]*(C*yz)`) at zero, so every viewer (buggy or not) draws the same colour; `pcbug` trains
+  through the bug (only right for 2.7.4), `std` ignores it.
+Options: --aa (gsplat antialiased mode: opacity x sqrt(det/det_dilated); the exported PLY is tagged
+`comment SplatRenderMode mip` -- PlayCanvas 2.7.4 itself never enables GSPLAT_AA, so its renders lack the
+compensation), --ss 2 (SRGS-style sub-pixel constraint: render at 2x with eps2d x 4, 2x2 area-downsample, loss
+at 1x), --min-px (3D scale floor: every axis >= min_px pixels at the closest training camera that sees it,
+std = sqrt(s^2 + floor^2), recomputed after densification, baked into the export, so the viewer's cull never
+removes a trained splat), --depth-lambda (LiDAR ray-distance L1 where <image>_depth.npy exists).
+Strategies: improved (Improved-GS: EAS + LAS + RAP + budget + MU, scripts/improved_gs_strategy.py), mcmc
+(gsplat MCMCStrategy, cap = --budget, opacity/scale reg 0.01), default (gsplat DefaultStrategy, AbsGS grads).
+Split: frame k (name order) is held out iff k % --test-split-interval == 0 (3DGRUT's rule).
+Init: points3D.txt (xyz + rgb) of the dataset, scales from the 3-NN distance, opacity --init-opacity.
+Output: <out>/splat.ply (standard 3DGS PLY, dataset frame), <out>/train.json (args, curve, timings, counts,
+held-out PSNR in this rasteriser at --eval-dataset).
+
+    PYTHONPATH=$CEAR_WS/gsplat-viewer python scripts/train_viewer_gsplat.py --dataset DS --out OUT \
+        --test-split-interval 8 [--strategy improved --budget 4000000] [--viewer pc274] [--ss 2 --min-px 0.3] \
+        [--aa] [--iters 30000] [--eval-dataset TEST]
+"""
+from __future__ import annotations
+import argparse, json, math, os, sys, time
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from refine_poses_gsplat import read_model, intrinsics, load_rgb, ssim, psnr  # noqa: E402
+
+C0 = 0.28209479177387814
+PROFILES = {"pc274": {"eps2d": 0.075, "cull_l1": 0.125}, "ss352": {"eps2d": 0.3, "cull_l1": 0.5}}
+
+
+# ---------------------------------------------------------------- data
+def load_views(dataset, interval, subset, dev, depth=False):
+    """[(name, K (3,3) tensor, W, H, viewmat (4,4) tensor, rgb uint8 (H,W,3), depth (H,W) or None)]."""
+    import torch
+    cams, imgs = read_model(os.path.join(dataset, "sparse", "0"))
+    out = []
+    for k, (name, _iid, cid, c2w) in enumerate(imgs):
+        test = interval > 0 and k % interval == 0
+        if subset != "all" and (subset == "test") != test:
+            continue
+        K, W, H = intrinsics(cams[cid])
+        d = None
+        f = os.path.join(dataset, "images", os.path.splitext(name)[0] + "_depth.npy")
+        if depth and os.path.exists(f):
+            d = torch.from_numpy(np.load(f).astype(np.float32)).to(dev)
+        out.append((name, torch.tensor(K, dtype=torch.float32, device=dev), int(W), int(H),
+                    torch.tensor(np.linalg.inv(c2w), dtype=torch.float32, device=dev),
+                    load_rgb(os.path.join(dataset, "images", name), dev), d))
+    return out
+
+
+def init_params(dataset, dev, init_opacity, init_scale, sh_degree, max_points=0, seed=0):
+    import torch
+    from scipy.spatial import cKDTree
+    f = os.path.join(dataset, "sparse", "0", "points3D.txt")
+    a = np.loadtxt(f, comments="#", usecols=(1, 2, 3, 4, 5, 6), dtype=np.float64)
+    xyz, rgb = a[:, :3], a[:, 3:6] / 255.0
+    if max_points and len(xyz) > max_points:
+        sel = np.random.default_rng(seed).choice(len(xyz), max_points, replace=False); xyz, rgb = xyz[sel], rgb[sel]
+    d, _ = cKDTree(xyz).query(xyz, k=4, workers=-1)
+    s = np.log(np.sqrt((d[:, 1:] ** 2).mean(1)).clip(1e-7) * init_scale)
+    n, K = len(xyz), (sh_degree + 1) ** 2 - 1
+    g = torch.Generator().manual_seed(seed)
+    p = {"means": torch.tensor(xyz, dtype=torch.float32), "scales": torch.tensor(s, dtype=torch.float32)[:, None].repeat(1, 3),
+         "quats": torch.rand(n, 4, generator=g), "opacities": torch.logit(torch.full((n,), float(init_opacity))),
+         "sh0": ((torch.tensor(rgb, dtype=torch.float32) - 0.5) / C0)[:, None], "shN": torch.zeros(n, K, 3)}
+    return torch.nn.ParameterDict({k: torch.nn.Parameter(v.to(dev)) for k, v in p.items()})
+
+
+# ---------------------------------------------------------------- the viewer-matched renderer
+class ViewerGS:
+    def __init__(self, args):
+        prof = PROFILES[args.viewer]
+        self.eps2d = prof["eps2d"] if args.eps2d is None else args.eps2d
+        self.cull_l1 = prof["cull_l1"] if args.cull_l1 is None else args.cull_l1
+        self.aa, self.sh_band2, self.tile = args.aa, args.sh_band2, 16
+        self.floor = None                                  # per-gaussian 3D scale floor (--min-px), or None
+        self.min_px = args.min_px
+
+    def scales(self, p):
+        import torch
+        s = torch.exp(p["scales"])
+        if self.floor is not None and len(self.floor) == len(s):
+            s = torch.sqrt(s * s + self.floor[:, None] ** 2)
+        return s
+
+    def sh_coeffs(self, p, deg):
+        import torch
+        c = torch.cat([p["sh0"], p["shN"]], 1)[:, : (deg + 1) ** 2]
+        if self.sh_band2 == "zero" and deg >= 2:                # PlayCanvas 2.7.4's multiplied pair: keep it 0
+            m = torch.ones(c.shape[1], 1, device=c.device); m[4:6] = 0
+            c = c * m
+        return c
+
+    def project(self, p, viewmat, K, W, H, ss=1):
+        """-> radii [1,N,2] (viewer cull applied), means2d [1,N,2], depths [1,N], conics [1,N,3], opacity [1,N]."""
+        import torch
+        from gsplat.cuda._wrapper import fully_fused_projection
+        Ks = K.clone(); Ks[:2] *= ss
+        op = torch.sigmoid(p["opacities"])
+        radii, means2d, depths, conics, comp = fully_fused_projection(
+            p["means"], None, p["quats"], self.scales(p), viewmat[None], Ks[None], W * ss, H * ss,
+            eps2d=self.eps2d * ss * ss, near_plane=0.01, calc_compensations=self.aa, opacities=op[None])
+        with torch.no_grad():                               # viewer cull on the dilated major eigenvalue (1x px^2)
+            a, b, c = conics[..., 0], conics[..., 1], conics[..., 2]
+            det = (a * c - b * b).clamp_min(1e-30)
+            ca, cb, cc = c / det, -b / det, a / det
+            l1 = 0.5 * (ca + cc) + torch.sqrt((0.5 * (ca - cc)) ** 2 + cb * cb)
+            keep = (l1 / (ss * ss) >= self.cull_l1) & torch.isfinite(l1)
+            radii = radii * keep[..., None].to(radii.dtype)
+        opr = op[None] * comp if self.aa else op[None]
+        return radii, means2d, depths, conics, opr
+
+    def raster(self, means2d, radii, depths, conics, feats, opr, W, H, absgrad=False):
+        from gsplat.cuda._wrapper import isect_tiles, isect_offset_encode, rasterize_to_pixels
+        tw, th = (W + self.tile - 1) // self.tile, (H + self.tile - 1) // self.tile
+        _, isect_ids, flatten_ids = isect_tiles(means2d, radii, depths, self.tile, tw, th)
+        offsets = isect_offset_encode(isect_ids, 1, tw, th)
+        return rasterize_to_pixels(means2d, conics, feats[None], opr, W, H, self.tile, offsets, flatten_ids, absgrad=absgrad)
+
+    def render(self, p, view, deg, ss=1, depth=False, absgrad=False):
+        """-> rgb (H,W,3) at 1x, alpha (H,W), z-depth (H,W) or None, info (strategy keys)."""
+        import torch
+        import torch.nn.functional as F
+        from gsplat.cuda._wrapper import spherical_harmonics
+        _, K, W, H, viewmat = view[:5]
+        radii, means2d, depths, conics, opr = self.project(p, viewmat, K, W, H, ss)
+        vis = (radii[0] > 0).all(-1)
+        campos = torch.linalg.inv(viewmat)[:3, 3]
+        dirs = p["means"] - campos
+        if self.sh_band2 == "pcbug" and deg >= 2:
+            from finetune_ply_viewer import eval_sh
+            col = eval_sh(p["sh0"], p["shN"], torch.nn.functional.normalize(dirs, dim=-1), deg, True)
+        else:
+            col = torch.clamp_min(spherical_harmonics(deg, dirs, self.sh_coeffs(p, deg), masks=vis) + 0.5, 0.0)
+        feats = torch.cat([col, depths[0][:, None]], 1) if depth else col
+        out, alpha = self.raster(means2d, radii, depths, conics, feats, opr, W * ss, H * ss, absgrad=absgrad)
+        out, alpha = out[0], alpha[0, ..., 0]
+        if ss > 1:                                          # area-downsample to the 1x grid
+            pool = lambda x: F.avg_pool2d(x.permute(2, 0, 1)[None], ss)[0].permute(1, 2, 0)
+            out, alpha = pool(out), pool(alpha[..., None])[..., 0]
+        d = out[..., 3] / alpha.clamp_min(1e-6) if depth else None
+        info = {"means2d": means2d, "radii": radii, "width": W * ss, "height": H * ss, "n_cameras": 1,
+                "gaussian_ids": None, "conics": conics, "depths": depths}
+        return out[..., :3], alpha, d, info
+
+    def edge_weights(self, p, view, edge):
+        """EAS: per-gaussian sum_p edge_p T_i(p) alpha_i(p) (d of an edge-weighted constant render w.r.t. its colour)."""
+        import torch
+        _, K, W, H, viewmat = view[:5]
+        with torch.no_grad():
+            radii, means2d, depths, conics, opr = self.project(p, viewmat, K, W, H, 1)
+        f = torch.zeros(len(p["means"]), 1, device=means2d.device, requires_grad=True)
+        with torch.enable_grad():
+            out, _ = self.raster(means2d.detach(), radii, depths.detach(), conics.detach(), f, opr.detach(), W, H)
+            (out[0, ..., 0] * edge).sum().backward()
+        return f.grad[:, 0].detach(), (radii[0] > 0).all(-1)
+
+    @staticmethod
+    def floors(p, views, min_px, chunk=1 << 21):
+        """3D scale floor per gaussian: min_px * z / f at the closest training camera whose frustum holds it."""
+        import torch
+        best = torch.full((len(p["means"]),), float("inf"), device=p["means"].device)
+        with torch.no_grad():
+            for v in views:
+                _, K, W, H, vm = v[:5]
+                f = float(K[0, 0])
+                for s in range(0, len(best), chunk):
+                    x = p["means"][s:s + chunk] @ vm[:3, :3].T + vm[:3, 3]
+                    z = x[:, 2]; u = K[0, 0] * x[:, 0] / z.clamp_min(1e-6) + K[0, 2]; w = K[1, 1] * x[:, 1] / z.clamp_min(1e-6) + K[1, 2]
+                    ok = (z > 0.01) & (u > -0.15 * W) & (u < 1.15 * W) & (w > -0.15 * H) & (w < 1.15 * H)
+                    val = torch.where(ok, z / f, torch.full_like(z, float("inf")))
+                    best[s:s + chunk] = torch.minimum(best[s:s + chunk], val)
+        best[~torch.isfinite(best)] = 0
+        return best * min_px
+
+
+# ---------------------------------------------------------------- export
+def save_ply(path, p, rast, comments=()):
+    import torch
+    from plyfile import PlyData, PlyElement
+    with torch.no_grad():
+        m = p["means"].cpu().numpy(); s = torch.log(rast.scales(p)).cpu().numpy()
+        q = torch.nn.functional.normalize(p["quats"], dim=-1).cpu().numpy()
+        sh0 = p["sh0"][:, 0].cpu().numpy(); shN = p["shN"].clone()
+        if rast.sh_band2 == "zero" and shN.shape[1] >= 5:
+            shN[:, 3:5] = 0
+        rest = shN.permute(0, 2, 1).reshape(len(m), -1).cpu().numpy()       # f_rest channel-major (3DGS layout)
+        op = p["opacities"].reshape(-1, 1).cpu().numpy()
+    cols = [m, np.zeros_like(m), sh0, rest, op, s, q]
+    names = ["x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2"] + [f"f_rest_{i}" for i in range(rest.shape[1])] + \
+            ["opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3"]
+    arr = np.ascontiguousarray(np.concatenate(cols, 1).astype(np.float32))
+    el = arr.view([(nm, "f4") for nm in names]).reshape(-1)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    PlyData([PlyElement.describe(el, "vertex")], comments=list(comments)).write(path)
+
+
+# ---------------------------------------------------------------- training
+def evaluate(rast, p, views, deg, save_dir=None):
+    import torch
+    ps, ss_ = [], []
+    with torch.no_grad():
+        for v in views:
+            img = rast.render(p, v, deg)[0]
+            img = torch.round(img.clamp(0, 1) * 255) / 255             # what an 8-bit viewer frame holds
+            gt = v[5].float() / 255
+            ps.append(psnr(img, gt)); ss_.append(float(ssim(img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None])))
+            if save_dir:
+                from PIL import Image
+                os.makedirs(save_dir, exist_ok=True)
+                Image.fromarray((img.cpu().numpy() * 255 + 0.5).astype(np.uint8)).save(
+                    os.path.join(save_dir, os.path.splitext(v[0])[0] + ".png"))
+    return (round(float(np.mean(ps)), 3), round(float(np.mean(ss_)), 4)) if ps else (None, None)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--dataset", required=True, help="COLMAP text dataset (sparse/0/*.txt incl. points3D.txt, images/)")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--test-split-interval", type=int, default=8)
+    ap.add_argument("--eval-dataset", default=None, help="held-out set scored at the end in this rasteriser")
+    ap.add_argument("--iters", type=int, default=30000)
+    ap.add_argument("--strategy", choices=("improved", "mcmc", "default"), default="improved")
+    ap.add_argument("--budget", type=int, default=4_000_000, help="improved: Improved-GS budget; mcmc: cap_max")
+    ap.add_argument("--densify-stop", type=int, default=None, help="default: 15000 (improved/default), 25000 (mcmc), x iters/30000")
+    ap.add_argument("--viewer", choices=tuple(PROFILES), default="pc274")
+    ap.add_argument("--eps2d", type=float, default=None, help="screen dilation px^2 (default from --viewer)")
+    ap.add_argument("--cull-l1", type=float, default=None, help="minimum dilated major eigenvalue px^2 (default from --viewer)")
+    ap.add_argument("--aa", action="store_true", help="antialiased (opacity compensation) mode")
+    ap.add_argument("--ss", type=int, default=1, help="supersampling factor (render ss x, area-downsample, loss at 1x)")
+    ap.add_argument("--min-px", type=float, default=0.0, help="3D scale floor in pixels at the closest training camera; 0 = off")
+    ap.add_argument("--sh-band2", choices=("zero", "pcbug", "std"), default="zero")
+    ap.add_argument("--sh-degree", type=int, default=3)
+    ap.add_argument("--depth-lambda", type=float, default=0.0)
+    ap.add_argument("--depth-trim", type=float, default=0.95)
+    ap.add_argument("--ssim-lambda", type=float, default=0.2)
+    ap.add_argument("--init-opacity", type=float, default=None, help="default 0.1 (0.5 for mcmc)")
+    ap.add_argument("--init-scale", type=float, default=1.0)
+    ap.add_argument("--max-points", type=int, default=0)
+    ap.add_argument("--grad-threshold", type=float, default=None, help="improved: 0.0003; default: 0.0008 (absgrad)")
+    ap.add_argument("--no-eas", action="store_true"); ap.add_argument("--no-mu", action="store_true")
+    ap.add_argument("--ply-comment", action="append", default=[], help="extra PLY header comment (repeatable)")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--log-every", type=int, default=1000)
+    ap.add_argument("--eval-every", type=int, default=0, help="held-out eval interval (0: end only)")
+    args = ap.parse_args()
+
+    import torch
+    import gsplat
+    from gsplat.strategy import DefaultStrategy, MCMCStrategy
+    from improved_gs_strategy import ImprovedStrategy, edge_map
+    torch.manual_seed(args.seed); np.random.seed(args.seed)
+    dev = "cuda"; t_start = time.time()
+    cut = "gsplat-viewer" in gsplat.__file__
+    print(f"[vgs] gsplat {gsplat.__version__} from {gsplat.__file__} -> kernel cut-off d^2<=8: {'ON' if cut else 'OFF (stock kernels!)'}", flush=True)
+    rast = ViewerGS(args)
+    tr = load_views(args.dataset, args.test_split_interval, "train", dev, depth=args.depth_lambda > 0)
+    ev = load_views(args.eval_dataset, 0, "all", dev) if args.eval_dataset else []
+    nd = sum(v[6] is not None for v in tr)
+    print(f"[vgs] {len(tr)} training views ({args.dataset}, test_split_interval {args.test_split_interval}), {len(ev)} eval views; "
+          f"viewer {args.viewer}: eps2d {rast.eps2d} px^2, cull l1 < {rast.cull_l1} px^2, aa {args.aa}, ss {args.ss}, "
+          f"min_px {args.min_px}, sh band-2 {args.sh_band2}; depth targets {nd} (lambda {args.depth_lambda})", flush=True)
+    init_op = args.init_opacity if args.init_opacity is not None else (0.5 if args.strategy == "mcmc" else 0.1)
+    params = init_params(args.dataset, dev, init_op, args.init_scale, args.sh_degree, args.max_points, args.seed)
+    centres = np.stack([torch.linalg.inv(v[4])[:3, 3].cpu().numpy() for v in tr])
+    scene_scale = float(np.linalg.norm(centres - centres.mean(0), axis=1).max()) * 1.1
+    print(f"[vgs] init {len(params['means'])} points from points3D.txt, opacity {init_op}, scene_scale {scene_scale:.3f}", flush=True)
+
+    lr = {"means": 1.6e-4 * scene_scale, "scales": 5e-3, "quats": 1e-3, "opacities": 5e-2, "sh0": 2.5e-3, "shN": 2.5e-3 / 20}
+    opts = {k: torch.optim.Adam([{"params": params[k], "lr": lr[k], "name": k}], eps=1e-15) for k in params}
+    sched = torch.optim.lr_scheduler.ExponentialLR(opts["means"], gamma=0.01 ** (1.0 / args.iters))
+    f_it = args.iters / 30000.0
+    if args.strategy == "improved":
+        stop = args.densify_stop or int(15000 * f_it)
+        strat = ImprovedStrategy(budget=args.budget, refine_stop_iter=stop, refine_start_iter=int(500 * f_it),
+                                 grad_threshold=args.grad_threshold or 0.0003, eas=not args.no_eas, mu=not args.no_mu,
+                                 reset_every=int(3000 * f_it), rap_offset=int(300 * f_it), early_prune_iter=int(300 * f_it),
+                                 eas_full_every=int(3000 * f_it), eas_full_offset=int(400 * f_it), eas_full_until=int(9000 * f_it),
+                                 mu_start=int(20000 * f_it), mu_second_start=int(24000 * f_it))
+        state = strat.initialize_state(scene_scale)
+    elif args.strategy == "mcmc":
+        strat = MCMCStrategy(cap_max=args.budget, refine_stop_iter=args.densify_stop or int(25000 * f_it),
+                             refine_start_iter=int(500 * f_it), verbose=False)
+        state = strat.initialize_state()
+    else:
+        strat = DefaultStrategy(absgrad=True, grow_grad2d=args.grad_threshold or 0.0008, refine_stop_iter=args.densify_stop or int(15000 * f_it),
+                                refine_start_iter=int(500 * f_it), reset_every=int(3000 * f_it), verbose=False)
+        state = strat.initialize_state(scene_scale=scene_scale)
+    strat.check_sanity(params, opts)
+    edges = {}
+
+    def edge_fn(i):
+        v = tr[i]
+        if i not in edges:
+            edges[i] = edge_map(v[5]).half()
+        return rast.edge_weights(params, v, edges[i].float())
+
+    rn = {}
+    curve, order, t0 = [], [], time.time()
+    os.makedirs(args.out, exist_ok=True)
+    for step in range(args.iters):
+        if not order:
+            order = list(np.random.permutation(len(tr)))
+        k = int(order.pop()); v = tr[k]
+        deg = min(step // 1000, args.sh_degree)
+        if args.min_px > 0 and (rast.floor is None or len(rast.floor) != len(params["means"]) or step % 1000 == 0):
+            rast.floor = ViewerGS.floors(params, tr, args.min_px)
+        img, alpha, d, info = rast.render(params, v, deg, ss=args.ss, depth=v[6] is not None,
+                                          absgrad=args.strategy in ("improved", "default"))
+        strat.step_pre_backward(params, opts, state, step, info)
+        gt = v[5].float() / 255
+        loss = (1 - args.ssim_lambda) * (img - gt).abs().mean() + \
+            args.ssim_lambda * (1 - ssim(img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None]))
+        ld = torch.zeros((), device=dev)
+        if v[6] is not None:
+            key = (v[2], v[3], tuple(v[1].flatten().tolist()))
+            if key not in rn:
+                K = v[1].cpu().numpy(); uu, vv = np.meshgrid(np.arange(v[2]) + 0.5, np.arange(v[3]) + 0.5)
+                rn[key] = torch.tensor(np.sqrt(((uu - K[0, 2]) / K[0, 0]) ** 2 + ((vv - K[1, 2]) / K[1, 1]) ** 2 + 1),
+                                       dtype=torch.float32, device=dev)
+            msk = (v[6] > 0) & (alpha.detach() > 0.5)
+            if msk.any():
+                err = ((d * rn[key])[msk] - v[6][msk]).abs()
+                err = err.sort().values[: max(1, int(err.numel() * args.depth_trim))]
+                ld = err.mean(); loss = loss + args.depth_lambda * ld
+        if args.strategy == "mcmc":
+            loss = loss + 0.01 * torch.sigmoid(params["opacities"]).mean() + 0.01 * torch.exp(params["scales"]).mean()
+        loss.backward()
+        stepping = strat.should_step_optimizer(step) if args.strategy == "improved" else True
+        if stepping:
+            for o in opts.values():
+                o.step(); o.zero_grad(set_to_none=True)
+        sched.step()
+        if args.strategy == "improved":
+            strat.step_post_backward(params, opts, state, step, info, edge_fn=edge_fn if not args.no_eas else None, n_views=len(tr))
+        elif args.strategy == "mcmc":
+            strat.step_post_backward(params, opts, state, step, info, lr=sched.get_last_lr()[0])
+        else:
+            strat.step_post_backward(params, opts, state, step, info, packed=False)
+        if step % args.log_every == 0 or step == args.iters - 1:
+            e = {"step": step, "loss": round(loss.item(), 5), "psnr": round(psnr(img.detach().clamp(0, 1), gt), 3),
+                 "depth": round(ld.item(), 5), "n": len(params["means"]), "visible": int((info["radii"] > 0).all(-1).sum()),
+                 "sec": round(time.time() - t0, 1), "mem_gb": round(torch.cuda.max_memory_allocated() / 2 ** 30, 1)}
+            if args.eval_every and step and step % args.eval_every == 0 and ev:
+                e["heldout_psnr"] = evaluate(rast, params, ev, deg)[0]
+            curve.append(e); print(f"[vgs] {e}", flush=True)
+    train_s = time.time() - t0
+    if args.min_px > 0:
+        rast.floor = ViewerGS.floors(params, tr, args.min_px)
+    deg = min(args.iters // 1000, args.sh_degree)
+    res = {"heldout_psnr": None, "heldout_ssim": None}
+    if ev:
+        res["heldout_psnr"], res["heldout_ssim"] = evaluate(rast, params, ev, deg, os.path.join(args.out, "renders_trainer"))
+        print(f"[vgs] held-out ({args.eval_dataset}, this rasteriser): PSNR {res['heldout_psnr']} SSIM {res['heldout_ssim']}", flush=True)
+    comments = [f"train_viewer_gsplat viewer={args.viewer} eps2d={rast.eps2d} strategy={args.strategy} ss={args.ss} aa={args.aa}"]
+    if args.aa:
+        comments.append("SplatRenderMode mip")
+    comments += args.ply_comment
+    save_ply(os.path.join(args.out, "splat.ply"), params, rast, comments)
+    log = {"args": vars(args), "kernel_cut": cut, "gsplat": gsplat.__file__, "eps2d": rast.eps2d, "cull_l1": rast.cull_l1,
+           "n_train": len(tr), "n_eval": len(ev), "scene_scale": scene_scale, "n_gaussians": len(params["means"]),
+           "train_seconds": round(train_s, 1), "total_seconds": round(time.time() - t_start, 1), "curve": curve, **res,
+           "strategy_log": getattr(strat, "log", [])[-400:]}
+    json.dump(log, open(os.path.join(args.out, "train.json"), "w"), indent=2)
+    print(f"[vgs] {len(params['means'])} gaussians -> {os.path.join(args.out, 'splat.ply')} ({train_s / 60:.1f} min training)")
+    print("VGS_TRAIN_DONE")
+
+
+if __name__ == "__main__":
+    main()
