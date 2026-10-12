@@ -46,14 +46,14 @@ def quat_to_R(q):
                      [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]])
 
 
-def zbuffer_target(X, Rcw, tcw, W, H, K, vox, rmax, edge_rel=0.05, min_support=5, reduce="surface", attr=None):
+def zbuffer_target(X, Rcw, tcw, W, H, K, vox, rmax, edge_rel=0.05, min_support=5, reduce="surface", attr=None, surface_rel=0.02):
     """One camera: z-buffer the cloud X (N,3 torch float64, dataset units) -> (ray distance HxW, 0 = no target;
     per-pixel mean of `attr` (N,) over the front-surface points, or None). reduce="min": every pixel of a point's
     square splat takes the NEAREST point (the original rule; on slanted surfaces such as the floor seen at a grazing
     angle the nearest of a k x k window is systematically closer than the surface at the pixel centre — a
     ~1-3% near bias). reduce="surface": the nearest depth only decides occlusion; the target is the Gaussian-
     weighted (by distance to the pixel centre) mean INVERSE depth of the splats on that front surface (within
-    edge_rel of the nearest), which is exact for planes and unbiased for smooth surfaces."""
+    surface_rel of the nearest), which is exact for planes and unbiased for smooth surfaces."""
     import torch
     import torch.nn.functional as F
     fx, fy, cx, cy = K
@@ -85,19 +85,18 @@ def zbuffer_target(X, Rcw, tcw, W, H, K, vox, rmax, edge_rel=0.05, min_support=5
         anum = torch.zeros_like(num)
         for idx, pix in offs:
             zi = z[idx]
-            front = zi <= D[pix] * (1 + edge_rel)                                     # same surface as the nearest
+            front = zi <= D[pix] * (1 + surface_rel)                                  # same surface as the nearest
             du = (pix % W).double() + 0.5 - u[idx]; dv = (pix // W).double() + 0.5 - w[idx]
             sig = 0.5 * rad[idx].double()
             wt = torch.exp(-(du * du + dv * dv) / (2 * sig * sig)) * front
             num.index_add_(0, pix, wt / zi); den.index_add_(0, pix, wt)
             if a is not None:
                 anum.index_add_(0, pix, wt * a[idx])
-        if reduce == "surface":
-            D = torch.where(den > 0, den / num.clamp_min(1e-30), D)
+        Dm = torch.where(den > 0, den / num.clamp_min(1e-30), D) if reduce == "surface" else D
         A = torch.where(den > 0, anum / den.clamp_min(1e-30), torch.zeros_like(den)).view(H, W) if a is not None else None
     else:
-        A = None
-    Z = D.view(H, W)                                                                  # z-depth per pixel
+        A, Dm = None, D
+    Z = D.view(H, W)                                                                  # nearest z per pixel: decides validity
     valid = torch.isfinite(Z)
     Zf = torch.where(valid, Z, torch.full_like(Z, 1e9))
     zmin = -F.max_pool2d(-Zf[None, None], 5, 1, 2)[0, 0]                              # nearest depth nearby
@@ -107,7 +106,7 @@ def zbuffer_target(X, Rcw, tcw, W, H, K, vox, rmax, edge_rel=0.05, min_support=5
     # z-depth -> distance along the unit pixel-centre ray (3DGRUT's pred_dist)
     uu, ww = torch.meshgrid(torch.arange(W, device=dev) + 0.5, torch.arange(H, device=dev) + 0.5, indexing="xy")
     ray = torch.sqrt(((uu - cx) / fx) ** 2 + ((ww - cy) / fy) ** 2 + 1)
-    return torch.where(valid, Z * ray, torch.zeros_like(Z)), A
+    return torch.where(valid, Dm.view(H, W) * ray, torch.zeros_like(Z)), A
 
 
 def load_cloud(cloud, sim3_json, dev):
