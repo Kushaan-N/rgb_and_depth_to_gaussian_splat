@@ -9,7 +9,7 @@ the PLY loaded at its default view. Prints the WebGL renderer in use (GPU via AN
     python scripts/viewer_shots.py --ply splat.ply --dataset <ds> --out-dir shots/ [--every 8] [--move 0 -0.3 1]
 """
 from __future__ import annotations
-import argparse, base64, functools, http.server, json, os, sys, tempfile, threading, time
+import argparse, base64, functools, http.server, io, json, os, sys, tempfile, threading, time
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -74,22 +74,26 @@ def main():
     args = ap.parse_args()
     from playwright.sync_api import sync_playwright
     from scipy.spatial.transform import Rotation
+    from PIL import Image
     cams, imgs = read_text_model(os.path.join(args.dataset, "sparse", "0"))
     imgs = sorted(imgs, key=lambda i: i[0])
     if args.names_from:
         keep = {i[0] for i in read_text_model(os.path.join(args.names_from, "sparse", "0"))[1]}
         imgs = [i for i in imgs if i[0] in keep]
     imgs = imgs[args.offset::args.every]
-    W, H, _ = cams[imgs[0][1]]
+    W, H, (fx0, fy0, cx0, cy0) = cams[imgs[0][1]]
+    # the engine's projection is centred: render a canvas centred on the principal point, then crop W x H
+    CW = int(np.ceil(2 * max(cx0, W - cx0))); CH = int(np.ceil(2 * max(cy0, H - cy0)))
+    x0 = int(round(CW / 2 - cx0)); y0 = int(round(CH / 2 - cy0))
     root = tempfile.mkdtemp(prefix="viewer_")
     os.symlink(os.path.abspath(args.ply), os.path.join(root, "scene.ply"))
-    open(os.path.join(root, "index.html"), "w").write(PAGE % {"W": W, "H": H, "PC": PC_URL})
+    open(os.path.join(root, "index.html"), "w").write(PAGE % {"W": CW, "H": CH, "PC": PC_URL})
     port = serve(root); os.makedirs(args.out_dir, exist_ok=True)
     with sync_playwright() as pw:
         page = renderer = None
         for flags in FLAG_SETS:
             browser = pw.chromium.launch(headless=True, args=flags)
-            page = browser.new_page(viewport={"width": W, "height": H})
+            page = browser.new_page(viewport={"width": CW, "height": CH})
             page.on("console", lambda m: m.type == "error" and print("[viewer] js:", m.text, flush=True))
             page.goto(f"http://127.0.0.1:{port}/index.html")
             try:
@@ -109,10 +113,10 @@ def main():
                 C = C + Rcw.T @ np.array(args.move)
             Rpc = Rcw.T @ np.diag([1.0, -1.0, -1.0])                     # OpenCV camera -> PlayCanvas (x right, y up, -z fwd)
             qq = Rotation.from_matrix(Rpc).as_quat()                      # x, y, z, w
-            fov = float(np.degrees(2 * np.arctan(H / (2 * fy))))          # vertical fov (principal point assumed central)
+            fov = float(np.degrees(2 * np.arctan(CH / (2 * fy))))         # vertical fov of the centred canvas
             url = page.evaluate("([p,q,f,w]) => window.shot(p,q,f,w)", [C.tolist(), qq.tolist(), fov, args.wait_ms])
-            open(os.path.join(args.out_dir, os.path.splitext(name)[0] + ".png"), "wb").write(
-                base64.b64decode(url.split(",", 1)[1]))
+            im = Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1]))).convert("RGB")
+            im.crop((x0, y0, x0 + W, y0 + H)).save(os.path.join(args.out_dir, os.path.splitext(name)[0] + ".png"))
         print(f"[viewer] {len(imgs)} views in {time.time() - t0:.0f}s -> {args.out_dir}", flush=True)
         if args.editor:                                                   # the real SuperSplat app, default view
             ed = page.context.browser.new_page(viewport={"width": 1280, "height": 800})
