@@ -7,7 +7,7 @@
 #      off-path moved views (MOVE) for visuals
 #   3. all-frames deliverables: exports/<d>.ply -> exports/<d>_$TAG.ply (+ _refaxes), gated vs the input
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o logs/finetune_viewer-%j.out sbatch/finetune_viewer.sbatch configs/<seq>.yaml
-# Env: STAGE (all, or a space list of: compare attrib fix smoke heldout deliver), ARMS ("edgs_igs4m lidar_init"), ITERS (7000),
+# Env: STAGE (all, or a space list of: compare attrib fix smoke heldout deliver emul), ARMS ("edgs_igs4m lidar_init"), ITERS (7000),
 # ENGINE (current | pc274: the viewer scored), DSCALE (current: 1.8 = on-screen editor canvas px per rendered px in
 # viewer_shots' headless editor, fitted: 52.7 dB agreement), DSCALE_TRAIN ($DSCALE, or a:b = random per step), VIEWER (ss352 for current, pc274 for pc274: the fine-tune target), RASTER (exact), DEPTH (0 = no LiDAR term), FTARGS (extra finetune flags), TAG (output suffix),
 # MOVE ("0 -0.3 1.0"), EVERY_OFF (40), DELIV ("edgs_igs edgs_igs_complete": exports/<name>.ply).
@@ -32,6 +32,7 @@ STAGE="${STAGE:-all}"; ARMS="${ARMS:-edgs_igs4m lidar_init}"; ITERS="${ITERS:-70
 VIEWER="${VIEWER:-$([ "$ENGINE" = current ] && echo ss352 || echo pc274)}"
 TAG="${TAG:-viewerft$([ "$VIEWER" = ss352 ] || echo "_$VIEWER")}"
 DSCALE="${DSCALE:-$([ "$ENGINE" = current ] && echo 1.8 || echo 1)}"; DSCALE_TRAIN="${DSCALE_TRAIN:-$DSCALE}"
+PIQ_LIB="${PIQ_LIB:-$CEAR_WS/pylib-piq}"; GATE_ARGS="${GATE_ARGS:-}"   # GATE_ARGS=--perceptual: accept_gate's trade-off mode
 RASTER="${RASTER:-exact}"; DEPTH="${DEPTH:-0}"; MOVE="${MOVE:-0 -0.3 1.0}"; EVERY_OFF="${EVERY_OFF:-40}"
 has() { [ "$STAGE" = all ] || [[ " $STAGE " == *" $1 "* ]]; }
 PLYD="$P/viewer_ft"                                         # fine-tuned / fixed .plys (all engines)
@@ -41,6 +42,7 @@ hostname; date; mkdir -p "$REP"; nvidia-smi --query-gpu=name,memory.total --form
 module load cuda/12.4.1 gcc/9.4.0 2>/dev/null || true
 export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"; export PATH="$THREEDGRUT_DIR/.venv/bin:$PATH"
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0}"
+export TORCH_HOME="${TORCH_HOME:-$CEAR_WS/torch-cache}"     # LPIPS-VGG backbone weights
 bash env/make_viewer_venv.sh
 "$SPY" -c "import gsplat, torch; print('gsplat', gsplat.__version__, 'torch', torch.__version__)"
 
@@ -71,6 +73,21 @@ score() {  # tag renderdir -> $REP/<tag>.json (viewer metrics on the held-out fr
   "$GPY" scripts/eval_views.py --pred-dir "$2$BLK" --dataset "$TEST" --tag "$1" --json-out "$REP/$1.json" | tail -1
   if [ -d "$2/grey" ]; then mkdir -p "$REP/grey"
     "$GPY" scripts/eval_views.py --pred-dir "$2/grey" --dataset "$TEST" --tag "$1" --json-out "$REP/grey/$1.json" | tail -1; fi
+  dists "$2$BLK" "$REP/$1.json"; [ -d "$2/grey" ] && dists "$2/grey" "$REP/grey/$1.json"; return 0
+}
+dists() {  # renderdir json: add DISTS (piq, $PIQ_LIB) to an eval_views json, so accept_gate --perceptual sees it
+  PYTHONPATH="$PIQ_LIB" "$GPY" - "$1" "$TEST/images" "$2" <<'PY'
+import json, os, sys, numpy as np, torch, piq
+from PIL import Image
+pred, gt, js = sys.argv[1:4]; r = json.load(open(js))
+if "dists" not in r:
+    t = lambda p: torch.from_numpy(np.asarray(Image.open(p).convert("RGB"), np.float32) / 255).permute(2, 0, 1)[None].cuda()
+    m = piq.DISTS(reduction="none").cuda(); v = []
+    for n in sorted(f for f in os.listdir(pred) if f.endswith(".png") and not f.startswith("_")):
+        with torch.no_grad(): v.append(m(t(os.path.join(pred, n)), t(os.path.join(gt, n))).item())
+    r["dists"] = round(float(np.mean(v)), 4); json.dump(r, open(js, "w"), indent=2)
+print("DISTS", r["tag"], r["dists"])
+PY
 }
 FT() {  # in.ply out.ply dataset interval [extra]
   local in="$1" out="$2" ds="$3" iv="$4"; shift 4
@@ -105,7 +122,7 @@ if has fix; then
         --display-scale "$DSCALE" --prune-opacity "$pr" --out "$o"
       shots "$o" "$TEST" "$F/onpath/$t"; score "$t" "$F/onpath/$t"
       shots "$o" "$TRAIN" "$F/offpath/$t" --every "$EVERY_OFF" --move $MOVE
-      "$CPUPY" scripts/accept_gate.py --pair heldout "$REP/$n.json" "$REP/$t.json" --out "$REP/gate_$t.json" \
+      "$CPUPY" scripts/accept_gate.py $GATE_ARGS --pair heldout "$REP/$n.json" "$REP/$t.json" --out "$REP/gate_$t.json" \
         && echo "GATE $t ACCEPT" || echo "GATE $t REJECT"
     done
     shots "$b" "$TRAIN" "$F/offpath/$n" --every "$EVERY_OFF" --move $MOVE
@@ -131,9 +148,9 @@ if has heldout; then
     score "$n" "$F/onpath/$n"; score "${n}_$TAG" "$F/onpath/${n}_$TAG"
     shots "$b" "$TRAIN" "$F/offpath/$n" --every "$EVERY_OFF" --move $MOVE
     shots "$ft" "$TRAIN" "$F/offpath/${n}_$TAG" --every "$EVERY_OFF" --move $MOVE
-    "$CPUPY" scripts/accept_gate.py --pair heldout "$REP/$n.json" "$REP/${n}_$TAG.json" --out "$REP/gate_${n}_$TAG.json" \
+    "$CPUPY" scripts/accept_gate.py $GATE_ARGS --pair heldout "$REP/$n.json" "$REP/${n}_$TAG.json" --out "$REP/gate_${n}_$TAG.json" \
       && echo "GATE ${n}_$TAG ACCEPT" || echo "GATE ${n}_$TAG REJECT"
-    for o in "$PLYD/$n/${n}"_viewerft_*.ply; do             # other targets' fine-tunes, scored in this engine too
+    for o in "$PLYD/$n/${n}"_viewerft*.ply; do             # other targets' fine-tunes, scored in this engine too
       [ -f "$o" ] && [ "$o" != "$ft" ] || continue; t="$(basename "${o%.ply}")"
       shots "$o" "$TEST" "$F/onpath/$t"; score "$t" "$F/onpath/$t"
     done
@@ -153,10 +170,25 @@ if has deliver; then
       --out-ply "$EX/${d}_${TAG}_refaxes.ply"
     shots "$b" "$TEST" "$F/onpath/$t"; shots "$ft" "$TEST" "$F/onpath/${t}_$TAG"
     score "$t" "$F/onpath/$t"; score "${t}_$TAG" "$F/onpath/${t}_$TAG"
-    "$CPUPY" scripts/accept_gate.py --pair onpath_all_frames "$REP/$t.json" "$REP/${t}_$TAG.json" --out "$REP/gate_${t}_$TAG.json" \
+    "$CPUPY" scripts/accept_gate.py $GATE_ARGS --pair onpath_all_frames "$REP/$t.json" "$REP/${t}_$TAG.json" --out "$REP/gate_${t}_$TAG.json" \
       && echo "GATE ${t}_$TAG ACCEPT" || echo "GATE ${t}_$TAG REJECT"
-    shots "$b" "$TRAIN" "$F/offpath/$t" --every "$EVERY_OFF" --move $MOVE
-    shots "$ft" "$TRAIN" "$F/offpath/${t}_$TAG" --every "$EVERY_OFF" --move $MOVE
+    shots "$b" "$TRAIN" "$F/offpath/$t" --every "$EVERY_OFF" --move $MOVE --editor
+    shots "$ft" "$TRAIN" "$F/offpath/${t}_$TAG" --every "$EVERY_OFF" --move $MOVE --editor
+  done
+fi
+
+# ---- 4. other display scales (high-DPI / large window), emulated with the matched renderer (52 dB agreement at the
+# fitted scale): EMUL_SCALES ("3"), EMUL ("name=<ply> ..."), scored black + grey on the held-out frames
+if has emul; then
+  for r in ${EMUL_SCALES:-3}; do
+    for spec in ${EMUL:-}; do
+      n="${spec%%=*}"; ply="${spec#*=}"; od="$F/emul_r$r/$n"; [ -f "$ply" ] || { echo "no $ply"; continue; }
+      [ -d "$od/grey" ] || "$SPY" scripts/finetune_ply_viewer.py render --ply "$ply" --dataset "$TEST" --out-dir "$od" \
+        --viewer ss352 --viewer-cam --display-scale "$r" --bg black grey
+      mkdir -p "$REP/emul_r$r/grey"
+      "$GPY" scripts/eval_views.py --pred-dir "$od/black" --dataset "$TEST" --tag "$n" --json-out "$REP/emul_r$r/$n.json" | tail -1
+      "$GPY" scripts/eval_views.py --pred-dir "$od/grey" --dataset "$TEST" --tag "$n" --json-out "$REP/emul_r$r/grey/$n.json" | tail -1
+    done
   done
 fi
 
@@ -164,7 +196,7 @@ fi
 "$CPUPY" - "$F" "$REP" "$TEST/images" "$TAG" "$BLK" <<'PY'
 import json, os, sys, cv2, numpy as np
 F, rep, gt, tag, blk = sys.argv[1:6]; blk = blk.strip("/")
-print(f"{'splat':32s}{'viewer PSNR':>12s}{'SSIM':>8s}{'LPIPS':>8s}{'grey PSNR':>11s}{'alpha holes':>12s}")
+print(f"{'splat':32s}{'viewer PSNR':>12s}{'SSIM':>8s}{'LPIPS':>8s}{'DISTS':>8s}{'grey PSNR':>11s}{'alpha holes':>12s}")
 res = {}
 for f in sorted(os.listdir(rep)):
     if f.endswith(".json") and not f.startswith(("gate", "agreement", "attribution", "summary")):
@@ -174,7 +206,8 @@ for f in sorted(os.listdir(rep)):
         g = os.path.join(rep, "grey", f); r["grey"] = json.load(open(g)) if os.path.exists(g) else None
         v = os.path.join(F, "onpath", r["tag"], "_viewer.json"); r["alpha_hole_frac"] = json.load(open(v)).get("alpha_hole_frac") if os.path.exists(v) else None
         gp = f"{r['grey']['psnr']:11.2f}" if r["grey"] else f"{'-':>11s}"; ah = f"{r['alpha_hole_frac']:12.4f}" if r["alpha_hole_frac"] is not None else f"{'-':>12s}"
-        print(f"{r['tag']:32s}{r['psnr']:12.2f}{r['ssim']:8.4f}{r['lpips']:8.4f}{gp}{ah}")
+        ds = f"{r['dists']:8.4f}" if r.get("dists") is not None else f"{'-':>8s}"
+        print(f"{r['tag']:32s}{r['psnr']:12.2f}{r['ssim']:8.4f}{r['lpips']:8.4f}{ds}{gp}{ah}")
 json.dump(res, open(os.path.join(rep, f"summary_{tag}.json"), "w"), indent=2)
 bases = [t for t in res if not t.endswith("_" + tag) and t + "_" + tag in res]
 def montage(sub, names, with_gt, out):
@@ -192,9 +225,27 @@ def montage(sub, names, with_gt, out):
     if rows:
         w = max(r.shape[1] for r in rows); rows = [np.pad(r, ((0, 0), (0, w - r.shape[1]), (0, 0))) for r in rows]
         cv2.imwrite(out, np.vstack(rows)); print("montage ->", out)
+def crops(names, out, cw=160, ch=120, k=2):
+    """Most textured window of each real image (max gradient energy), k x nearest-upscaled: real | every splat."""
+    rows = []
+    for nm in names:
+        g = cv2.imread(os.path.join(gt, nm)); e = cv2.boxFilter(np.abs(cv2.Laplacian(cv2.cvtColor(g, cv2.COLOR_BGR2GRAY), cv2.CV_32F)), -1, (cw, ch))
+        y, x = np.unravel_index(np.argmax(e[ch // 2:-ch // 2, cw // 2:-cw // 2]), e[ch // 2:-ch // 2, cw // 2:-cw // 2].shape)
+        ims, labs = [g], ["real"]
+        for t in sorted(res):
+            p = os.path.join(F, "onpath", t, blk, nm)
+            if os.path.exists(p) and any(t == b or t.startswith(b + "_viewerft") for b in bases) and "pc274" not in t:
+                ims.append(cv2.imread(p)); labs.append(t)
+        ims = [cv2.resize(im[y:y + ch, x:x + cw], (cw * k, ch * k), interpolation=cv2.INTER_NEAREST) for im in ims]
+        for im, l in zip(ims, labs): cv2.putText(im, l, (4, 16), 0, 0.45, (0, 0, 255), 1)
+        rows.append(np.hstack(ims))
+    if rows:
+        w = max(r.shape[1] for r in rows); rows = [np.pad(r, ((0, 0), (0, w - r.shape[1]), (0, 0))) for r in rows]
+        cv2.imwrite(out, np.vstack(rows)); print("crops ->", out)
 if bases:
     d = os.path.join(F, "onpath", bases[0], blk); on = sorted(f for f in os.listdir(d) if f.endswith(".png"))
     montage("onpath", on[::11][:5], True, os.path.join(F, f"onpath_montage_{tag}.jpg"))
+    crops(on[3::13][:4], os.path.join(F, f"onpath_crops_{tag}.jpg"))
     d = os.path.join(F, "offpath", bases[0], blk)
     if os.path.isdir(d):
         off = sorted(f for f in os.listdir(d) if f.endswith(".png"))
