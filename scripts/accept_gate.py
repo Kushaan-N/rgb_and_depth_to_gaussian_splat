@@ -22,20 +22,33 @@ def main():
     ap.add_argument("--psnr-tol", type=float, default=0.05)
     ap.add_argument("--ssim-tol", type=float, default=0.002)
     ap.add_argument("--lpips-tol", type=float, default=0.002)
+    ap.add_argument("--perceptual", action="store_true",
+                    help="perceptual trade-off: allow a PSNR drop up to --perceptual-psnr-tol on a set when LPIPS improves "
+                         "by >= --perceptual-lpips-gain there (and DISTS, if both jsons carry it, does not get worse)")
+    ap.add_argument("--perceptual-psnr-tol", type=float, default=0.3)
+    ap.add_argument("--perceptual-ssim-tol", type=float, default=0.005)
+    ap.add_argument("--perceptual-lpips-gain", type=float, default=0.005)
     args = ap.parse_args()
     fails, table = [], []
     for name, bj, cj in args.pair:
         b, c = json.load(open(bj)), json.load(open(cj))
-        for k in ("psnr", "psnr_observed", "psnr_unobserved", "ssim", "lpips"):
+        # an invisible pixel-accuracy loss is acceptable for a clear perceptual gain (user rule, 2026-10-12)
+        sharper = (args.perceptual and b.get("lpips") is not None and c.get("lpips") is not None
+                   and b["lpips"] - c["lpips"] >= args.perceptual_lpips_gain
+                   and (b.get("dists") is None or c.get("dists") is None or c["dists"] <= b["dists"]))
+        ptol = args.perceptual_psnr_tol if sharper else args.psnr_tol
+        stol = args.perceptual_ssim_tol if sharper else args.ssim_tol
+        for k in ("psnr", "psnr_observed", "psnr_unobserved", "ssim", "lpips", "dists"):
             if k not in b or k not in c or b[k] is None or c[k] is None:
                 continue
             delta = c[k] - b[k]
-            worse = (delta > args.lpips_tol) if k == "lpips" else (-delta > (args.ssim_tol if k == "ssim" else args.psnr_tol))
+            worse = (delta > args.lpips_tol) if k in ("lpips", "dists") else (-delta > (stol if k == "ssim" else ptol))
             table.append({"set": name, "metric": k, "baseline": b[k], "candidate": c[k], "delta": round(delta, 4), "worse": worse})
             if worse:
                 fails.append(f"{name}: {k} {b[k]} -> {c[k]}")
-    decision = {"accept": not fails, "failures": fails, "checks": table,
-                "tolerances": {"psnr_db": args.psnr_tol, "ssim": args.ssim_tol, "lpips": args.lpips_tol}}
+    decision = {"accept": not fails, "failures": fails, "checks": table, "perceptual_mode": args.perceptual,
+                "tolerances": {"psnr_db": args.psnr_tol, "ssim": args.ssim_tol, "lpips": args.lpips_tol,
+                               "perceptual_psnr_db": args.perceptual_psnr_tol, "perceptual_ssim": args.perceptual_ssim_tol}}
     json.dump(decision, open(args.out, "w"), indent=2)
     for r in table:
         print(f"[gate] {r['set']:12s} {r['metric']:16s} {r['baseline']:9.4f} -> {r['candidate']:9.4f}  {'WORSE' if r['worse'] else 'ok'}")
