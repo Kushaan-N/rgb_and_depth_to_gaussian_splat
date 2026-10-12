@@ -37,8 +37,8 @@ def main():
     ap.add_argument("--splat-depth-dir", default=None, help="<image>_splatdepth.npy per training frame")
     ap.add_argument("--out-ply", required=True)
     ap.add_argument("--cell", type=float, default=0.02, help="fill spacing (m)")
-    ap.add_argument("--covered-m", type=float, default=0.04, help="splat gaussian this close = surface present")
-    ap.add_argument("--min-opacity", type=float, default=0.3)
+    ap.add_argument("--covered-m", type=float, default=0.12, help="splat gaussian this close = surface present (the splat's surface sits a few cm off the LiDAR)")
+    ap.add_argument("--min-opacity", type=float, default=0.1)
     ap.add_argument("--k", type=int, default=24)
     ap.add_argument("--tol-rel", type=float, default=0.05, help="behind the splat surface by more = hidden")
     ap.add_argument("--min-hidden-m", type=float, default=0.15,
