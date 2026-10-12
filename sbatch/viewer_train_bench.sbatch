@@ -15,7 +15,7 @@
 #   default (gsplat DefaultStrategy, AbsGS) | base (no training: the baseline PLY);
 #   flags: ss352 (default) / pc274 (viewer profile + kernel build: SuperSplat 3.5.2 / PlayCanvas 2.7.4), aa
 #   (antialiased mode, PLY tagged `comment SplatRenderMode mip`), ss<k> (render k x, area-downsample, loss at 1x),
-#   mp<x> (3D scale floor x px), zero / pcbug / std (SH band-2 handling), d (LiDAR depth loss, LAMBDA), noeas, nomu.
+#   mp<x> (3D scale floor x px), e<x> (dilation x px^2 instead of the profile's), zero / pcbug / std (SH band-2 handling), d (LiDAR depth loss, LAMBDA), noeas, nomu.
 # Outputs under $VT (default $P/viewer_train): <arm>/{splat.ply,train.json,train.log,renders_trainer/},
 #   shots/{onpath,offpath}/<arm>/, report/<arm>_<bg>.json (viewer metric), report/gate_<arm>.json,
 #   report/summary.{json,md}, montage_{onpath,offpath}.jpg.
@@ -63,6 +63,7 @@ arm_args() {  # <arm> -> A (train_viewer_gsplat.py flags), PROF (kernel build)
     case "$t" in
       pc274|ss352) PROF="$t" ;;  aa) A+=(--aa) ;;  zero|pcbug|std) A+=(--sh-band2 "$t") ;;
       ss[0-9]*) A+=(--ss "${t#ss}") ;;      mp*) A+=(--min-px "${t#mp}") ;;
+      e[0-9]*) A+=(--eps2d "${t#e}") ;;     # screen dilation override (px^2)
       d) A+=(--depth-lambda "$LAMBDA") ;;   noeas) A+=(--no-eas) ;;  nomu) A+=(--no-mu) ;;
       *) echo "unknown arm flag $t in $1"; return 1 ;;
     esac
