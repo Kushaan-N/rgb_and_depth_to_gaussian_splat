@@ -1,4 +1,4 @@
-# rgb_and_depth_to_gaussian_splat
+# scan2sim
 
 Reconstruct a **drivable, physics-enabled Isaac Sim scene** from one CEAR quadruped
 sequence using only **RGB + depth + poses + IMU** (no LiDAR — project constraint), then
