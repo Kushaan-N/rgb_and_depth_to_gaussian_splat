@@ -1,0 +1,16 @@
+# Fused: the two well-lit recordings of mocap2 (trot and comb robots) as ONE splat. Unlike mocap1-3, their
+# object layout is unchanged (object LiDAR points agree to a 1.7 cm median), so the second robot's path
+# (different camera height and route) adds real views of the same scene. Members share the OptiTrack frame;
+# ICP is kept only if it helps; each member's held-out frames (every 8th) are excluded and scored.
+#   bash scripts/run_pipeline.sh fused_mocap2_well-lit
+base: datasets/cear.yaml
+sequence:
+  name: fused_mocap2_well-lit
+fuse:
+  members: [mocap2_well-lit_trot, mocap2_well-lit_comb]
+  align: icp               # icp | none  (ICP refines the shared frame; fails loudly beyond the limits)
+  min_icp_gain: 0.1        # keep ICP only if it cuts the cloud NN median by >= 10%
+  max_align_m: 0.3
+  max_align_deg: 5.0
+  max_cross_epipolar_px: 1.5   # refuse to train if recordings disagree (within-recording is ~0.3 px)
+  holdout_interval: 8      # each member's held-out frames = the trainer's usual every-8th split
