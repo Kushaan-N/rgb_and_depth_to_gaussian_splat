@@ -68,7 +68,7 @@ def save_ply(path, vertex, params):
     """Write params into a copy of the input vertex array (same properties, order, dtypes, header comments)."""
     from plyfile import PlyData, PlyElement
     p = {k: v.detach().float().cpu().numpy() for k, v in params.items()}
-    a = vertex.data.copy(); n = len(a)
+    a = (vertex if isinstance(vertex, np.ndarray) else vertex.data).copy(); n = len(a)    # PlyElement or structured array
     for i, c in enumerate("xyz"):
         a[c] = p["means"][:, i]
     for i in range(3):
@@ -143,43 +143,61 @@ def quantise_pc274(p):
 class ViewerRaster:
     """Differentiable copy of a viewer's splat renderer (see module docstring)."""
 
-    def __init__(self, viewer="pc274", raster="exact", quant=False, tile=16):
+    def __init__(self, viewer="pc274", raster="exact", quant=False, tile=16, cull=True, cutoff=True, a255=True,
+                 shbug=None, dil=None):
+        """Ablation knobs (gap attribution): cull = minimum-size cull, cutoff = d^2 <= 8 kernel cut, a255 = 1/255
+        discard (pc274), shbug = 2.7.4's SH band-2 typo (default: on for pc274), dil = dilation in px^2."""
         assert viewer in ("pc274", "ss352") and raster in ("exact", "cuda")
         if viewer == "ss352" and raster == "cuda":
             raise SystemExit("ss352's normalised kernel needs --raster exact")
         self.viewer, self.raster, self.quant, self.tile = viewer, raster, quant, tile
+        self.cull, self.cutoff, self.a255 = cull, cutoff, a255
+        self.shbug = (viewer == "pc274") if shbug is None else shbug
+        self.dil = (0.075 if viewer == "pc274" else 0.3) if dil is None else dil
         self.last = {}
 
-    def project(self, p, w2c, fx, fy, cx, cy, W, H):
-        """-> means2d (N,2), conics (N,3), opacity (N,), depth z (N,), radii int (N,2), keep mask."""
+    @staticmethod
+    def cov2d(p, w2c, fx, fy, zmin=1e-4, zclamp=1e-4):
+        """EWA pixel covariance without dilation (no Jacobian clamping, as the viewers) -> u-v centre offsets (x/z, y/z),
+        z, (a, b, c) of Sigma2D."""
         import torch
-        R, t = w2c[:3, :3], w2c[:3, 3]
-        pc = p["means"] @ R.T + t
-        z = pc[:, 2]
-        zmin = 1e-4 if self.viewer == "pc274" else 1e-6
-        valid = z > zmin
-        zs = z.clamp_min(1e-3 if self.viewer == "ss352" else zmin)
-        u = fx * pc[:, 0] / zs + cx; v = fy * pc[:, 1] / zs + cy
-        # 3D covariance in camera frame, then EWA (no Jacobian clamping, as the viewers)
-        M = R @ quat_to_rot(p["quats"]) * torch.exp(p["scales"])[:, None, :]
+        # float64: near-plane / huge splats overflow float32 (a*c > 3e38) and their inf local Jacobians turn the
+        # zero upstream gradient of culled splats into NaN
+        R, t = w2c[:3, :3].double(), w2c[:3, 3].double()
+        pc = p["means"].double() @ R.T + t
+        z = pc[:, 2]; zs = z.clamp_min(zclamp)
+        M = R @ quat_to_rot(p["quats"].double()) * torch.exp(p["scales"].double().clamp_max(20))[:, None, :]
         S = M @ M.transpose(1, 2)
         zero = torch.zeros_like(zs)
         J = torch.stack([torch.stack([fx / zs, zero, -fx * pc[:, 0] / zs ** 2], -1),
                          torch.stack([zero, fy / zs, -fy * pc[:, 1] / zs ** 2], -1)], 1)          # (N,2,3)
         cov = J @ S @ J.transpose(1, 2)
-        dil = 0.075 if self.viewer == "pc274" else 0.3
-        a, b, c = cov[:, 0, 0] + dil, cov[:, 0, 1], cov[:, 1, 1] + dil
+        return pc[:, 0] / zs, pc[:, 1] / zs, z, (cov[:, 0, 0], cov[:, 0, 1], cov[:, 1, 1])
+
+    def min_lambda(self):
+        """Dilated max eigenvalue (px^2) below which the viewer drops a splat."""
+        return 0.125 if self.viewer == "pc274" else 0.5
+
+    def project(self, p, w2c, fx, fy, cx, cy, W, H):
+        """-> means2d (N,2), conics (N,3), opacity (N,), depth z (N,), radii int (N,2), keep mask."""
+        import torch
+        zmin = 1e-4 if self.viewer == "pc274" else 1e-6
+        xz, yz, z, (a, b, c) = self.cov2d(p, w2c, fx, fy, zclamp=1e-3 if self.viewer == "ss352" else zmin)
+        valid = z > zmin
+        u = fx * xz + cx; v = fy * yz + cy
+        dil = self.dil
+        a, c = a + dil, c + dil
         mid = 0.5 * (a + c); rad = torch.sqrt((0.5 * (a - c)) ** 2 + b * b + 1e-20)
         l1 = mid + rad
         op = torch.sigmoid(p["opacities"])
         if self.viewer == "pc274":
-            keep = valid & (l1 >= 0.125)                         # l1 < 2 && l2 < 2 in the engine's doubled units
+            keep = valid & ((l1 >= 0.125) | (not self.cull))    # l1 < 2 && l2 < 2 in the engine's doubled units
             cap = 1024.0 ** 2 / 8                                # half-extent cap 1024 px -> eigenvalue cap
             l2 = (mid - rad).clamp_min(0.025)
             l1c, l2c = l1.clamp_max(cap), l2.clamp_max(cap)
             big = (l1 > cap) | (l2 > cap)
         else:
-            keep = valid & (l1 >= 0.5) & (a * c - b * b > 0)    # 2 sqrt(2 l1) < minPixelSize (2)
+            keep = valid & ((l1 >= 0.5) | (not self.cull)) & (a * c - b * b > 0)    # 2 sqrt(2 l1) < minPixelSize (2)
             s2 = (min(1024.0, W, H) ** 2 / (8 * l1)).clamp_max(1.0)  # radius cap scales both axes
             l2 = (mid - rad).clamp_min(0.1)
             l1c, l2c = l1 * s2, l2 * s2
@@ -193,10 +211,12 @@ class ViewerRaster:
         ra = l1c * e[:, 0] ** 2 + l2c * e[:, 1] ** 2; rb = (l1c - l2c) * e[:, 0] * e[:, 1]; rc = l1c * e[:, 1] ** 2 + l2c * e[:, 0] ** 2
         a, b, c = torch.where(big, ra, a), torch.where(big, rb, b), torch.where(big, rc, c)
         det = (a * c - b * b).clamp_min(1e-12)
-        conics = torch.stack([c / det, -b / det, a / det], -1)
+        conics = torch.stack([c / det, -b / det, a / det], -1).float()
+        a, c, z = a.float().clamp_max(1e12), c.float().clamp_max(1e12), z.float()
         # bounding box of the d^2 <= 8 ellipse
-        rx = torch.ceil(torch.sqrt(8 * a.detach())); ry = torch.ceil(torch.sqrt(8 * c.detach()))
-        md = torch.stack([u, v], -1)
+        ext = 8.0 if self.cutoff else 2 * math.log(255.0)               # no cut-off: the 1/255 tail of an opaque splat
+        rx = torch.ceil(torch.sqrt(ext * a.detach())); ry = torch.ceil(torch.sqrt(ext * c.detach()))
+        md = torch.stack([u, v], -1).float()
         inside = (md[:, 0].detach() + rx > 0) & (md[:, 0].detach() - rx < W) & (md[:, 1].detach() + ry > 0) & (md[:, 1].detach() - ry < H)
         keep = keep & inside & torch.isfinite(conics).all(-1) & torch.isfinite(md).all(-1)
         radii = torch.stack([rx, ry], -1).clamp(0, 1e6).int() * keep[:, None].int()
@@ -211,7 +231,7 @@ class ViewerRaster:
         md, conics, op, z, radii, keep = self.project(p, w2c, fx, fy, cx, cy, W, H)
         campos = -w2c[:3, :3].T @ w2c[:3, 3]
         dirs = p["means"] - campos; dirs = dirs / dirs.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-        col = eval_sh(p["sh0"], p["shN"], dirs, sh_degree, self.viewer == "pc274")
+        col = eval_sh(p["sh0"], p["shN"], dirs, sh_degree, self.shbug)
         if self.quant:
             col = half(col)
         feats = torch.cat([col, z[:, None]], 1) if depth else col
@@ -248,7 +268,7 @@ class ViewerRaster:
         s2 = cq[:, 0] * d[:, 0] ** 2 + 2 * cq[:, 1] * d[:, 0] * d[:, 1] + cq[:, 2] * d[:, 1] ** 2     # Mahalanobis^2
         if self.viewer == "pc274":
             al = op[gid] * torch.exp(-0.5 * s2)
-            ok = (s2 <= 8) & (al >= 1 / 255)
+            ok = ((s2 <= 8) | (not self.cutoff)) & ((al >= 1 / 255) | (not self.a255))
         else:
             al = op[gid] * (torch.exp(-0.5 * s2) - E4) / (1 - E4)
             ok = (s2 <= 8) & (al > 0)
@@ -348,8 +368,10 @@ def compare(args):
                                               eps2d=eps, rasterize_mode="classic")
                     img = out[0].clamp(0, 1)
                 else:                                           # <viewer>_<raster>[_q]
-                    parts = var.split("_")
-                    r = ViewerRaster(parts[0], parts[1], quant="q" in parts[2:])
+                    parts = var.split("_"); fl = parts[2:]
+                    dd = [float(x[1:]) for x in fl if x.startswith("d") and x[1:2].isdigit()]
+                    r = ViewerRaster(parts[0], parts[1], quant="q" in fl, cull="nocull" not in fl, cutoff="nocut" not in fl,
+                                     a255="no255" not in fl, shbug=False if "nobug" in fl else None, dil=dd[0] if dd else None)
                     img = r.render(p, w2c, *cam_args(cam, "truecam" not in parts), sh_degree=deg)[0]
             torch.cuda.synchronize(); res[var]["ms"].append((time.time() - t1) * 1000)
             img = u8(img)
@@ -446,10 +468,13 @@ def finetune(args):
     for step in range(1, args.iters + 1):
         if not order:
             order = list(np.random.permutation(len(tr)))
-        k = int(order.pop()); name, cam, c2w = tr[k]
+        k = 0 if args.overfit_one else int(order.pop()); name, cam, c2w = tr[k]
         fx, fy, cx, cy, W, H = cam_args(cam)
         frac = step / args.iters
-        gm["lr"] = lr["means"] * decay ** frac        # log-linear decay (3DGS position schedule)
+        wu = min(1.0, step / args.warmup) if args.warmup > 0 else 1.0     # Adam's first steps are full-size: ramp in
+        for g in opt.param_groups:
+            g["lr"] = lr[g["name"]] * wu
+        gm["lr"] = lr["means"] * decay ** frac * wu    # log-linear decay (3DGS position schedule)
         img, alpha, d = raster.render(params, to_t(np.linalg.inv(c2w), dev), fx, fy, cx, cy, W, H, sh_degree=deg,
                                       depth=dep[k] is not None)
         gt = rgb[k].float() / 255
@@ -470,8 +495,16 @@ def finetune(args):
             loss = loss + args.anchor * ((params["means"] - p0["means"]) ** 2).sum(-1).mean() / scene_scale ** 2
         opt.zero_grad(set_to_none=True)
         loss.backward()
+        nbad = 0
+        for prm in params.values():
+            if prm.grad is not None:
+                bad = ~torch.isfinite(prm.grad); nb = int(bad.sum())
+                if nb:
+                    nbad += nb; prm.grad[bad] = 0
         opt.step()
-        if step % 500 == 0 or step == 1:
+        if nbad:
+            print(f"[ftv] WARNING step {step}: {nbad} non-finite gradient entries zeroed", flush=True)
+        if step % args.log_every == 0 or step == 1:
             print(f"[ftv] step {step:6d} loss {loss.item():.4f} psnr {psnr(img.detach(), gt):.2f} depth {ld.item():.4f} "
                   f"vis {raster.last.get('n_visible')} pairs {raster.last.get('n_pairs')} "
                   f"mem {torch.cuda.max_memory_allocated() / 2**30:.1f}G ({time.time() - t0:.0f}s)", flush=True)
@@ -497,7 +530,8 @@ def main():
     c = sub.add_parser("compare")
     c.add_argument("--ply", required=True); c.add_argument("--dataset", required=True)
     c.add_argument("--viewer-dir", required=True, help="viewer_shots.py renders of --ply at --dataset's cameras")
-    c.add_argument("--variants", default="gsplat_0.3,gsplat_0.075,pc274_cuda,pc274_exact,pc274_exact_q,ss352_exact")
+    c.add_argument("--variants", default="gsplat_0.3,gsplat_0.075,pc274_cuda,pc274_exact,pc274_exact_q,ss352_exact",
+                   help="gsplat_<eps2d> | <pc274|ss352>_<exact|cuda>[_q][_nocull][_nocut][_no255][_nobug][_d<dilation>][_truecam]")
     c.add_argument("--every", type=int, default=1); c.add_argument("--offset", type=int, default=0)
     c.add_argument("--save-dir", default=None); c.add_argument("--save-n", type=int, default=3)
     c.add_argument("--json-out", default=None)
@@ -525,6 +559,9 @@ def main():
     f.add_argument("--eval-every-frame", type=int, default=2)
     f.add_argument("--eval-interval", type=int, default=2000)
     f.add_argument("--seed", type=int, default=0)
+    f.add_argument("--log-every", type=int, default=500)
+    f.add_argument("--warmup", type=int, default=300, help="linear LR warm-up steps")
+    f.add_argument("--overfit-one", action="store_true", help="debug: train on the first training frame only")
     args = ap.parse_args()
     {"compare": compare, "render": render, "finetune": finetune}[args.cmd](args)
 
