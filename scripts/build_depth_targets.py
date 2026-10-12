@@ -10,8 +10,9 @@ spacing at that distance, and each pixel keeps the NEAREST point. Then a pixel i
 The target is the ray distance along the unit pixel-centre ray, exactly as 3DGRUT renders it
 (pred_dist), so no z-to-range conversion is needed downstream. Per-pixel depth (--reduce): the nearest
 splat only decides occlusion; the value is the centre-weighted mean inverse depth of the splats on that
-front surface ("surface", default). The original "min" rule (nearest splat in the window) is biased
-towards the camera on slanted surfaces: ~2% on CEAR, where EDGS triangulation sat +2.3% behind it.
+front surface (--reduce surface, opt-in) — or the nearest splat in the window ("min", default, the original
+rule). "min" is biased towards the camera on slanted surfaces: on CEAR it accounts for ~half of the +2.3%
+EDGS-vs-LiDAR gap (+1.2% -> +0.6%, scripts/depth_reliability.py --edgs-points); synthetic floor -1.45% -> 0.0%.
 
 Writes <images>/<stem>_depth.npy (float16, dataset units, 0 = no target) next to each image — the
 patched 3DGRUT loads it (patches/3dgrut-depth-loss.patch) — plus <dataset>/depth_targets.json.
@@ -46,7 +47,7 @@ def quat_to_R(q):
                      [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]])
 
 
-def zbuffer_target(X, Rcw, tcw, W, H, K, vox, rmax, edge_rel=0.05, min_support=5, reduce="surface", attr=None, surface_rel=0.02):
+def zbuffer_target(X, Rcw, tcw, W, H, K, vox, rmax, edge_rel=0.05, min_support=5, reduce="min", attr=None, surface_rel=0.02):
     """One camera: z-buffer the cloud X (N,3 torch float64, dataset units) -> (ray distance HxW, 0 = no target;
     per-pixel mean of `attr` (N,) over the front-surface points, or None). reduce="min": every pixel of a point's
     square splat takes the NEAREST point (the original rule; on slanted surfaces such as the floor seen at a grazing
@@ -128,7 +129,7 @@ def main():
     ap.add_argument("--edge-rel", type=float, default=0.05)
     ap.add_argument("--min-support", type=int, default=5, help="valid neighbours required in a 3x3 window")
     ap.add_argument("--max-range-m", type=float, default=12.0)
-    ap.add_argument("--reduce", choices=("surface", "min"), default="surface",
+    ap.add_argument("--reduce", choices=("surface", "min"), default="min",
                     help="per-pixel depth: front-surface weighted mean (unbiased) or nearest splat (original, near-biased)")
     args = ap.parse_args()
     import torch
