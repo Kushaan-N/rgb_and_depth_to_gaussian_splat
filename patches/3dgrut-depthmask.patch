@@ -1,8 +1,8 @@
 diff --git a/configs/base_gs.yaml b/configs/base_gs.yaml
-index 56b4957..37404c3 100644
+index 56b4957..e8ac551 100644
 --- a/configs/base_gs.yaml
 +++ b/configs/base_gs.yaml
-@@ -187,6 +187,11 @@ loss:
+@@ -187,6 +187,14 @@ loss:
    lambda_depth: 0.05
    lambda_depth_opacity: 0.0    # push accumulated opacity to 1 where depth was measured
    depth_trim: 0.95             # drop the worst 5% of per-pixel depth errors (edges, misalignment)
@@ -11,6 +11,9 @@ index 56b4957..37404c3 100644
 +  lambda_normal: 0.05
 +  normal_start_iteration: 0
 +  normal_edge_rel: 0.05        # skip pixels whose target depth jumps by more than this to a neighbour
++  use_footprint: false         # penalise gaussians whose largest axis spans > footprint_max_px (1 sigma) in the view
++  lambda_footprint: 0.1
++  footprint_max_px: 10.0
  
  # Post-processing configuration
  post_processing:
@@ -83,7 +86,7 @@ index c3ebe3c..08bec9a 100644
      intrinsics_OpenCVPinholeCameraModelParameters: Optional[dict] = None
      intrinsics_OpenCVFisheyeCameraModelParameters: Optional[dict] = None
 diff --git a/threedgrut/trainer.py b/threedgrut/trainer.py
-index c2ffaa5..a8fddeb 100644
+index c2ffaa5..0811a3c 100644
 --- a/threedgrut/trainer.py
 +++ b/threedgrut/trainer.py
 @@ -50,6 +50,15 @@ from threedgrut.utils.render import (
@@ -117,7 +120,7 @@ index c2ffaa5..a8fddeb 100644
                  if valid.any():
                      opac = outputs["pred_opacity"]
                      d_pred = outputs["pred_dist"] / opac.clamp_min(1e-3)
-@@ -763,10 +776,26 @@ class Trainer3DGRUT:
+@@ -763,10 +776,45 @@ class Trainer3DGRUT:
                              torch.nn.functional.binary_cross_entropy(opac[valid].clamp(1e-4, 1 - 1e-4),
                                                                       torch.ones_like(opac[valid]))
                      lambda_depth = self.conf.loss.lambda_depth
@@ -137,19 +140,39 @@ index c2ffaa5..a8fddeb 100644
 +                        if ok.sum() > 100:
 +                            loss_normal = (1 - (n_pr * n_gt).sum(-1))[ok].mean()
 +                            lambda_normal = self.conf.loss.get("lambda_normal", 0.05)
++
++        # Screen-footprint cap: large gaussians (e.g. flat floor disks seen at grazing angles) are rendered by 3DGUT's
++        # ray-based kernel very differently from a rasterizer's affine projection (SuperSplat), so keep every visible
++        # gaussian's largest 1-sigma axis below footprint_max_px pixels at the current camera.
++        loss_fp = torch.zeros(1, device=self.device)
++        lambda_fp = 0.0
++        if self.conf.loss.get("use_footprint", False) and "mog_visibility" in outputs:
++            with torch.cuda.nvtx.range("loss-footprint"):
++                vis = outputs["mog_visibility"].reshape(-1) > 0
++                if vis.any():
++                    T = gpu_batch.T_to_world[0]
++                    rd = gpu_batch.rays_dir.reshape(-1, *gpu_batch.rays_dir.shape[-3:])[0]
++                    h, w = rd.shape[0] // 2, rd.shape[1] // 2
++                    focal = 1.0 / (rd[h, w + 1] - rd[h, w]).norm().clamp_min(1e-9)          # px per radian
++                    dist = (self.model.get_positions()[vis] - T[:3, 3]).norm(dim=-1).clamp_min(1e-3)
++                    px = self.model.get_scale()[vis].max(dim=-1).values * focal / dist
++                    p0 = self.conf.loss.get("footprint_max_px", 10.0)
++                    loss_fp = torch.relu(px - p0).mean() / p0
++                    lambda_fp = self.conf.loss.get("lambda_footprint", 0.1)
  
          # Total loss
          loss = lambda_l1 * loss_l1 + lambda_ssim * loss_ssim + lambda_opacity * loss_opacity + lambda_scale * loss_scale \
 -            + lambda_depth * loss_depth
-+            + lambda_depth * loss_depth + lambda_normal * loss_normal
++            + lambda_depth * loss_depth + lambda_normal * loss_normal + lambda_fp * loss_fp
          return dict(
              total_loss=loss,
              l1_loss=lambda_l1 * loss_l1,
-@@ -775,6 +804,7 @@ class Trainer3DGRUT:
+@@ -775,6 +823,8 @@ class Trainer3DGRUT:
              opacity_loss=lambda_opacity * loss_opacity,
              scale_loss=lambda_scale * loss_scale,
              depth_loss=lambda_depth * loss_depth,
 +            normal_loss=lambda_normal * loss_normal,
++            footprint_loss=lambda_fp * loss_fp,
          )
  
      @torch.cuda.nvtx.range("log_validation_iter")
