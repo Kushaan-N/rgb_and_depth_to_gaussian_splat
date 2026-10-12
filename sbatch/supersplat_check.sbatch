@@ -5,7 +5,8 @@
 # moved off the path (MOVE), and (3) as a screenshot of the SuperSplat editor's default view. Candidates are
 # compared in the viewer reference's axes (pipeline.export_frame_model) next to the reference itself.
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o <log> sbatch/supersplat_check.sbatch configs/<seq>.yaml
-# Env: SMOKE=1 (reference only, 4 views), MOVE ("0 -0.3 1.0"), EVERY_OFF (40), EXTRA (more candidates).
+# Env: SMOKE=1 (reference only, 4 views), MOVE ("0 -0.3 1.0"), EVERY_OFF (40), EXTRA (more candidates),
+#      ENGINE (current = the live SuperSplat editor on WebGPU, default | pc274 = old PlayCanvas 2.7.4 page)
 #SBATCH -J supersplat-check
 #SBATCH -p gpu
 #SBATCH --gres=gpu:a100:1
@@ -20,7 +21,7 @@ cd "$REPO"; source env/cear_env.sh >/dev/null
 CPUPY="$CEAR_VENV/bin/python"; GPY="$THREEDGRUT_DIR/.venv/bin/python"; VPY="${VIEWER_VENV:-$CEAR_WS/venv-viewer}/bin/python"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$CEAR_WS/playwright-browsers}"
 get() { "$CPUPY" scripts/cfg_get.py "$CFG" "$@"; }
-OUT="$(get paths.out_root)"; P="$OUT/pipeline"; VB="$P/viewer_bench"; S="$P/supersplat_check"; REP="$S/report"
+OUT="$(get paths.out_root)"; P="$OUT/pipeline"; VB="$P/viewer_bench"; S="$P/supersplat_check_${ENGINE:-current}"; REP="$S/report"
 REF_PLY="$(get pipeline.viewer_reference_ply)"; REF_DS="$(get pipeline.viewer_reference_dataset)"
 FRAME="$(get pipeline.export_frame_model)"; MOVE="${MOVE:-0 -0.3 1.0}"; EVERY_OFF="${EVERY_OFF:-40}"
 hostname; date; mkdir -p "$REP"; nvidia-smi --query-gpu=name --format=csv,noheader || true
@@ -35,14 +36,14 @@ if [ ! -f "$RT/sparse/0/images.txt" ]; then
 fi
 
 if [ "${SMOKE:-0}" = 1 ]; then
-  "$VPY" scripts/viewer_shots.py --ply "$REF_PLY" --dataset "$RT" --names-from "$P/onpath/test" --every 13 \
+  "$VPY" scripts/viewer_shots.py --engine "${ENGINE:-current}" --ply "$REF_PLY" --dataset "$RT" --names-from "$P/onpath/test" --every 13 \
     --out-dir "$S/smoke" --editor
   echo SUPERSPLAT_SMOKE_DONE; exit 0
 fi
 
 # held-out models (viewer_bench.sbatch exported them, pipeline frame) and the reference
 CANDS="reference"
-"$VPY" scripts/viewer_shots.py --ply "$REF_PLY" --dataset "$RT" --names-from "$P/onpath/test" --out-dir "$S/onpath/reference" --editor
+"$VPY" scripts/viewer_shots.py --engine "${ENGINE:-current}" --ply "$REF_PLY" --dataset "$RT" --names-from "$P/onpath/test" --out-dir "$S/onpath/reference" --editor
 # EXTRA="name=<ckpt_last.pt or .ply glob> ...": more held-out-trained candidates (exported here if a checkpoint)
 for spec in ${EXTRA:-}; do
   n="${spec%%=*}"; src="$(ls -t ${spec#*=} 2>/dev/null | head -1 || true)"; [ -n "$src" ] || { echo "no $spec"; continue; }
@@ -54,7 +55,7 @@ for spec in ${EXTRA:-}; do
 done
 for n in lidar_init lidar_init_depth igs igs_depth ${EXTRA:+$(for spec in $EXTRA; do printf '%s ' "${spec%%=*}"; done)}; do
   [ -f "$VB/$n.ply" ] || continue
-  "$VPY" scripts/viewer_shots.py --ply "$VB/$n.ply" --dataset "$P/onpath/test" --out-dir "$S/onpath/$n"
+  "$VPY" scripts/viewer_shots.py --engine "${ENGINE:-current}" --ply "$VB/$n.ply" --dataset "$P/onpath/test" --out-dir "$S/onpath/$n"
   [ -f "$VB/${n}_refaxes.ply" ] || "$CPUPY" scripts/sim3_align_splat.py --colmap-model "$P/dataset/sparse/0" \
     --gt-model "$FRAME" --in-ply "$VB/$n.ply" --out-ply "$VB/${n}_refaxes.ply"
   CANDS="$CANDS $n"
@@ -63,7 +64,7 @@ for n in $CANDS; do
   # same real images for every candidate (the reference's held-out renders carry the same names)
   "$GPY" scripts/eval_views.py --pred-dir "$S/onpath/$n" --dataset "$P/onpath/test" --tag "$n" --json-out "$REP/$n.json" | tail -1
   ply="$VB/${n}_refaxes.ply"; [ "$n" = reference ] && ply="$REF_PLY"
-  "$VPY" scripts/viewer_shots.py --ply "$ply" --dataset "$RT" --every "$EVERY_OFF" --move $MOVE --out-dir "$S/offpath/$n" \
+  "$VPY" scripts/viewer_shots.py --engine "${ENGINE:-current}" --ply "$ply" --dataset "$RT" --every "$EVERY_OFF" --move $MOVE --out-dir "$S/offpath/$n" \
     $([ "$n" != reference ] && echo --editor)
 done
 
