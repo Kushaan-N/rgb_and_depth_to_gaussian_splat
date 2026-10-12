@@ -77,7 +77,9 @@ SS_FIND = """() => { const s = window.scene; if (!s || !s.events) return null;
           webgpu: !!s.graphicsDevice.isWebGPU, gpu: String(s.events.invoke('scene.gpu') || ''),
           version: ((document.body.innerText || '').match(/SUPERSPLAT\\s*v[0-9.]+/i) || [''])[0],
           M: sp.length ? Array.from(sp[0].entity.getWorldTransform().data) : null,
-          bands: s.events.invoke('view.bands'), minPixelSize: s.events.invoke('view.minPixelSize')}; }"""
+          bands: s.events.invoke('view.bands'), minPixelSize: s.events.invoke('view.minPixelSize'),
+          targetSize: s.targetSize ? {width: s.targetSize.width, height: s.targetSize.height} : null,
+          devicePixelRatio: window.devicePixelRatio}; }"""
 SS_SETUP = """() => { const s = window.scene; s.events.fire('view.setStochastic', 'disabled'); return s.events.invoke('view.stochastic'); }"""
 SS_SHOT = """async ([p, q, fov, W, H]) => {
   const s = window.scene, V = s.camera.position.constructor, Q = s.camera.mainCamera.getRotation().constructor;
