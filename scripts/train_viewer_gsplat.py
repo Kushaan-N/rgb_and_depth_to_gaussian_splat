@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
 """Train a 3DGS splat FROM SCRATCH in a rasteriser matched to the viewer that will show it (gsplat venv, GPU).
 
-3DGRUT/3DGUT models score ~3.5 dB lower when the exported PLY is drawn by SuperSplat's engine (PlayCanvas
-2.7.4 gsplat, scripts/viewer_shots.py) than in 3DGUT: unscented vs EWA projection, per-ray vs global sort, no
-kernel cut-off, no minimum-size cull. Here densification and optimisation happen in the viewer's own image
-formation, so the splats allocated are the ones the viewer draws. Rasteriser = gsplat 1.5.3 kernels, run with
-the viewer's conventions (scripts/finetune_ply_viewer.py documents the shader; its pc274 profile was measured
-at ~44.7 dB agreement with the viewer):
-  EWA projection (Jacobian at the centre), screen dilation eps2d px^2 (--viewer pc274: 0.075 = PlayCanvas
-  2.7.4's 0.3 in its 2f units; ss352: 0.3, SuperSplat 3.5.2), per-gaussian view-depth sort (gsplat's per-tile
-  sort by camera z = the viewer's global order), kernel cut at d^2 = 8 / exp(-4) (needs the patched kernels of
-  env/make_gsplat_viewer_venv.sh on PYTHONPATH; warns if stock gsplat is loaded), alpha < 1/255 discarded,
-  splats whose dilated major eigenvalue < 0.125 px^2 (pc274; ss352 0.5) culled, black background, SH degree 3.
-  --sh-band2 zero (default) keeps the two band-2 coefficients that PlayCanvas 2.7.4 multiplies instead of adds
-  (`sh[3]*(C*xy) * +sh[4]*(C*yz)`) at zero, so every viewer (buggy or not) draws the same colour; `pcbug` trains
-  through the bug (only right for 2.7.4), `std` ignores it.
+3DGRUT/3DGUT models score ~3.5 dB lower when the exported PLY is drawn by SuperSplat than in 3DGUT (unscented vs
+EWA projection, per-ray vs global sort, kernel cut-off, size cull). Here densification and optimisation happen in
+the viewer's own image formation, so the splats allocated are the ones the viewer draws. Rasteriser = gsplat 1.5.3
+kernels rebuilt per viewer by env/make_gsplat_viewer_venv.sh (PYTHONPATH=$CEAR_WS/gsplat-viewer-<viewer>; the
+trainer refuses other kernels), with the viewer's conventions (shaders documented in scripts/finetune_ply_viewer.py):
+  ss352 (default; SuperSplat 3.5.2, scripts/viewer_shots.py --engine current): true-pixel dilation 0.3 px^2,
+        normalised kernel (exp(-d^2/2) - e^-4) / (1 - e^-4) zero beyond d^2 = 8, no 1/255 cut, 2 px size cull
+        (dilated major eigenvalue < 0.5 px^2), radius capped at min(1024, canvas) by scaling both axes, 8-bit
+        opacity (straight-through), correct SH
+  pc274 (PlayCanvas 2.7.4, --engine pc274): dilation 0.075 px^2 (0.3 in its 2f units), exp kernel cut at d^2 = 8
+        and alpha 1/255, cull below 0.125 px^2, eigenvalues clamped at 1024^2/8, SH band-2 bug (`sh[3]*(C*xy) *
+        +sh[4]*(C*yz)`): --sh-band2 zero (pc274 default) keeps that pair at 0 so buggy and correct viewers agree
+  both: EWA Jacobian at the true centre (no 1.3x-FOV clamp: the viewers draw off-screen-centred splats near the
+        camera stretched), near plane 1e-4, per-gaussian view-depth sort (gsplat per-tile sort by camera z = the
+        viewers' global order), black background, SH degree 3.
 Options: --aa (gsplat antialiased mode: opacity x sqrt(det/det_dilated); the exported PLY is tagged
 `comment SplatRenderMode mip` -- PlayCanvas 2.7.4 itself never enables GSPLAT_AA, so its renders lack the
 compensation), --ss 2 (SRGS-style sub-pixel constraint: render at 2x with eps2d x 4, 2x2 area-downsample, loss
 at 1x), --min-px (3D scale floor: every axis >= min_px pixels at the closest training camera that sees it,
 std = sqrt(s^2 + floor^2), recomputed after densification, baked into the export, so the viewer's cull never
-removes a trained splat), --depth-lambda (LiDAR ray-distance L1 where <image>_depth.npy exists).
+removes a trained splat), --depth-lambda (LiDAR ray-distance L1 where <image>_depth.npy exists), --bg random
+(default: a random background per step, so the opaque real frames force full coverage; with black, transparent
+holes cost nothing in training and show on a grey viewer background).
 Strategies: improved (Improved-GS: EAS + LAS + RAP + budget + MU, scripts/improved_gs_strategy.py), mcmc
 (gsplat MCMCStrategy, cap = --budget, opacity/scale reg 0.01), default (gsplat DefaultStrategy, AbsGS grads).
 Split: frame k (name order) is held out iff k % --test-split-interval == 0 (3DGRUT's rule).
@@ -28,8 +31,8 @@ Init: points3D.txt (xyz + rgb) of the dataset, scales from the 3-NN distance, op
 Output: <out>/splat.ply (standard 3DGS PLY, dataset frame), <out>/train.json (args, curve, timings, counts,
 held-out PSNR in this rasteriser at --eval-dataset).
 
-    PYTHONPATH=$CEAR_WS/gsplat-viewer python scripts/train_viewer_gsplat.py --dataset DS --out OUT \
-        --test-split-interval 8 [--strategy improved --budget 4000000] [--viewer pc274] [--ss 2 --min-px 0.3] \
+    PYTHONPATH=$CEAR_WS/gsplat-viewer-ss352 python scripts/train_viewer_gsplat.py --dataset DS --out OUT \
+        --test-split-interval 8 [--strategy improved --budget 4000000] [--viewer ss352] [--ss 2 --min-px 0.5] \
         [--aa] [--iters 30000] [--eval-dataset TEST]
 """
 from __future__ import annotations
@@ -40,7 +43,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from refine_poses_gsplat import read_model, intrinsics, load_rgb, ssim, psnr  # noqa: E402
 
 C0 = 0.28209479177387814
-PROFILES = {"pc274": {"eps2d": 0.075, "cull_l1": 0.125}, "ss352": {"eps2d": 0.3, "cull_l1": 0.5}}
+# viewer profiles (scripts/finetune_ply_viewer.py documents the shaders): dilation px^2, size cull (dilated major
+# eigenvalue px^2), radius cap (pc274: eigenvalues clamped at 1024^2/8; ss352: both scaled so the radius fits
+# min(1024, canvas)), 8-bit opacity, default SH band-2 handling
+PROFILES = {"pc274": {"eps2d": 0.075, "cull_l1": 0.125, "cap": "clamp", "opq": False, "sh_band2": "zero"},
+            "ss352": {"eps2d": 0.3, "cull_l1": 0.5, "cap": "scale", "opq": True, "sh_band2": "std"}}
 
 
 # ---------------------------------------------------------------- data
@@ -88,9 +95,10 @@ class ViewerGS:
         prof = PROFILES[args.viewer]
         self.eps2d = prof["eps2d"] if args.eps2d is None else args.eps2d
         self.cull_l1 = prof["cull_l1"] if args.cull_l1 is None else args.cull_l1
-        self.aa, self.sh_band2, self.tile = args.aa, args.sh_band2, 16
+        self.aa, self.tile, self.cap_mode, self.opq = args.aa, 16, prof["cap"], prof["opq"]
+        self.sh_band2 = args.sh_band2 or prof["sh_band2"]
         self.floor = None                                  # per-gaussian 3D scale floor (--min-px), or None
-        self.min_px = args.min_px
+        self.min_px, self.near, self.cap_px = args.min_px, args.near, args.cap_px
 
     def scales(self, p):
         import torch
@@ -113,15 +121,44 @@ class ViewerGS:
         from gsplat.cuda._wrapper import fully_fused_projection
         Ks = K.clone(); Ks[:2] *= ss
         op = torch.sigmoid(p["opacities"])
+        if self.opq:                                        # the viewer stores opacity in 8 bits (straight-through)
+            op = op + (torch.round(op * 255) / 255 - op).detach()
         radii, means2d, depths, conics, comp = fully_fused_projection(
             p["means"], None, p["quats"], self.scales(p), viewmat[None], Ks[None], W * ss, H * ss,
-            eps2d=self.eps2d * ss * ss, near_plane=0.01, calc_compensations=self.aa, opacities=op[None])
+            eps2d=self.eps2d * ss * ss, near_plane=self.near, calc_compensations=self.aa, opacities=op)
         with torch.no_grad():                               # viewer cull on the dilated major eigenvalue (1x px^2)
-            a, b, c = conics[..., 0], conics[..., 1], conics[..., 2]
-            det = (a * c - b * b).clamp_min(1e-30)
+            a, b, c = conics[..., 0].double(), conics[..., 1].double(), conics[..., 2].double()
+            det = (a * c - b * b).clamp_min(1e-300)
             ca, cb, cc = c / det, -b / det, a / det
             l1 = 0.5 * (ca + cc) + torch.sqrt((0.5 * (ca - cc)) ** 2 + cb * cb)
-            keep = (l1 / (ss * ss) >= self.cull_l1) & torch.isfinite(l1)
+            keep = (l1 / (ss * ss) >= self.cull_l1) & torch.isfinite(l1) & (radii > 0).all(-1) & (op > 0)[None]
+            if self.cap_mode == "clamp":
+                R = self.cap_px
+            else:                                           # radius <= min(1024, canvas) (centred canvas of viewer_shots)
+                R = min(self.cap_px, math.ceil(2 * max(float(K[0, 2]), W - float(K[0, 2]))), math.ceil(2 * max(float(K[1, 2]), H - float(K[1, 2]))))
+            cap = (R * ss) ** 2 / 8.0                       # quad half-extent sqrt(8) sigma <= R px
+            big = keep & (l1 > cap)
+        if self.cap_px > 0 and bool(big.any()):             # rebuild those covariances with clamped eigenvalues
+            i = big[0].nonzero()[:, 0]
+            q = conics[0, i].double(); qa, qb, qc = q.unbind(-1); dt = qa * qc - qb * qb
+            A, B, Cc = qc / dt, -qb / dt, qa / dt
+            mid = 0.5 * (A + Cc); rad = torch.sqrt((0.5 * (A - Cc)) ** 2 + B * B + 1e-30)
+            if self.cap_mode == "clamp":                    # PlayCanvas 2.7.4: each eigenvalue clamped
+                L1, L2 = (mid + rad).clamp_max(cap), (mid - rad).clamp(0.025 * ss * ss, cap)
+            else:                                           # SuperSplat 3.5.2: both scaled by cap / l1
+                s2 = (cap / (mid + rad)).clamp_max(1.0)
+                L1, L2 = (mid + rad) * s2, (mid - rad).clamp_min(0.1 * ss * ss) * s2
+            e = torch.stack([B, mid + rad - A], -1); en = e.norm(dim=-1, keepdim=True)
+            e = torch.where(en > 1e-12, e / en.clamp_min(1e-30), torch.tensor([1.0, 0.0], dtype=e.dtype, device=e.device))
+            RA = L1 * e[:, 0] ** 2 + L2 * e[:, 1] ** 2; RB = (L1 - L2) * e[:, 0] * e[:, 1]; RC = L1 * e[:, 1] ** 2 + L2 * e[:, 0] ** 2
+            d2 = RA * RC - RB * RB
+            conics = conics.clone(); conics[0, i] = torch.stack([RC / d2, -RB / d2, RA / d2], -1).float()
+            with torch.no_grad():
+                rx, ry = torch.ceil(torch.sqrt(8 * RA)), torch.ceil(torch.sqrt(8 * RC))
+                m = means2d[0, i].double()
+                vis = (m[:, 0] + rx > 0) & (m[:, 0] - rx < W * ss) & (m[:, 1] + ry > 0) & (m[:, 1] - ry < H * ss)
+                radii = radii.clone(); radii[0, i] = (torch.stack([rx, ry], -1) * vis[:, None]).to(radii.dtype)
+        with torch.no_grad():
             radii = radii * keep[..., None].to(radii.dtype)
         opr = op[None] * comp if self.aa else op[None]
         return radii, means2d, depths, conics, opr
@@ -212,11 +249,24 @@ def save_ply(path, p, rast, comments=()):
 
 
 # ---------------------------------------------------------------- training
-def evaluate(rast, p, views, deg, save_dir=None):
+def viewer_K(K, W, H, viewer):
+    """The camera scripts/viewer_shots.py renders: square pixels (pc274: f = fy, vertical fov; ss352: horizontal fov
+    of the canvas when wider than tall), canvas centred on the principal point, cropped at an integer offset."""
+    fx, fy, cx, cy = (float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2]))
+    CW, CH = math.ceil(2 * max(cx, W - cx)), math.ceil(2 * max(cy, H - cy))
+    x0, y0 = round(CW / 2 - cx), round(CH / 2 - cy)
+    f = (fx if CW > CH else fy) if viewer == "ss352" else fy
+    Kv = K.clone(); Kv[0, 0] = Kv[1, 1] = f; Kv[0, 2], Kv[1, 2] = CW / 2 - x0, CH / 2 - y0
+    return Kv
+
+
+def evaluate(rast, p, views, deg, save_dir=None, viewer=None):
     import torch
     ps, ss_ = [], []
     with torch.no_grad():
         for v in views:
+            if viewer:
+                v = (v[0], viewer_K(v[1], v[2], v[3], viewer)) + tuple(v[2:])
             img = rast.render(p, v, deg)[0]
             img = torch.round(img.clamp(0, 1) * 255) / 255             # what an 8-bit viewer frame holds
             gt = v[5].float() / 255
@@ -229,9 +279,45 @@ def evaluate(rast, p, views, deg, save_dir=None):
     return (round(float(np.mean(ps)), 3), round(float(np.mean(ss_)), 4)) if ps else (None, None)
 
 
+def load_ply_params(path, dev):
+    import torch
+    from plyfile import PlyData
+    v = PlyData.read(path)["vertex"]; names = [q.name for q in v.properties]
+    col = lambda pre: np.stack([np.asarray(v[n], dtype=np.float32) for n in
+                                sorted((n for n in names if n.startswith(pre)), key=lambda x: int(x.split("_")[-1]))], 1)
+    rest = col("f_rest_") if any(n.startswith("f_rest_") for n in names) else np.zeros((len(v), 0), np.float32)
+    p = {"means": np.stack([v["x"], v["y"], v["z"]], 1), "scales": col("scale_"), "quats": col("rot_"),
+         "opacities": np.asarray(v["opacity"]), "sh0": col("f_dc_")[:, None],
+         "shN": rest.reshape(len(v), 3, -1).transpose(0, 2, 1)}
+    return {k: torch.tensor(np.ascontiguousarray(a), dtype=torch.float32, device=dev) for k, a in p.items()}
+
+
+def render_ply(args, rast, dev):
+    """--render-ply: render at --eval-dataset's cameras (viewer camera) -> PSNR vs GT and vs --compare-dir renders."""
+    import torch
+    from PIL import Image
+    p = load_ply_params(args.render_ply, dev); deg = int(round(math.sqrt(p["shN"].shape[1] + 1))) - 1
+    ev = load_views(args.eval_dataset, 0, "all", dev)[:: args.render_every]
+    vs_gt, vs_ref = [], []
+    with torch.no_grad():
+        for v in ev:
+            vv = (v[0], viewer_K(v[1], v[2], v[3], args.viewer)) + tuple(v[2:])
+            img = torch.round(rast.render(p, vv, deg)[0].clamp(0, 1) * 255) / 255
+            vs_gt.append(psnr(img, v[5].float() / 255))
+            stem = os.path.splitext(v[0])[0] + ".png"
+            if args.compare_dir and os.path.exists(os.path.join(args.compare_dir, stem)):
+                vs_ref.append(psnr(img, load_rgb(os.path.join(args.compare_dir, stem), dev).float() / 255))
+            if args.out:
+                os.makedirs(args.out, exist_ok=True)
+                Image.fromarray((img.cpu().numpy() * 255 + 0.5).astype(np.uint8)).save(os.path.join(args.out, stem))
+    r = {"ply": args.render_ply, "viewer": args.viewer, "eps2d": rast.eps2d, "cull_l1": rast.cull_l1, "n": len(vs_gt),
+         "psnr_vs_gt": round(float(np.mean(vs_gt)), 3), "psnr_vs_compare": round(float(np.mean(vs_ref)), 3) if vs_ref else None}
+    print("VGS_RENDER " + json.dumps(r), flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--dataset", required=True, help="COLMAP text dataset (sparse/0/*.txt incl. points3D.txt, images/)")
+    ap.add_argument("--dataset", default=None, help="COLMAP text dataset (sparse/0/*.txt incl. points3D.txt, images/)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--test-split-interval", type=int, default=8)
     ap.add_argument("--eval-dataset", default=None, help="held-out set scored at the end in this rasteriser")
@@ -239,23 +325,31 @@ def main():
     ap.add_argument("--strategy", choices=("improved", "mcmc", "default"), default="improved")
     ap.add_argument("--budget", type=int, default=4_000_000, help="improved: Improved-GS budget; mcmc: cap_max")
     ap.add_argument("--densify-stop", type=int, default=None, help="default: 15000 (improved/default), 25000 (mcmc), x iters/30000")
-    ap.add_argument("--viewer", choices=tuple(PROFILES), default="pc274")
+    ap.add_argument("--viewer", choices=tuple(PROFILES), default="ss352")
     ap.add_argument("--eps2d", type=float, default=None, help="screen dilation px^2 (default from --viewer)")
     ap.add_argument("--cull-l1", type=float, default=None, help="minimum dilated major eigenvalue px^2 (default from --viewer)")
+    ap.add_argument("--near", type=float, default=1e-4, help="near plane (PlayCanvas draws any splat in front of the camera)")
+    ap.add_argument("--cap-px", type=float, default=1024.0, help="viewer's quad half-extent cap in px (0 = off)")
     ap.add_argument("--aa", action="store_true", help="antialiased (opacity compensation) mode")
     ap.add_argument("--ss", type=int, default=1, help="supersampling factor (render ss x, area-downsample, loss at 1x)")
     ap.add_argument("--min-px", type=float, default=0.0, help="3D scale floor in pixels at the closest training camera; 0 = off")
-    ap.add_argument("--sh-band2", choices=("zero", "pcbug", "std"), default="zero")
+    ap.add_argument("--sh-band2", choices=("zero", "pcbug", "std"), default=None, help="default: zero (pc274), std (ss352)")
     ap.add_argument("--sh-degree", type=int, default=3)
     ap.add_argument("--depth-lambda", type=float, default=0.0)
     ap.add_argument("--depth-trim", type=float, default=0.95)
     ap.add_argument("--ssim-lambda", type=float, default=0.2)
+    ap.add_argument("--bg", choices=("random", "black"), default="random",
+                    help="training background (random: full opacity is learnt, any viewer background works)")
     ap.add_argument("--init-opacity", type=float, default=None, help="default 0.1 (0.5 for mcmc)")
     ap.add_argument("--init-scale", type=float, default=1.0)
     ap.add_argument("--max-points", type=int, default=0)
     ap.add_argument("--grad-threshold", type=float, default=None, help="improved: 0.0003; default: 0.0008 (absgrad)")
     ap.add_argument("--no-eas", action="store_true"); ap.add_argument("--no-mu", action="store_true")
     ap.add_argument("--ply-comment", action="append", default=[], help="extra PLY header comment (repeatable)")
+    ap.add_argument("--render-ply", default=None, help="diagnostics: render this PLY at --eval-dataset (no training)")
+    ap.add_argument("--compare-dir", default=None, help="--render-ply: renders to score against (e.g. viewer_shots output)")
+    ap.add_argument("--render-every", type=int, default=4)
+    ap.add_argument("--allow-kernel-mismatch", action="store_true", help="debug: train with other kernels than --viewer")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--log-every", type=int, default=1000)
     ap.add_argument("--eval-every", type=int, default=0, help="held-out eval interval (0: end only)")
@@ -267,9 +361,15 @@ def main():
     from improved_gs_strategy import ImprovedStrategy, edge_map
     torch.manual_seed(args.seed); np.random.seed(args.seed)
     dev = "cuda"; t_start = time.time()
-    cut = "gsplat-viewer" in gsplat.__file__
-    print(f"[vgs] gsplat {gsplat.__version__} from {gsplat.__file__} -> kernel cut-off d^2<=8: {'ON' if cut else 'OFF (stock kernels!)'}", flush=True)
+    pf = os.path.join(os.path.dirname(gsplat.__file__), "VIEWER_PROFILE")
+    cut = open(pf).read().strip() if os.path.exists(pf) else "stock"
+    print(f"[vgs] gsplat {gsplat.__version__} from {gsplat.__file__}: kernels {cut}", flush=True)
+    if cut != args.viewer and not args.allow_kernel_mismatch:
+        raise SystemExit(f"[vgs] --viewer {args.viewer} needs PYTHONPATH=$CEAR_WS/gsplat-viewer-{args.viewer} "
+                         f"(env/make_gsplat_viewer_venv.sh); loaded: {cut}")
     rast = ViewerGS(args)
+    if args.render_ply:                                     # diagnostics: render a PLY, score vs GT and a viewer's renders
+        render_ply(args, rast, dev); return
     tr = load_views(args.dataset, args.test_split_interval, "train", dev, depth=args.depth_lambda > 0)
     ev = load_views(args.eval_dataset, 0, "all", dev) if args.eval_dataset else []
     nd = sum(v[6] is not None for v in tr)
@@ -325,6 +425,8 @@ def main():
                                           absgrad=args.strategy in ("improved", "default"))
         strat.step_pre_backward(params, opts, state, step, info)
         gt = v[5].float() / 255
+        if args.bg == "random":                             # opaque real frames: transparency must not pay off
+            img = img + (1 - alpha[..., None]) * torch.rand(3, device=dev)
         loss = (1 - args.ssim_lambda) * (img - gt).abs().mean() + \
             args.ssim_lambda * (1 - ssim(img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None]))
         ld = torch.zeros((), device=dev)
@@ -358,16 +460,18 @@ def main():
                  "depth": round(ld.item(), 5), "n": len(params["means"]), "visible": int((info["radii"] > 0).all(-1).sum()),
                  "sec": round(time.time() - t0, 1), "mem_gb": round(torch.cuda.max_memory_allocated() / 2 ** 30, 1)}
             if args.eval_every and step and step % args.eval_every == 0 and ev:
-                e["heldout_psnr"] = evaluate(rast, params, ev, deg)[0]
+                e["heldout_psnr"] = evaluate(rast, params, ev, deg, viewer=args.viewer)[0]
             curve.append(e); print(f"[vgs] {e}", flush=True)
     train_s = time.time() - t0
     if args.min_px > 0:
         rast.floor = ViewerGS.floors(params, tr, args.min_px)
     deg = min(args.iters // 1000, args.sh_degree)
     res = {"heldout_psnr": None, "heldout_ssim": None}
-    if ev:
-        res["heldout_psnr"], res["heldout_ssim"] = evaluate(rast, params, ev, deg, os.path.join(args.out, "renders_trainer"))
-        print(f"[vgs] held-out ({args.eval_dataset}, this rasteriser): PSNR {res['heldout_psnr']} SSIM {res['heldout_ssim']}", flush=True)
+    if ev:      # at the viewer_shots camera (comparable with the viewer metric) and at the true camera
+        res["heldout_psnr"], res["heldout_ssim"] = evaluate(rast, params, ev, deg, os.path.join(args.out, "renders_trainer"), args.viewer)
+        res["heldout_psnr_truecam"], res["heldout_ssim_truecam"] = evaluate(rast, params, ev, deg)
+        print(f"[vgs] held-out ({args.eval_dataset}, this rasteriser, viewer camera): PSNR {res['heldout_psnr']} SSIM "
+              f"{res['heldout_ssim']}; true camera {res['heldout_psnr_truecam']} / {res['heldout_ssim_truecam']}", flush=True)
     comments = [f"train_viewer_gsplat viewer={args.viewer} eps2d={rast.eps2d} strategy={args.strategy} ss={args.ss} aa={args.aa}"]
     if args.aa:
         comments.append("SplatRenderMode mip")
