@@ -41,6 +41,8 @@ def main():
     ap.add_argument("--min-opacity", type=float, default=0.1)
     ap.add_argument("--k", type=int, default=24)
     ap.add_argument("--tol-rel", type=float, default=0.05, help="behind the splat surface by more = hidden")
+    ap.add_argument("--solid-opacity", type=float, default=0.98,
+                    help="hidden only behind a splat surface at least this opaque along the ray (else it shows through)")
     ap.add_argument("--min-hidden-m", type=float, default=0.15,
                     help="a point hidden by less than this behind a seen surface is clutter around it, not a missing surface")
     ap.add_argument("--opacity", type=float, default=0.95)
@@ -85,9 +87,12 @@ def main():
             if not len(ia):
                 continue
             D = np.load(f).astype(np.float32)[vv[ia], u[ia]]
+            fo = f.replace("_splatdepth.npy", "_splatopacity.npy")
+            A = np.load(fo).astype(np.float32)[vv[ia], u[ia]] if os.path.exists(fo) else np.ones(len(ia), np.float32)
             r = np.linalg.norm(Pc[ia], axis=1)
             # visible (nothing rendered / not behind the surface) or only just behind it (thickness, clutter)
-            seen[ia[(D <= 0) | (r < D * (1 + args.tol_rel)) | (r < D + args.min_hidden_m / s)]] = True
+            # or behind a semi-transparent splat surface, where an opaque disc would show through
+            seen[ia[(D <= 0) | (A < args.solid_opacity) | (r < D * (1 + args.tol_rel)) | (r < D + args.min_hidden_m / s)]] = True
         print(f"[fill] {len(cand):,} uncovered; {seen.sum():,} visible to a training camera (left to the camera)", flush=True)
         cand = cand[~seen]
     if not len(cand):
