@@ -9,7 +9,9 @@
 #   4. exports in the viewer reference's axes: <out>/exports/<NAME>{,_refaxes}.ply
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o <log> sbatch/export_viewer.sbatch configs/<seq>.yaml
 # Env: NAME (viewer_igs), ARM_FLAGS (train_viewer_gsplat.py flags; default the best held-out arm igs4m_pc274),
-#      PROF (kernel build pc274|ss352), DSCALE (fine-tune display scales, 1.5:4), FT_ITERS (7000).
+#      PROF (kernel build pc274|ss352), DSCALE (fine-tune display scales, 1.5:4), FT_ITERS (7000),
+#      FT_ARGS (extra fine-tune flags, e.g. "--lambda-wd 0.025 --wd-log2-sigma 4" = perceptual WD-R),
+#      TRAIN_PLY (reuse an already trained stage-1 splat instead of training).
 #SBATCH -J export-viewer
 #SBATCH -p gpu
 #SBATCH --gres=gpu:a100:1
@@ -30,10 +32,11 @@ PROF="${PROF:-pc274}"; ARM_FLAGS="${ARM_FLAGS:---strategy improved --budget 4000
 hostname; date; mkdir -p "$F" "$E"
 module load cuda/12.4.1 gcc/9.4.0 2>/dev/null || true
 export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"; export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0}"
-export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-12}"
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-12}"; export TORCH_HOME="${TORCH_HOME:-$CEAR_WS/torch-cache}"
 bash env/make_gsplat_viewer_venv.sh
 
 echo "== 1. viewer-matched training ($PROF kernels): $ARM_FLAGS"
+if [ -n "${TRAIN_PLY:-}" ] && [ ! -f "$F/train/splat.ply" ]; then mkdir -p "$F/train"; cp "$TRAIN_PLY" "$F/train/splat.ply"; fi
 if [ ! -f "$F/train/splat.ply" ]; then
   mkdir -p "$F/train"
   # shellcheck disable=SC2086
@@ -41,12 +44,12 @@ if [ ! -f "$F/train/splat.ply" ]; then
     "$SPY" scripts/train_viewer_gsplat.py --dataset "$EDGS" --out "$F/train" --test-split-interval 0 \
     --eval-dataset "$P/onpath/test" --viewer "$PROF" $ARM_FLAGS > "$F/train.log" 2>&1 || { tail -40 "$F/train.log"; exit 1; }
 fi
-grep -E '^\[vgs\] (held-out|[0-9]+ gaussians)' "$F/train.log" || true
+grep -E '^\[vgs\] (held-out|[0-9]+ gaussians)' "$F/train.log" 2>/dev/null || true
 
 echo "== 2. viewer-exact fine-tune (display scales ${DSCALE:-1.5:4})"
 [ -f "$F/ft.ply" ] || "$SPY" scripts/finetune_ply_viewer.py finetune --ply "$F/train/splat.ply" --out "$F/ft.ply" \
   --dataset "$DATA" --test-split-interval 0 --viewer ss352 --display-scale "${DSCALE:-1.5:4}" \
-  --iters "${FT_ITERS:-7000}" --eval-dataset "$P/onpath/test" > "$F/ft.log" 2>&1 || { tail -40 "$F/ft.log"; exit 1; }
+  --iters "${FT_ITERS:-7000}" --eval-dataset "$P/onpath/test" ${FT_ARGS:-} > "$F/ft.log" 2>&1 || { tail -40 "$F/ft.log"; exit 1; }
 cp "$F/ft.ply" "$E/$NAME.ply"
 
 echo "== 3. unseen LiDAR surfaces: fill + inpaint"
