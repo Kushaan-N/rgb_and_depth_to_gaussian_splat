@@ -5,8 +5,8 @@ cabinets, windows — a VLP-16 returns through glass or not at all), and at dept
 LiDAR-camera misalignment teaches the wrong surface). Supervising there blurs reflections and fights the
 photometric loss. A pixel's target is dropped if
   - there is no target (0), or the LiDAR returns that produced it are weak: mean intensity of the front-surface
-    points below the --min-intensity-q quantile of the cloud (needs --intensity, see below),
-  - it lies within --edge-px of a depth discontinuity of the target (neighbour differs by > --edge-rel, or a hole),
+    points at or below the --min-intensity-q quantile of the cloud (needs --intensity, see below),
+  - it lies within --edge-px of a depth discontinuity of the target (a valid neighbour differs by > --edge-rel),
   - a photometric depth (ray distance rendered from a splat trained WITHOUT depth loss, eval_views.py
     --save-depth-dir) disagrees by > --disagree-rel on a textured pixel (local gradient >= --texture-min; on
     textureless pixels the photometric depth is unconstrained, so the target stays).
@@ -79,12 +79,12 @@ def texture(img):
 
 
 def depth_edges(D, rel, px):
-    """Pixels within `px` of a discontinuity of D (a 4-neighbour differing by > rel, or a hole boundary)."""
+    """Pixels within `px` of a discontinuity of D (a valid 4-neighbour differing by > rel)."""
     import cv2
     e = np.zeros(D.shape, bool); v = D > 0
     for a, b in ((np.s_[:, 1:], np.s_[:, :-1]), (np.s_[1:, :], np.s_[:-1, :])):
         da, db = D[a], D[b]
-        jump = (v[a] != v[b]) | ((v[a] & v[b]) & (np.abs(da - db) > rel * np.minimum(da, db)))
+        jump = (v[a] & v[b]) & (np.abs(da - db) > rel * np.minimum(da, db))       # holes are not edges
         e[a] |= jump; e[b] |= jump
     if px > 0:
         e = cv2.dilate(e.astype(np.uint8), np.ones((2 * px + 1, 2 * px + 1), np.uint8)) > 0
@@ -115,8 +115,8 @@ def main():
     ap.add_argument("--cloud", default=None); ap.add_argument("--sim3-json", default=None)
     ap.add_argument("--rebuild-targets", action="store_true", help="rewrite targets with the unbiased z-buffer first")
     ap.add_argument("--voxel-m", type=float, default=0.02); ap.add_argument("--max-range-m", type=float, default=12.0)
-    ap.add_argument("--min-intensity-q", type=float, default=0.05)
-    ap.add_argument("--edge-rel", type=float, default=0.05); ap.add_argument("--edge-px", type=int, default=2)
+    ap.add_argument("--min-intensity-q", type=float, default=0.10)
+    ap.add_argument("--edge-rel", type=float, default=0.05); ap.add_argument("--edge-px", type=int, default=1)
     ap.add_argument("--disagree-rel", type=float, default=0.10)
     ap.add_argument("--texture-min", type=float, default=0.01)
     ap.add_argument("--edgs-points", default=None, help="EDGS points3D.txt: triangulation vs target bias diagnosis")
@@ -170,7 +170,7 @@ def main():
         keep = valid.copy()
         low = np.zeros_like(valid)
         if I is not None:
-            low = valid & (I < thr); keep &= ~low
+            low = valid & (I <= thr); keep &= ~low
         edge = depth_edges(D, args.edge_rel, args.edge_px); keep &= ~edge
         img = np.asarray(Image.open(os.path.join(args.dataset, "images", name)).convert("RGB"))
         dis = np.zeros_like(valid); Dp = None
