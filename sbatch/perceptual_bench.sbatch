@@ -3,15 +3,18 @@
 # model, scored as the user sees it: each exported .ply rendered by SuperSplat's engine (scripts/viewer_shots.py) at the
 # on-path held-out cameras ($P/onpath/test, every 8th frame, never trained on) -> PSNR/SSIM/LPIPS (eval_views.py
 # --pred-dir) + DISTS (piq), plus off-path cameras (MOVE) and the SuperSplat editor view, and montages.
-# Every arm resumes BASE_CKPT (default: EDGS init + Improved-GS 4M, $P/edgs/on/edgs_igs4m) on its training set
+# By default an arm resumes BASE_CKPT (default: EDGS init + Improved-GS 4M, $P/edgs/on/edgs_igs4m) on its training set
 # (BASE_DATA, same test_split_interval=8) for FT_ITERS more iterations with densification over (its window ended at
-# 15k) and Improved-GS's multi-step updates off (an optimizer step every iteration), worktree from
-# env/make_3dgrut_perceptual.sh. Arms (ARMS):
+# 15k) and Improved-GS's multi-step updates off (an optimizer step every iteration); _mu / _scr change that (below).
+# Worktree from env/make_3dgrut_perceptual.sh. Arms (ARMS):
 #   base           the checkpoint itself (no training)
 #   ctrl           same fine-tune on the original L1/SSIM loss (isolates the effect of the extra iterations)
 #   wd             WD only:  LAMBDA_WD * WD
 #   wdr<k>         WD-R:     LAMBDA_WD * WD + k * (L1/SSIM)   (paper: gamma=0.025, beta=1/0.09 -> k ~0.28)
 #   <arm>_s<x>     the same with WD log2_sigma x instead of WD_SIGMA, e.g. wdr0.3_s2
+#   <arm>_mu       fine-tune keeping Improved-GS's late multi-step updates (as the base run's last 6k its)
+#   <arm>_scr      no fine-tune: train from scratch with the base run's settings, WD on after WD_WARMUP (3000) its
+#                  (the paper's protocol; densification sees the WD gradients), e.g. wdr0.3_scr
 # Acceptance (task R2): PSNR drop <= MAX_PSNR_DROP (0.3 dB) vs base AND LPIPS and DISTS both better; then look at the
 # montages (sharper, not fake texture). Everything under $P/perceptual/ (SMOKE=1: $P/perceptual_smoke, 200 its, few off-path views).
 # Re-running skips finished stages; jobs with different ARMS can run concurrently (summary covers all arms scored).
@@ -39,6 +42,7 @@ REF_DS="$(get pipeline.viewer_reference_dataset)"; FRAME="$(get pipeline.export_
 BASE_CKPT="${BASE_CKPT:-$(ls -t "$P"/edgs/on/edgs_igs4m/run/*/ckpt_last.pt | head -1)}"; BASE_DATA="${BASE_DATA:-$P/edgs/on/data}"
 BASE_CFG="$(dirname "$BASE_CKPT")/parsed.yaml"; TEST="$P/onpath/test"
 ARMS="${ARMS:-base ctrl wd wdr0.3 wdr0.1}"; FT_ITERS="${FT_ITERS:-10000}"; LAMBDA_WD="${LAMBDA_WD:-0.025}"; WD_SIGMA="${WD_SIGMA:-4}"
+WD_WARMUP="${WD_WARMUP:-3000}"
 MOVE="${MOVE:-0 -0.3 1.0}"; EVERY_OFF="${EVERY_OFF:-40}"; MAX_PSNR_DROP="${MAX_PSNR_DROP:-0.3}"; EVERY_ON=1; PE="$P/perceptual"
 if [ "${SMOKE:-0}" = 1 ]; then FT_ITERS=200; EVERY_OFF=200; PE="$P/perceptual_smoke"; fi
 REP="$PE/report"; mkdir -p "$REP" "$PE/ply"
@@ -65,19 +69,24 @@ for arm in $ARMS; do
   if [ "$arm" = base ]; then CK="$BASE_CKPT"; else
     CK="$(ls -t "$RUN"/run/*/ckpt_last.pt 2>/dev/null | head -1 || true)"
     if [ -z "$CK" ]; then
-      s="$WD_SIGMA"; a="${arm%%_s*}"; [[ $arm =~ _s([0-9.]+)$ ]] && s="${BASH_REMATCH[1]}"
+      s="$WD_SIGMA"; a="${arm%%_*}"; [[ $arm =~ _s([0-9.]+)(_|$) ]] && s="${BASH_REMATCH[1]}"
       case $a in
         ctrl) X=(loss.lambda_wd=0.0);;
         wd)   X=(loss.lambda_wd="$LAMBDA_WD" loss.lambda_rgb_scale=0.0);;
         wdr*) X=(loss.lambda_wd="$LAMBDA_WD" loss.lambda_rgb_scale="${a#wdr}");;
         *) echo "unknown arm $arm"; exit 1;;
       esac
-      X+=(loss.wd_sigma="$s" loss.wd_start_iter=0)
+      X+=(loss.wd_sigma="$s")
       [ -n "$BUDGET" ] && X+=(strategy.budget="$BUDGET")
-      grep -q 'ImprovedGSStrategy' "$BASE_CFG" && X+=(strategy.mu.enabled=false)
+      if [[ $arm == *_scr* ]]; then                            # from scratch: the base run's schedule, WD after warm-up
+        X+=(loss.wd_start_iter="$WD_WARMUP" n_iterations="$BASE_IT")
+      else                                                     # fine-tune: resume the base checkpoint
+        X+=(loss.wd_start_iter=0 resume="$BASE_CKPT" n_iterations=$((BASE_IT + FT_ITERS)))
+        [[ $arm == *_mu* ]] || ! grep -q 'ImprovedGSStrategy' "$BASE_CFG" || X+=(strategy.mu.enabled=false)
+      fi
       mkdir -p "$RUN"; echo "  ${X[*]}"
       ( cd "$W" && "${RUNNER[@]}" "$GPY" train.py --config-name "$APP" path="$BASE_DATA" out_dir="$RUN" experiment_name=run \
-          resume="$BASE_CKPT" dataset.downsample_factor=1 dataset.test_split_interval=8 n_iterations=$((BASE_IT + FT_ITERS)) \
+          dataset.downsample_factor=1 dataset.test_split_interval=8 \
           loss.use_depth=false test_last=false num_workers="${SLURM_CPUS_PER_TASK:-8}" "${X[@]}" ) > "$RUN.log" 2>&1 || { tail -40 "$RUN.log"; exit 1; }
       CK="$(ls -t "$RUN"/run/*/ckpt_last.pt | head -1)"; grep -a -m1 "Wasserstein" "$RUN.log" || true
     fi
