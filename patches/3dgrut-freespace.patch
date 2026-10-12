@@ -1,0 +1,186 @@
+diff --git a/configs/base_gs.yaml b/configs/base_gs.yaml
+index 56b4957..283e68c 100644
+--- a/configs/base_gs.yaml
++++ b/configs/base_gs.yaml
+@@ -188,6 +188,19 @@ loss:
+   lambda_depth_opacity: 0.0    # push accumulated opacity to 1 where depth was measured
+   depth_trim: 0.95             # drop the worst 5% of per-pixel depth errors (edges, misalignment)
+ 
++# LiDAR free-space prior (threedgrut/freespace.py): gaussians whose centre lies in voxels that LiDAR beams
++# crossed (scripts/build_freespace_grid.py) are floaters. Off when grid_path is empty or the file is missing.
++freespace:
++  grid_path: ""
++  min_free: 3                  # a voxel is free when >= this many scans' beams crossed it ...
++  dilate: 1                    # ... and no LiDAR return lies within this many voxels (unknown = never free)
++  lambda_opacity: 0.01         # loss: lambda * sum(opacity of free-space gaussians) / n_gaussians
++  prune:
++    enabled: true              # remove free-space gaussians (GS / Improved-GS strategies; MCMC: loss only)
++    start_iteration: 1000
++    end_iteration: -1          # -1 = until the end of training
++    frequency: 500
++
+ # Post-processing configuration
+ post_processing:
+   # null | "ppisp" | "linear-to-srgb"
+diff --git a/threedgrut/trainer.py b/threedgrut/trainer.py
+index c2ffaa5..a1a22d2 100644
+--- a/threedgrut/trainer.py
++++ b/threedgrut/trainer.py
+@@ -141,6 +141,10 @@ class Trainer3DGRUT:
+         logger.log_rule("Initialize Model")
+         self.init_model(conf, self.scene_extent)
+         self.init_densification_and_pruning_strategy(conf)
++        from threedgrut.freespace import load_freespace
++
++        self.freespace = load_freespace(conf, self.device)
++        """ LiDAR free-space grid (floater suppression), None when not configured """
+         logger.log_rule("Setup Model Weights & Training")
+         self.init_metrics()
+         # Feature decoder and post-processing must exist before setup_training so resume can load their state.
+@@ -764,9 +768,20 @@ class Trainer3DGRUT:
+                                                                      torch.ones_like(opac[valid]))
+                     lambda_depth = self.conf.loss.lambda_depth
+ 
++        # LiDAR free-space prior: opacity of gaussians centred in measured empty space, normalised by the
++        # total count like the opacity regulariser (the free set is recomputed: centres move)
++        loss_freespace = torch.zeros(1, device=self.device)
++        lambda_freespace = 0.0
++        if self.freespace is not None and self.conf.freespace.lambda_opacity > 0 and not self._in_color_refine:
++            with torch.cuda.nvtx.range("loss-freespace"):
++                in_free = self.freespace.query(self.model.positions)
++                if in_free.any():
++                    loss_freespace = self.model.get_density()[in_free].sum() / max(self.model.num_gaussians, 1)
++                    lambda_freespace = self.conf.freespace.lambda_opacity
++
+         # Total loss
+         loss = lambda_l1 * loss_l1 + lambda_ssim * loss_ssim + lambda_opacity * loss_opacity + lambda_scale * loss_scale \
+-            + lambda_depth * loss_depth
++            + lambda_depth * loss_depth + lambda_freespace * loss_freespace
+         return dict(
+             total_loss=loss,
+             l1_loss=lambda_l1 * loss_l1,
+@@ -775,8 +790,31 @@ class Trainer3DGRUT:
+             opacity_loss=lambda_opacity * loss_opacity,
+             scale_loss=lambda_scale * loss_scale,
+             depth_loss=lambda_depth * loss_depth,
++            freespace_loss=lambda_freespace * loss_freespace,
+         )
+ 
++    def _freespace_prune_due(self, step: int) -> bool:
++        p = self.conf.freespace.prune
++        end = p.end_iteration if p.end_iteration >= 0 else self.n_iterations
++        return (p.enabled and p.frequency > 0 and p.start_iteration <= step <= end and step % p.frequency == 0
++                and not self._in_color_refine and not self.strategy._suspended
++                and self.strategy.should_step_optimizer(step))
++
++    def _freespace_prune(self, step: int) -> bool:
++        from threedgrut.freespace import prune_gaussians
++
++        in_free = self.freespace.query(self.model.positions)
++        n, k = int(in_free.shape[0]), int(in_free.sum())
++        if k == 0 or k == n:
++            return False
++        if not prune_gaussians(self.strategy, ~in_free):
++            if not getattr(self, "_freespace_prune_warned", False):
++                logger.warning(f"FreeSpace: {type(self.strategy).__name__} has no prune hook: opacity loss only")
++                self._freespace_prune_warned = True
++            return False
++        logger.info(f"FreeSpace: it {step}: pruned {k} / {n} ({k / n * 100:.2f}%) gaussians in LiDAR free space")
++        return True
++
+     @torch.cuda.nvtx.range("log_validation_iter")
+     def log_validation_iter(
+         self,
+@@ -1282,6 +1320,11 @@ class Trainer3DGRUT:
+                 writer=self.tracking.writer,
+             )
+ 
++        # LiDAR free-space pruning (only right after a real optimizer step: no pending accumulated gradients)
++        if self.freespace is not None and self._freespace_prune_due(global_step):
++            with torch.cuda.nvtx.range(f"train_{global_step}_freespace_prune"):
++                scene_updated = self._freespace_prune(global_step) or scene_updated
++
+         # Update the SH if required
+         if self.model.progressive_training and check_step_condition(
+             global_step, 0, 1e6, self.model.feature_dim_increase_interval
+diff --git a/threedgrut/freespace.py b/threedgrut/freespace.py
+new file mode 100644
+index 0000000..3deeb00
+--- /dev/null
++++ b/threedgrut/freespace.py
+@@ -0,0 +1,75 @@
++# LiDAR free-space prior for floater suppression (CEAR patch, patches/3dgrut-freespace.patch).
++#
++# The grid comes from scripts/build_freespace_grid.py: per-voxel scan counts in the LiDAR's metric frame,
++#   free[v]  scans whose beam crossed v before its return (minus a margin)
++#   hit[v]   scans with a return inside v
++# plus the COLMAP->metric sim3 (x_m = s R x + t). A voxel is confidently free when free >= min_free and no
++# hit lies within `dilate` voxels; voxels no beam crossed are unknown and never count as free. Gaussian
++# centres (training frame) are mapped through the sim3 and looked up in that boolean grid.
++
++import json
++import os
++
++import numpy as np
++import torch
++import torch.nn.functional as F
++
++from threedgrut.utils.logger import logger
++
++
++class FreeSpaceGrid:
++    def __init__(self, path: str, min_free: int, dilate: int, device):
++        z = np.load(path)
++        free, hit = torch.from_numpy(z["free"].astype(np.int32)), torch.from_numpy(z["hit"].astype(np.float32))
++        occ = hit > 0
++        if dilate > 0:  # protect a shell around every LiDAR return
++            occ = F.max_pool3d(occ.float()[None, None], 2 * dilate + 1, stride=1, padding=dilate)[0, 0] > 0
++        self.mask = ((free >= min_free) & ~occ).to(device)
++        self.dims = torch.tensor(self.mask.shape, device=device)
++        self.origin = torch.tensor(z["origin"], dtype=torch.float32, device=device)
++        self.voxel = float(z["voxel"])
++        s, R, t = float(z["sim3_s"]), torch.tensor(z["sim3_R"], dtype=torch.float32), torch.tensor(z["sim3_t"], dtype=torch.float32)
++        self.A, self.b = (s * R).T.contiguous().to(device), t.to(device)  # x_m = x @ A + b
++        meta = json.loads(str(z["meta"])) if "meta" in z else {}
++        logger.info(f"FreeSpace: {os.path.basename(path)}: {tuple(self.mask.shape)} voxels of {self.voxel:.3f} m, "
++                    f"{int(self.mask.sum())} confidently free (free >= {min_free}, hit dilation {dilate}), "
++                    f"{meta.get('scans', '?')} scans")
++
++    @torch.no_grad()
++    def query(self, positions: torch.Tensor) -> torch.Tensor:
++        """[N, 3] centres in the training (COLMAP) frame -> [N] bool: inside confidently free space."""
++        ijk = torch.floor((positions.detach().float() @ self.A + self.b - self.origin) / self.voxel).long()
++        ok = ((ijk >= 0) & (ijk < self.dims)).all(dim=1)
++        out = torch.zeros(positions.shape[0], dtype=torch.bool, device=positions.device)
++        i = ijk[ok]
++        out[ok] = self.mask[i[:, 0], i[:, 1], i[:, 2]]
++        return out
++
++
++def load_freespace(conf, device):
++    """FreeSpaceGrid from conf.freespace, or None when disabled / the grid file is absent (auto-skip)."""
++    fs = conf.get("freespace", None)
++    path = fs.get("grid_path", "") if fs is not None else ""
++    if not path:
++        return None
++    if not os.path.exists(path):
++        logger.warning(f"FreeSpace: grid {path} not found: free-space prior off")
++        return None
++    return FreeSpaceGrid(path, int(fs.get("min_free", 3)), int(fs.get("dilate", 1)), device)
++
++
++@torch.no_grad()
++def prune_gaussians(strategy, keep: torch.Tensor) -> bool:
++    """Remove gaussians (keep=False) through the strategy's optimizer-aware update; GS-family strategies only."""
++    if not (hasattr(strategy, "_update_param_with_optimizer") and hasattr(strategy, "prune_densification_buffers")):
++        return False
++
++    def update_param_fn(name: str, param: torch.Tensor) -> torch.Tensor:
++        return torch.nn.Parameter(param[keep], requires_grad=param.requires_grad)
++
++    def update_optimizer_fn(key: str, v: torch.Tensor) -> torch.Tensor:
++        return v[keep]
++
++    strategy._update_param_with_optimizer(update_param_fn, update_optimizer_fn)
++    strategy.prune_densification_buffers(keep)
++    return True
