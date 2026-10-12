@@ -40,6 +40,9 @@ def main():
     ap.add_argument("--tag", default="ply")
     ap.add_argument("--json-out", default=None)
     ap.add_argument("--save-dir", default=None)
+    ap.add_argument("--move", type=float, nargs=3, default=None, metavar=("RIGHT", "DOWN", "BACK"),
+                    help="render from cameras moved by this offset in each camera's own axes (dataset units): "
+                         "a look at what a viewer shows off the recorded path; no metrics")
     args = ap.parse_args()
     import torch
     from PIL import Image
@@ -60,6 +63,8 @@ def main():
     for name, cid, q, t in imgs:
         W, H, (fx, fy, cx, cy) = cams[cid]                         # PINHOLE (undistorted datasets)
         V = np.eye(4); V[:3, :3] = quat_to_R(q); V[:3, 3] = t        # world -> camera
+        if args.move:
+            V[:3, 3] -= np.array(args.move)                          # camera centre moves by +move (camera axes)
         K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
         with torch.no_grad():
             rgb, _, _ = rasterization(G["means"], G["quats"], G["scales"], G["opacities"], G["sh"],
@@ -67,6 +72,12 @@ def main():
                                       torch.tensor(K, dtype=torch.float32, device=dev)[None], W, H,
                                       sh_degree=G["deg"], eps2d=0.3, rasterize_mode="classic")   # black background
         pred = rgb[0].clamp(0, 1)
+        if args.move:
+            if args.save_dir:
+                os.makedirs(args.save_dir, exist_ok=True)
+                Image.fromarray((pred.cpu().numpy() * 255).round().astype(np.uint8)).save(
+                    os.path.join(args.save_dir, os.path.splitext(name)[0] + ".png"))
+            continue
         gt = torch.tensor(np.asarray(Image.open(os.path.join(args.dataset, "images", name)).convert("RGB")),
                           device=dev).float() / 255
         a, b = pred.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None]
@@ -75,6 +86,8 @@ def main():
             os.makedirs(args.save_dir, exist_ok=True)
             Image.fromarray((pred.cpu().numpy() * 255).round().astype(np.uint8)).save(
                 os.path.join(args.save_dir, os.path.splitext(name)[0] + ".png"))
+    if args.move:
+        print("EVAL_PLY renders only (moved cameras) ->", args.save_dir, flush=True); return
     res = {"tag": args.tag, "ply": args.ply, "renderer": "gsplat classic 3DGS (eps2d 0.3)", "n": len(P),
            "psnr": round(float(np.mean(P)), 3), "ssim": round(float(np.mean(S)), 4), "lpips": round(float(np.mean(L)), 4)}
     print("EVAL_PLY", json.dumps(res), flush=True)
