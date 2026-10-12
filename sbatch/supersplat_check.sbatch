@@ -48,8 +48,8 @@ for n in lidar_init lidar_init_depth igs igs_depth; do
   CANDS="$CANDS $n"
 done
 for n in $CANDS; do
-  ds="$P/onpath/test"; [ "$n" = reference ] && ds="$RT"
-  "$GPY" scripts/eval_views.py --pred-dir "$S/onpath/$n" --dataset "$ds" --tag "$n" --json-out "$REP/$n.json" | tail -1
+  # same real images for every candidate (the reference's held-out renders carry the same names)
+  "$GPY" scripts/eval_views.py --pred-dir "$S/onpath/$n" --dataset "$P/onpath/test" --tag "$n" --json-out "$REP/$n.json" | tail -1
   ply="$VB/${n}_refaxes.ply"; [ "$n" = reference ] && ply="$REF_PLY"
   "$VPY" scripts/viewer_shots.py --ply "$ply" --dataset "$RT" --every "$EVERY_OFF" --move $MOVE --out-dir "$S/offpath/$n" \
     $([ "$n" != reference ] && echo --editor)
