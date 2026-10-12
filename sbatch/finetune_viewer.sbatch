@@ -7,7 +7,7 @@
 #      off-path moved views (MOVE) for visuals
 #   3. all-frames deliverable: exports/edgs_igs.ply -> exports/edgs_igs_viewerft.ply (+ _refaxes)
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o logs/finetune_viewer-%j.out sbatch/finetune_viewer.sbatch configs/<seq>.yaml
-# Env: STAGE (all | compare | smoke | heldout | deliver), ARMS ("edgs_igs4m lidar_init"), ITERS (7000), VIEWER
+# Env: STAGE (all, or a space list of: compare attrib fix smoke heldout deliver), ARMS ("edgs_igs4m lidar_init"), ITERS (7000), VIEWER
 # (pc274), RASTER (exact), DEPTH (0 = no LiDAR term), FTARGS (extra finetune flags), TAG (output suffix),
 # MOVE ("0 -0.3 1.0"), EVERY_OFF (40).
 #SBATCH -J finetune-viewer
@@ -29,6 +29,7 @@ OUT="$(get paths.out_root)"; P="$OUT/pipeline"; VB="$P/viewer_bench"; S="$P/supe
 FRAME="$(get pipeline.export_frame_model)"
 STAGE="${STAGE:-all}"; ARMS="${ARMS:-edgs_igs4m lidar_init}"; ITERS="${ITERS:-7000}"; VIEWER="${VIEWER:-pc274}"
 RASTER="${RASTER:-exact}"; DEPTH="${DEPTH:-0}"; TAG="${TAG:-viewerft}"; MOVE="${MOVE:-0 -0.3 1.0}"; EVERY_OFF="${EVERY_OFF:-40}"
+has() { [ "$STAGE" = all ] || [[ " $STAGE " == *" $1 "* ]]; }
 F="$P/viewer_ft"; REP="$F/report"; TEST="$P/onpath/test"; TRAIN="$P/onpath/data_orig"
 ALLDS="$P/igs_full/edgs_data"; [ -d "$ALLDS/sparse/0" ] || ALLDS="$TRAIN"
 hostname; date; mkdir -p "$REP"; nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
@@ -66,19 +67,47 @@ FT() {  # in.ply out.ply dataset interval [extra]
 }
 
 # ---- 1. renderer agreement (needs viewer renders of the base .ply at the test cameras)
-if [ "$STAGE" = all ] || [ "$STAGE" = compare ] || [ "$STAGE" = smoke ]; then
+if has compare || has smoke; then
   b="$(ply_of edgs_igs4m)"; shots "$b" "$TEST" "$F/onpath/edgs_igs4m"
   "$SPY" scripts/finetune_ply_viewer.py compare --ply "$b" --dataset "$TEST" --viewer-dir "$F/onpath/edgs_igs4m" \
     --every "$([ "$STAGE" = all ] && echo 1 || echo 4)" --save-dir "$F/compare" --json-out "$REP/agreement_edgs_igs4m.json"
 fi
-if [ "$STAGE" = smoke ]; then
-  FT "$(ply_of edgs_igs4m)" "$F/smoke/edgs_igs4m_smoke.ply" "$TRAIN" 8 --iters 300 --eval-interval 0 --eval-every-frame 8
-  echo FINETUNE_VIEWER_SMOKE_DONE; exit 0
+# ---- 1b. gap attribution: each viewer effect switched off in the matched renderer, scored vs the real images
+if has attrib; then
+  b="$(ply_of edgs_igs4m)"; shots "$b" "$TEST" "$F/onpath/edgs_igs4m"
+  "$SPY" scripts/finetune_ply_viewer.py compare --ply "$b" --dataset "$TEST" --viewer-dir "$F/onpath/edgs_igs4m" \
+    --variants gsplat_0.3,gsplat_0.075,gsplat_0,pc274_exact,pc274_exact_q,pc274_exact_nocull,pc274_exact_nocut,pc274_exact_nobug,pc274_exact_nocull_nocut,pc274_exact_nocull_nocut_nobug,pc274_exact_nocull_nocut_nobug_d0,pc274_exact_d0.3,ss352_exact \
+    --json-out "$REP/attribution_edgs_igs4m.json"
 fi
 
+# ---- 1c. energy-preserving minimum footprint (scripts/viewer_fix_ply.py), held-out arms, never-worse gate
+if has fix; then
+  for n in $ARMS; do
+    b="$(ply_of "$n")" || continue; shots "$b" "$TEST" "$F/onpath/$n"; score "$n" "$F/onpath/$n"
+    for pr in 0 0.02; do
+      t="${n}_fix$([ "$pr" = 0 ] || echo "_p$pr")"; o="$F/$n/$t.ply"
+      [ -f "$o" ] || "$SPY" scripts/viewer_fix_ply.py --ply "$b" --dataset "$TRAIN" --test-split-interval 8 --viewer "$VIEWER" \
+        --prune-opacity "$pr" --out "$o"
+      shots "$o" "$TEST" "$F/onpath/$t"; score "$t" "$F/onpath/$t"
+      shots "$o" "$TRAIN" "$F/offpath/$t" --every "$EVERY_OFF" --move $MOVE
+      "$CPUPY" scripts/accept_gate.py --pair heldout "$REP/$n.json" "$REP/$t.json" --out "$REP/gate_$t.json" \
+        && echo "GATE $t ACCEPT" || echo "GATE $t REJECT"
+    done
+    shots "$b" "$TRAIN" "$F/offpath/$n" --every "$EVERY_OFF" --move $MOVE
+  done
+fi
+
+if [[ " $STAGE " == *" smoke "* ]]; then   # 0-LR reproduces step 0; single-frame overfit decreases; short real run
+  b="$(ply_of edgs_igs4m)"; mkdir -p "$F/smoke"
+  FT "$b" "$F/smoke/lr0.ply" "$TRAIN" 8 --iters 50 --lr-mult 0 --eval-interval 0 --eval-every-frame 8
+  FT "$b" "$F/smoke/one.ply" "$TRAIN" 8 --iters 200 --overfit-one --log-every 20 --eval-interval 0 --eval-every-frame 8
+  FT "$b" "$F/smoke/short.ply" "$TRAIN" 8 --iters 600 --log-every 100 --eval-interval 300 --eval-every-frame 4
+  echo FINETUNE_VIEWER_SMOKE_DONE
+fi
+[[ " $STAGE " == *" smoke "* ]] && [ "$STAGE" = smoke ] && exit 0
+
 # ---- 2. held-out arms: base vs fine-tuned, SuperSplat engine
-if [ "$STAGE" = all ] || [ "$STAGE" = heldout ]; then
-  PAIRS=()
+if has heldout; then
   for n in $ARMS; do
     b="$(ply_of "$n")" || continue; ft="$F/$n/${n}_$TAG.ply"
     [ -f "$ft" ] || FT "$b" "$ft" "$TRAIN" 8 2>&1 | tee "$F/${n}_$TAG.log" || true
@@ -87,13 +116,13 @@ if [ "$STAGE" = all ] || [ "$STAGE" = heldout ]; then
     score "$n" "$F/onpath/$n"; score "${n}_$TAG" "$F/onpath/${n}_$TAG"
     shots "$b" "$TRAIN" "$F/offpath/$n" --every "$EVERY_OFF" --move $MOVE
     shots "$ft" "$TRAIN" "$F/offpath/${n}_$TAG" --every "$EVERY_OFF" --move $MOVE
-    PAIRS+=(--pair "$n" "$REP/$n.json" "$REP/${n}_$TAG.json")
+    "$CPUPY" scripts/accept_gate.py --pair heldout "$REP/$n.json" "$REP/${n}_$TAG.json" --out "$REP/gate_${n}_$TAG.json" \
+      && echo "GATE ${n}_$TAG ACCEPT" || echo "GATE ${n}_$TAG REJECT"
   done
-  [ ${#PAIRS[@]} -gt 0 ] && { "$CPUPY" scripts/accept_gate.py "${PAIRS[@]}" --out "$REP/gate_$TAG.json" && echo "GATE ACCEPT" || echo "GATE REJECT (rc $?)"; }
 fi
 
 # ---- 3. all-frames deliverable (trained on every frame: its on-path score is NOT held-out)
-if [ "$STAGE" = all ] || [ "$STAGE" = deliver ]; then
+if has deliver; then
   EX="$OUT/exports"; b="$EX/edgs_igs.ply"; ft="$EX/edgs_igs_$TAG.ply"
   if [ -f "$b" ]; then
     [ -f "$ft" ] || FT "$b" "$ft" "$ALLDS" 0 2>&1 | tee "$F/edgs_igs_all_$TAG.log" || true
@@ -114,7 +143,7 @@ F, rep, gt, tag = sys.argv[1:5]
 print(f"{'splat':28s}{'SuperSplat-engine PSNR':>24s}{'SSIM':>8s}{'LPIPS':>8s}")
 res = {}
 for f in sorted(os.listdir(rep)):
-    if f.endswith(".json") and not f.startswith(("gate", "agreement", "summary")):
+    if f.endswith(".json") and not f.startswith(("gate", "agreement", "attribution", "summary")):
         r = json.load(open(os.path.join(rep, f))); res[r["tag"]] = r
         print(f"{r['tag']:28s}{r['psnr']:24.2f}{r['ssim']:8.4f}{r['lpips']:8.4f}")
 json.dump(res, open(os.path.join(rep, f"summary_{tag}.json"), "w"), indent=2)
