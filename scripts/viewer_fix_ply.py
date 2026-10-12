@@ -26,7 +26,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ply", required=True); ap.add_argument("--dataset", required=True); ap.add_argument("--out", required=True)
     ap.add_argument("--test-split-interval", type=int, default=0, help="3DGRUT's rule; held-out frames are not used")
-    ap.add_argument("--viewer", default="pc274", choices=("pc274", "ss352"))
+    ap.add_argument("--viewer", default="ss352", choices=("pc274", "ss352"))
+    ap.add_argument("--display-scale", type=float, default=1.0, help="ss352: on-screen canvas px per image px")
     ap.add_argument("--cull-frac", type=float, default=0.5, help="fix gaussians culled in more than this share of views")
     ap.add_argument("--margin", type=float, default=1.05, help="target eigenvalue = threshold x margin")
     ap.add_argument("--prune-opacity", type=float, default=0.0)
@@ -36,7 +37,7 @@ def main():
     dev = "cuda"; t0 = time.time()
     vertex, p = load_ply(args.ply, dev); N = len(p["means"])
     fr = frames(args.dataset, args.test_split_interval, "train")
-    vr = ViewerRaster(args.viewer, "exact"); dil, lmin = vr.dil, vr.min_lambda(); target = lmin * args.margin
+    vr = ViewerRaster(args.viewer, "exact", display_scale=args.display_scale); dil, lmin = vr.dil, vr.min_lambda(); target = lmin * args.margin
     cams = [(to_t(np.linalg.inv(c2w), dev), cam_args(cam)) for _, cam, c2w in fr]
     newv = torch.zeros(N, device=dev); ratio = torch.ones(N, device=dev)
     nvis = torch.zeros(N, device=dev, dtype=torch.int32); ncull = torch.zeros_like(nvis)
