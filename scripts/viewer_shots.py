@@ -14,7 +14,8 @@ with several --bg values, <out-dir>/<bg>/<stem>.png per background. --bg black|g
 default background is black, scene-config.ts DEFAULT_BG_CLR). --scale K renders at K x the resolution with the same
 FOV and area-downsamples (a high-DPI screen / zoomed-in window). --move renders from cameras moved off the recorded
 path (camera axes right/down/back, dataset units). --editor also screenshots the SuperSplat editor (WebGPU build)
-with the PLY loaded at its default view. Alpha: `current` saves <out-dir>/_alpha/<stem>.png and the alpha-hole
+with the PLY loaded at its default view (viewport pixels from the editor's own offscreen render: headless WebGPU
+canvases are not composited into screenshots). Alpha: `current` saves <out-dir>/_alpha/<stem>.png and the alpha-hole
 fraction (pixels with accumulated alpha < 0.98) in _viewer.json; `pc274` estimates it when both black and white are
 rendered (alpha = 1 - max channel difference).
 
@@ -99,7 +100,10 @@ def serve(root):
             self.send_response(204); self.end_headers()
         def log_message(self, *a):
             pass
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(H, directory=root))
+    class S(http.server.ThreadingHTTPServer):
+        def handle_error(self, *a):                                       # browser-cancelled transfers
+            pass
+    srv = S(("127.0.0.1", 0), functools.partial(H, directory=root))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv.server_address[1]
 
@@ -129,6 +133,30 @@ def open_editor(pw, url, port, timeout_s=600):
                 time.sleep(3); return browser, page, fr, fr.evaluate(SS_FIND)
         time.sleep(2)
     raise RuntimeError(f"SuperSplat at {url}: no splat loaded after {timeout_s}s (last {info})")
+
+
+SS_VIEW = """async () => { const s = window.scene, c = s.canvas, r = c.getBoundingClientRect(), W = c.width, H = c.height;
+  s.camera.setPoseOverride(null); const px = await s.events.invoke('render.offscreen', W, H);
+  const k = s.events.invoke('bgClr');
+  let b = ''; for (let i = 0; i < px.length; i += 0x8000) b += String.fromCharCode.apply(null, px.subarray(i, i + 0x8000));
+  return {rect: [r.x, r.y, r.width, r.height], W, H, bg: [k.r, k.g, k.b], px: btoa(b)}; }"""
+
+
+def editor_shot(page, frame, path):
+    """Screenshot of the editor UI with its viewport filled by the editor's own render of the current (default) view:
+    headless Chromium's WebGPU canvas never reaches the compositor (Dawn needs --disable-vulkan-surface here), so
+    the raw viewport is black; the pixels come from 'render.offscreen' (no grid/gizmo overlays), over its bg colour."""
+    from PIL import Image
+    v = frame.evaluate(SS_VIEW)
+    shot = np.asarray(Image.open(io.BytesIO(page.screenshot())).convert("RGB")).astype(np.float64)
+    rgba = np.frombuffer(base64.b64decode(v["px"]), np.uint8).reshape(v["H"], v["W"], 4).astype(np.float64)
+    view = rgba[..., :3] + (255.0 - rgba[..., 3:]) * np.asarray(v["bg"])
+    x, y, w, h = (int(round(t)) for t in v["rect"])
+    h, w = min(h, shot.shape[0] - y), min(w, shot.shape[1] - x)
+    view = np.asarray(Image.fromarray(np.clip(view, 0, 255).astype(np.uint8)).resize((w, h), Image.BILINEAR), np.float64)
+    reg = shot[y:y + h, x:x + w]; empty = reg.sum(-1, keepdims=True) < 8              # viewport pixels not under UI
+    shot[y:y + h, x:x + w] = np.where(empty, view, reg)
+    Image.fromarray(np.clip(np.rint(shot), 0, 255).astype(np.uint8)).save(path)
 
 
 def main():
@@ -203,7 +231,7 @@ def main():
             M = np.asarray(info["M"], dtype=np.float64).reshape(4, 4).T   # splat entity world transform (column-major)
             sM = np.cbrt(abs(np.linalg.det(M[:3, :3]))); RM = M[:3, :3] / sM
             if args.editor:                                               # default view, before any pose override
-                page.screenshot(path=os.path.join(args.out_dir, "_supersplat_editor.png"))
+                editor_shot(page, frame, os.path.join(args.out_dir, "_supersplat_editor.png"))
         t0 = time.time()
         for name, cid, q, t in imgs:
             _, _, (fx, fy, cx, cy) = cams[cid]
@@ -240,8 +268,8 @@ def main():
               + (f"; alpha-hole fraction {np.mean(holes):.4f}" if holes else ""), flush=True)
         if args.editor and args.engine == "pc274":                       # the real SuperSplat app (WebGPU), default view
             try:
-                eb, ed, _, info = open_editor(pw, args.supersplat_url, port)
-                ed.screenshot(path=os.path.join(args.out_dir, "_supersplat_editor.png")); eb.close()
+                eb, ed, efr, info = open_editor(pw, args.supersplat_url, port)
+                editor_shot(ed, efr, os.path.join(args.out_dir, "_supersplat_editor.png")); eb.close()
                 print(f"[viewer] editor ({info['version']}, WebGPU={info['webgpu']}) screenshot ->",
                       os.path.join(args.out_dir, "_supersplat_editor.png"), flush=True)
             except Exception as e:                                        # no WebGPU: whatever the site serves
