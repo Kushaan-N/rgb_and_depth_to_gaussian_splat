@@ -5,7 +5,7 @@
 # moved off the path (MOVE), and (3) as a screenshot of the SuperSplat editor's default view. Candidates are
 # compared in the viewer reference's axes (pipeline.export_frame_model) next to the reference itself.
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o <log> sbatch/supersplat_check.sbatch configs/<seq>.yaml
-# Env: SMOKE=1 (reference only, 4 views), MOVE ("0 -0.3 1.0"), EVERY_OFF (40).
+# Env: SMOKE=1 (reference only, 4 views), MOVE ("0 -0.3 1.0"), EVERY_OFF (40), EXTRA (more candidates).
 #SBATCH -J supersplat-check
 #SBATCH -p gpu
 #SBATCH --gres=gpu:a100:1
@@ -40,7 +40,16 @@ fi
 # held-out models (viewer_bench.sbatch exported them, pipeline frame) and the reference
 CANDS="reference"
 "$VPY" scripts/viewer_shots.py --ply "$REF_PLY" --dataset "$RT" --names-from "$P/onpath/test" --out-dir "$S/onpath/reference" --editor
-for n in lidar_init lidar_init_depth igs igs_depth; do
+# EXTRA="name=<ckpt_last.pt or .ply glob> ...": more held-out-trained candidates (exported here if a checkpoint)
+for spec in ${EXTRA:-}; do
+  n="${spec%%=*}"; src="$(ls -t ${spec#*=} 2>/dev/null | head -1 || true)"; [ -n "$src" ] || { echo "no $spec"; continue; }
+  case "$src" in
+    *.ply) ln -sfn "$src" "$VB/$n.ply" ;;
+    *) [ -f "$VB/$n.ply" ] || PYTHONPATH="$CEAR_WS/3dgrut-densify" TORCH_EXTENSIONS_DIR="$CEAR_WS/torch-ext-densify" \
+         "$GPY" scripts/export_gaussian_ply.py --checkpoint "$src" --out "$VB/$n.ply" ;;
+  esac
+done
+for n in lidar_init lidar_init_depth igs igs_depth ${EXTRA:+$(for spec in $EXTRA; do printf '%s ' "${spec%%=*}"; done)}; do
   [ -f "$VB/$n.ply" ] || continue
   "$VPY" scripts/viewer_shots.py --ply "$VB/$n.ply" --dataset "$P/onpath/test" --out-dir "$S/onpath/$n"
   [ -f "$VB/${n}_refaxes.ply" ] || "$CPUPY" scripts/sim3_align_splat.py --colmap-model "$P/dataset/sparse/0" \
