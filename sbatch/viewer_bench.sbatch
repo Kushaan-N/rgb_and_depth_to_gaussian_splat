@@ -39,7 +39,12 @@ for n in "${!CK[@]}"; do
     --save-dir "$V/renders/$n" | tail -1
 done
 if [ -n "$REF_PLY" ] && [ -f "$REF_PLY" ]; then
-  "$SPY" scripts/eval_ply.py --ply "$REF_PLY" --dataset "$REF_DS" --names-from "$P/onpath/test" --tag reference \
+  RT="$V/reference_dataset"                                    # text-model view of the reference reconstruction
+  if [ ! -f "$RT/sparse/0/images.txt" ]; then
+    mkdir -p "$RT/sparse/0"; ln -sfn "$REF_DS/images" "$RT/images"
+    "$CPUPY" -c "import pycolmap,sys; pycolmap.Reconstruction(sys.argv[1]).write_text(sys.argv[2])" "$REF_DS/sparse/0" "$RT/sparse/0"
+  fi
+  "$SPY" scripts/eval_ply.py --ply "$REF_PLY" --dataset "$RT" --names-from "$P/onpath/test" --tag reference \
     --json-out "$REP/reference.json" --save-dir "$V/renders/reference" | tail -1
 fi
 
