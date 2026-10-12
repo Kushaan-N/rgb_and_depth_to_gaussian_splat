@@ -1,0 +1,328 @@
+diff --git a/configs/base_gs.yaml b/configs/base_gs.yaml
+index 56b4957..cc95b8e 100644
+--- a/configs/base_gs.yaml
++++ b/configs/base_gs.yaml
+@@ -86,6 +86,13 @@ model:
+   optimize_rotation: true
+   optimize_scale: true
+   bvh_update_frequency: 1
++  # Mip-Splatting 3D smoothing filter (patches/3dgrut-mip.patch): per-gaussian 3D low-pass of std
++  # sqrt(variance) * (depth / focal) of the closest training camera, folded into get_scale / get_density
++  mip_filter_3d:
++    enabled: false
++    variance: 0.2        # filter variance in units of the training pixel footprint^2 (paper: 0.2)
++    near: 0.2            # cameras closer than this (scene units) do not count
++    update_interval: 100 # recompute every N steps (and after every densification step)
+   feature_type: "sh" # one of [sh, nht] # sh: spherical harmonics radiance, nht: neural harmonics texture
+   progressive_training:
+     init_n_features: 0 # sh: initial sh deg | mlp: num of dims initially unmasked
+diff --git a/threedgrt_tracer/tracer.py b/threedgrt_tracer/tracer.py
+index a78f927..db6abcb 100644
+--- a/threedgrt_tracer/tracer.py
++++ b/threedgrt_tracer/tracer.py
+@@ -209,8 +209,8 @@ class Tracer:
+             self.tracer_wrapper.build_bvh(
+                 gaussians.positions.view(-1, 3).contiguous(),
+                 gaussians.rotation_activation(gaussians.rotation).view(-1, 4).contiguous(),
+-                gaussians.scale_activation(gaussians.scale).view(-1, 3).contiguous(),
+-                gaussians.density_activation(gaussians.density).view(-1, 1).contiguous(),
++                gaussians.get_scale().detach().view(-1, 3).contiguous(),
++                gaussians.get_density().detach().view(-1, 1).contiguous(),
+                 rebuild_bvh,
+                 allow_bvh_update,
+             )
+diff --git a/threedgrut/model/model.py b/threedgrut/model/model.py
+index f1e26e2..d6e64ec 100644
+--- a/threedgrut/model/model.py
++++ b/threedgrut/model/model.py
+@@ -14,6 +14,7 @@
+ # limitations under the License.
+ 
+ import os
++from contextlib import contextmanager
+ from pathlib import Path
+ 
+ import numpy as np
+@@ -99,11 +100,13 @@ class MixtureOfGaussians(torch.nn.Module, ExportableModel):
+         else:
+             raise ValueError(f"Unknown feature_type: {self.feature_type}")
+ 
+-    def get_scale(self, preactivation=False):
+-        if preactivation:
+-            return self.scale
+-        else:
+-            return self.scale_activation(self.scale)
++    def get_scale(self, preactivation=False, filtered=None):
++        # Mip-Splatting 3D filter (see compute_mip_filter_3d): renderer, losses and exporters see the filtered
++        # gaussians; filtered=False / mip_raw() give the raw parameters (densification strategies)
++        if not self._mip_use(filtered):
++            return self.scale if preactivation else self.scale_activation(self.scale)
++        s = torch.sqrt(torch.square(self.scale_activation(self.scale)) + torch.square(self.mip_filter_3d))
++        return self.scale_activation_inv(s) if preactivation else s
+ 
+     def get_rotation(self, preactivation=False):
+         if preactivation:
+@@ -111,11 +114,83 @@ class MixtureOfGaussians(torch.nn.Module, ExportableModel):
+         else:
+             return self.rotation_activation(self.rotation)
+ 
+-    def get_density(self, preactivation=False):
+-        if preactivation:
+-            return self.density
+-        else:
+-            return self.density_activation(self.density)
++    def get_density(self, preactivation=False, filtered=None):
++        if not self._mip_use(filtered):
++            return self.density if preactivation else self.density_activation(self.density)
++        # opacity * sqrt(det(S^2) / det(S^2 + f^2)) (energy-preserving 3D convolution), in log space: no underflow
++        s2 = torch.square(self.scale_activation(self.scale)).clamp_min(1e-30)
++        log_coef = 0.5 * (torch.log(s2) - torch.log(s2 + torch.square(self.mip_filter_3d))).sum(dim=1, keepdim=True)
++        d = self.density_activation(self.density) * torch.exp(log_coef)
++        return self.density_activation_inv(d) if preactivation else d
++
++    # ---- Mip-Splatting 3D smoothing filter (Yu et al., CVPR 2024, eq. 7-9; re-implemented from the paper) ----
++    def _mip_use(self, filtered=None) -> bool:
++        f = getattr(self, "mip_filter_3d", None)
++        if f is None or filtered is False or (filtered is None and self._mip_bypass):
++            return False
++        if f.shape[0] != self.num_gaussians:  # gaussians were added/removed since the last update
++            if self._mip_cams:
++                self.compute_mip_filter_3d()
++            else:
++                if not self._mip_warned:
++                    logger.warning(f"mip_filter_3d has {f.shape[0]} entries for {self.num_gaussians} gaussians "
++                                   "and no cameras to recompute it: rendering without the 3D filter")
++                    self._mip_warned = True
++                return False
++        return True
++
++    @contextmanager
++    def mip_raw(self):
++        """Within this block get_scale/get_density return the raw (unfiltered) parameters."""
++        prev, self._mip_bypass = self._mip_bypass, True
++        try:
++            yield
++        finally:
++            self._mip_bypass = prev
++
++    def set_mip_cameras(self, dataset, variance: float = 0.2, near: float = 0.2) -> bool:
++        """Collect the training cameras (w2c, fx, fy, cx, cy, w, h, fisheye max angle) for the 3D filter."""
++        try:
++            cams = []
++            for i, c2w in enumerate(dataset.poses):
++                intr = dataset.intrinsics[dataset.get_intrinsics_idx(i)][0]
++                w, h = (int(v) for v in intr["resolution"])
++                (fx, fy), (cx, cy) = (float(v) for v in intr["focal_length"]), (float(v) for v in intr["principal_point"])
++                max_angle = float(intr["max_angle"]) if "max_angle" in intr else None
++                w2c = torch.linalg.inv(torch.as_tensor(np.asarray(c2w), dtype=torch.float32))[:3].to(self.device)
++                cams.append((w2c, fx, fy, cx, cy, w, h, max_angle))
++        except (AttributeError, KeyError, TypeError) as e:
++            logger.warning(f"mip_filter_3d: cannot read training cameras from {type(dataset).__name__} ({e}): disabled")
++            return False
++        self._mip_cams, self._mip_variance, self._mip_near = cams, float(variance), float(near)
++        return len(cams) > 0
++
++    @torch.no_grad()
++    def compute_mip_filter_3d(self) -> None:
++        """Per-gaussian 3D low-pass std = sqrt(variance) * min over training cameras seeing it of depth / focal,
++        i.e. the finest world-space sampling interval any training view has there (Mip-Splatting eq. 8-9).
++        Gaussians no training camera sees get the largest interval of the seen ones."""
++        xyz = self.positions.detach()
++        best = torch.full((xyz.shape[0],), float("inf"), device=xyz.device)
++        for w2c, fx, fy, cx, cy, w, h, max_angle in self._mip_cams:
++            p = xyz @ w2c[:, :3].T + w2c[:, 3]
++            if max_angle is None:  # pinhole (distortion ignored): footprint ~ z / f
++                d = p[:, 2]
++                z = d.clamp_min(1e-3)
++                u, v = p[:, 0] / z * fx + cx, p[:, 1] / z * fy + cy
++            else:  # fisheye (equidistant approximation): footprint ~ range / f
++                d = p.norm(dim=1)
++                th = torch.acos((p[:, 2] / d.clamp_min(1e-9)).clamp(-1, 1))
++                rho = p[:, :2].norm(dim=1).clamp_min(1e-9)
++                u, v = th * p[:, 0] / rho * fx + cx, th * p[:, 1] / rho * fy + cy
++            ok = (d > self._mip_near) & (u >= -0.15 * w) & (u <= 1.15 * w) & (v >= -0.15 * h) & (v <= 1.15 * h)
++            if max_angle is not None:
++                ok &= th < max_angle
++            best = torch.where(ok, torch.minimum(best, d / max(fx, fy)), best)
++        seen = torch.isfinite(best)
++        best[~seen] = best[seen].max() if seen.any() else 0.0
++        self.mip_filter_3d = (best * self._mip_variance**0.5)[:, None].contiguous()
++        self._mip_warned = False
+ 
+     def get_covariance(self) -> torch.Tensor:
+         scales = self.get_scale()
+@@ -162,6 +237,9 @@ class MixtureOfGaussians(torch.nn.Module, ExportableModel):
+         elif self.feature_type == Features.Type.NHT:
+             model_params["features"] = self.features
+ 
++        if self.mip_filter_3d is not None:
++            model_params["mip_filter_3d"] = self.mip_filter_3d
++
+         return model_params
+ 
+     def __init__(self, conf, scene_extent=None):
+@@ -269,6 +347,11 @@ class MixtureOfGaussians(torch.nn.Module, ExportableModel):
+         # State of gradients of Gaussian parameters
+         self._gaussians_frozen = False
+ 
++        # Mip-Splatting 3D filter state: [N, 1] std (None = off), training cameras, raw-access flag
++        self.mip_filter_3d = None
++        self._mip_cams, self._mip_bypass, self._mip_warned = [], False, False
++        self._mip_variance, self._mip_near = 0.2, 0.2
++
+     @torch.no_grad()
+     def build_acc(self, rebuild=True):
+         self.renderer.build_acc(self, rebuild)
+@@ -685,6 +768,10 @@ class MixtureOfGaussians(torch.nn.Module, ExportableModel):
+             self.feature_dim_increase_step = checkpoint["feature_dim_increase_step"]
+ 
+         self.background.load_state_dict(checkpoint["background"])
++        f3d = checkpoint.get("mip_filter_3d")
++        self.mip_filter_3d = None if f3d is None else f3d.detach().to(device=self.scale.device, dtype=self.scale.dtype)
++        if f3d is not None:
++            logger.info(f"Mip 3D filter loaded: median {self.mip_filter_3d.median().item():.3g}")
+         if setup_optimizer:
+             self.set_optimizable_parameters()
+             self.setup_optimizer(state_dict=checkpoint["optimizer"])
+@@ -1002,6 +1089,7 @@ class MixtureOfGaussians(torch.nn.Module, ExportableModel):
+         self.rotation = torch.nn.Parameter(torch.tensor(mogt_rotation, dtype=self.rotation.dtype, device=self.device))
+ 
+         self.n_active_features = self.max_n_features
++        self.mip_filter_3d = None  # exported PLYs have the 3D filter baked into scale / opacity
+ 
+         if init_model:
+             self.set_optimizable_parameters()
+@@ -1036,6 +1124,10 @@ class MixtureOfGaussians(torch.nn.Module, ExportableModel):
+             elif other.feature_type == Features.Type.NHT:
+                 self.features = torch.nn.Parameter(other.features)
+         self.max_sh_degree = other.max_sh_degree
++        f3d = getattr(other, "mip_filter_3d", None)
++        self.mip_filter_3d = None if f3d is None else (f3d.clone() if deepcopy else f3d)
++        self._mip_cams = getattr(other, "_mip_cams", [])
++        self._mip_variance, self._mip_near = getattr(other, "_mip_variance", 0.2), getattr(other, "_mip_near", 0.2)
+         self.n_active_features = other.n_active_features
+         self.scene_extent = other.scene_extent
+         self.progressive_training = other.progressive_training
+@@ -1061,6 +1153,8 @@ class MixtureOfGaussians(torch.nn.Module, ExportableModel):
+         sliced.rotation = torch.nn.Parameter(sliced.rotation[idx])
+         sliced.scale = torch.nn.Parameter(sliced.scale[idx])
+         sliced.density = torch.nn.Parameter(sliced.density[idx])
++        if sliced.mip_filter_3d is not None and sliced.mip_filter_3d.shape[0] == self.num_gaussians:
++            sliced.mip_filter_3d = sliced.mip_filter_3d[idx]
+         if self.feature_type == Features.Type.SH:
+             sliced.features_albedo = torch.nn.Parameter(sliced.features_albedo[idx])
+             sliced.features_specular = torch.nn.Parameter(sliced.features_specular[idx])
+diff --git a/threedgrut/strategy/improved.py b/threedgrut/strategy/improved.py
+index 3384565..9b999f6 100644
+--- a/threedgrut/strategy/improved.py
++++ b/threedgrut/strategy/improved.py
+@@ -72,10 +72,10 @@ class _ConstantRadianceView:
+         return self._m.get_rotation().detach()
+ 
+     def get_scale(self):
+-        return self._m.get_scale().detach()
++        return self._m.get_scale(filtered=True).detach()  # what the renderer sees (Mip 3D filter, if any)
+ 
+     def get_density(self):
+-        return self._m.get_density().detach()
++        return self._m.get_density(filtered=True).detach()
+ 
+     def get_features(self):
+         return self._f
+diff --git a/threedgrut/trainer.py b/threedgrut/trainer.py
+index c2ffaa5..449bba6 100644
+--- a/threedgrut/trainer.py
++++ b/threedgrut/trainer.py
+@@ -414,6 +414,17 @@ class Trainer3DGRUT:
+         self.global_step = global_step
+         self.n_epochs = int((conf.n_iterations + len(train_dataset) - 1) / len(train_dataset))
+ 
++        # Mip-Splatting 3D smoothing filter: bound each gaussian's size by the training cameras' sampling rate
++        mip = conf.model.get("mip_filter_3d", None)
++        self.mip_3d = bool(mip is not None and mip.get("enabled", False))
++        if self.mip_3d and model.set_mip_cameras(train_dataset, mip.get("variance", 0.2), mip.get("near", 0.2)):
++            model.compute_mip_filter_3d()
++            f = model.mip_filter_3d
++            logger.info(f"🔍 Mip 3D filter on ({len(model._mip_cams)} training cameras): std median "
++                        f"{f.median().item():.3g}, min {f.min().item():.3g}, max {f.max().item():.3g}")
++        else:
++            self.mip_3d = False
++
+     def init_gui(
+         self,
+         conf: DictConfig,
+@@ -1210,13 +1221,14 @@ class Trainer3DGRUT:
+ 
+         # Backward strategy step
+         with torch.cuda.nvtx.range(f"train_{global_step}_pre_bwd"):
+-            self.strategy.pre_backward(
+-                step=global_step,
+-                scene_extent=self.scene_extent,
+-                train_dataset=self.train_dataset,
+-                batch=gpu_batch,
+-                writer=self.tracking.writer,
+-            )
++            with self.model.mip_raw():  # strategies decide on the raw parameters (as Mip-Splatting does)
++                self.strategy.pre_backward(
++                    step=global_step,
++                    scene_extent=self.scene_extent,
++                    train_dataset=self.train_dataset,
++                    batch=gpu_batch,
++                    writer=self.tracking.writer,
++                )
+ 
+         # Back-propagate the gradients and update the parameters
+         with torch.cuda.nvtx.range(f"train_{global_step}_bwd"):
+@@ -1226,13 +1238,15 @@ class Trainer3DGRUT:
+ 
+         # Post backward strategy step
+         with torch.cuda.nvtx.range(f"train_{global_step}_post_bwd"):
+-            scene_updated = self.strategy.post_backward(
+-                step=global_step,
+-                scene_extent=self.scene_extent,
+-                train_dataset=self.train_dataset,
+-                batch=gpu_batch,
+-                writer=self.tracking.writer,
+-            )
++            with self.model.mip_raw():
++                scene_updated_bwd = self.strategy.post_backward(
++                    step=global_step,
++                    scene_extent=self.scene_extent,
++                    train_dataset=self.train_dataset,
++                    batch=gpu_batch,
++                    writer=self.tracking.writer,
++                )
++            scene_updated = scene_updated_bwd
+ 
+         # Optimizer step
+         with torch.cuda.nvtx.range(f"train_{global_step}_backprop"):
+@@ -1274,13 +1288,22 @@ class Trainer3DGRUT:
+ 
+         # Post backward strategy step
+         with torch.cuda.nvtx.range(f"train_{global_step}_post_opt_step"):
+-            scene_updated = self.strategy.post_optimizer_step(
+-                step=global_step,
+-                scene_extent=self.scene_extent,
+-                train_dataset=self.train_dataset,
+-                batch=gpu_batch,
+-                writer=self.tracking.writer,
+-            )
++            with self.model.mip_raw():
++                scene_updated = self.strategy.post_optimizer_step(
++                    step=global_step,
++                    scene_extent=self.scene_extent,
++                    train_dataset=self.train_dataset,
++                    batch=gpu_batch,
++                    writer=self.tracking.writer,
++                )
++
++        # Recompute the Mip 3D filter after densification and periodically (not in the last 100 steps)
++        if self.mip_3d:
++            every = int(conf.model.mip_filter_3d.get("update_interval", 100))
++            if scene_updated or scene_updated_bwd or (
++                every > 0 and global_step % every == 0 and global_step < conf.n_iterations - 100
++            ):
++                self.model.compute_mip_filter_3d()
+ 
+         # Update the SH if required
+         if self.model.progressive_training and check_step_condition(
