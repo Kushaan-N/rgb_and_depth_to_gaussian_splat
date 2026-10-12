@@ -44,7 +44,7 @@ OUT="$(get paths.out_root)"; P="$OUT/pipeline"; VB="$P/viewer_bench"
 REF_DS="$(get pipeline.viewer_reference_dataset)"; FRAME="$(get pipeline.export_frame_model)"
 BASE_CKPT="${BASE_CKPT:-$(ls -t "$P"/edgs/on/edgs_igs4m/run/*/ckpt_last.pt | head -1)}"; BASE_DATA="${BASE_DATA:-$P/edgs/on/data}"
 BASE_CFG="$(dirname "$BASE_CKPT")/parsed.yaml"; TEST="$P/onpath/test"
-ARMS="${ARMS:-base ctrl wd wdr0.3 wdr0.1}"; FT_ITERS="${FT_ITERS:-10000}"; LAMBDA_WD="${LAMBDA_WD:-0.025}"; WD_SIGMA="${WD_SIGMA:-4}"
+ARMS="${ARMS:-base ctrl_mu wdr1_mu wdr0.5_mu wdr0.3_mu}"; FT_ITERS="${FT_ITERS:-10000}"; LAMBDA_WD="${LAMBDA_WD:-0.025}"; WD_SIGMA="${WD_SIGMA:-4}"
 WD_WARMUP="${WD_WARMUP:-3000}"
 MOVE="${MOVE:-0 -0.3 1.0}"; EVERY_OFF="${EVERY_OFF:-40}"; MAX_PSNR_DROP="${MAX_PSNR_DROP:-0.3}"; EVERY_ON=1; PE="$P/perceptual"
 if [ "${SMOKE:-0}" = 1 ]; then FT_ITERS=200; EVERY_OFF=200; PE="$P/perceptual_smoke"; fi
