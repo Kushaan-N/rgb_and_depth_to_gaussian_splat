@@ -4,7 +4,8 @@
 #   igs   Improved-GS, 1M budget                       -> <out>/exports/igs*.ply
 #   igs_d Improved-GS, 2M budget + LiDAR depth loss    -> <out>/exports/igs_depth*.ply
 # then the floor fill (infill_floor.py, as the pipeline's post stage) -> <name>_filled.ply (COLMAP frame),
-# <name>_filled_metric.ply (metric) and <name>_filled_refaxes.ply (pipeline.export_frame_model's axes).
+# <name>_filled_metric.ply (metric) and <name>_filled_refaxes.ply (pipeline.export_frame_model's axes); then
+# every other LiDAR-measured surface no camera supports (fill_unseen_surfaces.py) -> <name>_complete*.ply.
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o <log> sbatch/export_igs.sbatch configs/<seq>.yaml
 # Env: ARMS ("igs igs_d").
 #SBATCH -J export-igs
@@ -61,13 +62,22 @@ for arm in ${ARMS:-igs igs_d}; do
   else
     cp "$E/$NAME.ply" "$E/${NAME}_filled.ply"
   fi
-  "$CPUPY" scripts/sim3_align_splat.py --colmap-model "$P/dataset/sparse/0" --gt-model "$GT" \
-    --in-ply "$E/${NAME}_filled.ply" --out-ply "$E/${NAME}_filled_metric.ply"
+  # every other surface the LiDAR measured but no camera supports (object backs, walls behind the path):
+  # fill it, coloured from neighbouring observed surfaces, except where a training camera sees it
+  [ -d "$F/${arm}_depth" ] || "$GPY" scripts/eval_views.py --checkpoint "$CK" --dataset "$DATA" --no-metrics \
+    --save-depth-dir "$F/${arm}_depth" | tail -1
+  CLOUD="$P/offpath/depth/lidar_static.ply"; [ -f "$CLOUD" ] || CLOUD="$P/depth_cloud.ply"
+  "$CPUPY" scripts/fill_unseen_surfaces.py --splat-ply "$E/${NAME}_filled.ply" --cloud "$CLOUD" \
+    --sim3-json "$P/sim3.json" --dataset "$DATA" --splat-depth-dir "$F/${arm}_depth" --out-ply "$E/${NAME}_complete.ply"
   FRAME="$(get pipeline.export_frame_model "")"                     # deliver in the viewer reference's axes
-  if [ -n "$FRAME" ]; then
-    "$CPUPY" scripts/sim3_align_splat.py --colmap-model "$P/dataset/sparse/0" --gt-model "$FRAME" \
-      --in-ply "$E/${NAME}_filled.ply" --out-ply "$E/${NAME}_filled_refaxes.ply"
-  fi
+  for v in filled complete; do
+    "$CPUPY" scripts/sim3_align_splat.py --colmap-model "$P/dataset/sparse/0" --gt-model "$GT" \
+      --in-ply "$E/${NAME}_$v.ply" --out-ply "$E/${NAME}_${v}_metric.ply"
+    if [ -n "$FRAME" ]; then
+      "$CPUPY" scripts/sim3_align_splat.py --colmap-model "$P/dataset/sparse/0" --gt-model "$FRAME" \
+        --in-ply "$E/${NAME}_$v.ply" --out-ply "$E/${NAME}_${v}_refaxes.ply"
+    fi
+  done
 done
 ls -la "$E"/igs*.ply
 echo "EXPORT_IGS_DONE"
