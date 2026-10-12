@@ -19,9 +19,12 @@ camera frames themselves; the discs keep their geometry (fill_unseen_surfaces.py
   COLOUR   per-patch 3x4 affine colour transform camera -> splat (robust least squares on the observed ring,
            ridge to identity), so the fill matches what the viewer shows next to it; SuperSplat shows
            rgb = 0.5 + C0 dc (linear, fill_inpaint.py --roundtrip-*).
-  FILL     what no camera saw: (1) straight features (tape lines) - long Hough segments of colour deviating from
-           the local background are extended through the hole as strokes of their own width/colour; (2) the rest
-           by LaMa from the sharp context (splat texture only where no camera saw the context).
+  FILL     what no camera saw: (1) straight coloured features (tape lines: long Hough segments, chromatic vs the
+           local background, in a parallel family) continued through the hole where they re-emerge on the far side
+           or the gap is < 0.3 m; (2) periodic texture (tiles): masked normalised autocorrelation of the camera
+           texture, a prominent peak (--lattice-min-corr, >= 6 observed periods) -> each hole texel copies the
+           nearest observed background lattice translate; (3) the rest by LaMa from the sharp context (splat
+           texture only where no camera saw the context).
   FALLBACK a patch whose camera-observed ring is < --min-known (or tiny clusters) keeps its colours from
            --prev-ply (the fill_inpaint.py result), so v3 is never worse than v2 for want of data.
 Only fill discs' f_dc change; the base splat is copied untouched (asserted), so real views are unchanged.
@@ -92,7 +95,7 @@ def robust_affine(X, Y, ridge=0.05, iters=3):
     return M, float(np.sqrt(np.mean(r[w > 0] ** 2))) if w.sum() else float("nan")
 
 
-def extend_lines(img, known, hole, px, min_len_m, dev_thr, max_lines=12):
+def extend_lines(img, known, hole, px, min_len_m, dev_thr, chroma_min=0.06, max_lines=12, max_gap_m=0.3):
     """Straight, colour-distinct features (tape lines) of the observed texture continued through the hole.
     -> painted image, painted mask, list of lines."""
     import cv2
@@ -127,6 +130,14 @@ def extend_lines(img, known, hole, px, min_len_m, dev_thr, max_lines=12):
         if on.mean() < 0.6 or width > int(0.12 / px) + 2:
             continue
         col = np.median(img[yi[:, 15][on], xi[:, 15][on]], 0)
+        bgc = np.median(bg[yi[:, 15][on], xi[:, 15][on]], 0)
+        if (col.max() - col.min()) - (bgc.max() - bgc.min()) < chroma_min:
+            continue                                                         # tape is coloured; shading edges are not
+        fam = sum(abs(abs(d @ du) - 1) < 1.5e-3 and abs(rho - r) > 4 for du, r in used[:-1]) + \
+            sum(abs(abs(d @ (np.array([x3 - x2, y3 - y2]) / max(np.hypot(x3 - x2, y3 - y2), 1e-6))) - 1) < 1.5e-3
+                and abs(rho - nrm @ [x2, y2]) > 4 for x2, y2, x3, y3 in segs)
+        if fam < 1:
+            continue                                                         # tape lines come in parallel families
         # walk outward from both ends through contiguous hole pixels; paint where the walk crossed a hole
         n_paint = 0
         for sgn, start in ((-1, np.array([x0, y0])), (1, np.array([x1, y1]))):
@@ -141,7 +152,13 @@ def extend_lines(img, known, hole, px, min_len_m, dev_thr, max_lines=12):
                     break
                 elif len(seg_pts) == 0 and np.linalg.norm(p - start) > 0.1 / px:
                     break                                                    # the segment does not reach a hole
-            if len(seg_pts) > 1:
+            reemerge = False
+            if entered and 0 <= xi_ < W and 0 <= yi_ < H:                    # the walk left the hole: line continues there?
+                tt = np.arange(1, int(0.1 / px) + 2)
+                q_ = p[None] + sgn * tt[:, None] * d[None]
+                qx, qy = np.clip(q_[:, 0].round().astype(int), 0, W - 1), np.clip(q_[:, 1].round().astype(int), 0, H - 1)
+                reemerge = feat[qy, qx].mean() > 0.5
+            if len(seg_pts) > 1 and (reemerge or len(seg_pts) * px < max_gap_m):
                 a, b = seg_pts[0], seg_pts[-1]
                 m = np.zeros((H, W), np.uint8)
                 cv2.line(m, tuple(int(round(v)) for v in a), tuple(int(round(v)) for v in b), 1, width)
@@ -153,6 +170,64 @@ def extend_lines(img, known, hole, px, min_len_m, dev_thr, max_lines=12):
         if len(lines) >= max_lines:
             break
     return out, painted, lines
+
+
+def lattice_fill(img, known, hole, px, min_corr, min_shift_m=0.15, max_shift_m=1.2, min_prom=0.1):
+    """Periodic texture (floor tiles): the two strongest translation peaks T1, T2 of the masked normalised
+    autocorrelation of the observed high-pass texture; each hole pixel copies the nearest lattice translate
+    x + k T1 + l T2 that is observed and background (not an object or tape: those are not tiled).
+    -> image, copied mask, info."""
+    import cv2
+    H, W = known.shape
+    med = np.median(img[known], 0) if known.sum() > 100 else None
+    if med is None:
+        return img, np.zeros((H, W), bool), {}
+    bgok = known & (np.abs(img - med).sum(-1) < 0.15)                      # plain background texels
+    grey = img.mean(-1); hp = grey - cv2.GaussianBlur(grey, (0, 0), max(1.5, 0.03 / px))   # seams, not shading
+    w = bgok.astype(np.float64); g = np.where(bgok, hp, 0.0)
+    Hp, Wp = cv2.getOptimalDFTSize(2 * H), cv2.getOptimalDFTSize(2 * W)
+    Fw = np.fft.rfft2(w, (Hp, Wp)); Fg = np.fft.rfft2(g, (Hp, Wp)); Fg2 = np.fft.rfft2(g * g, (Hp, Wp))
+    A = np.fft.irfft2(Fg * np.conj(Fg), (Hp, Wp)); B = np.fft.irfft2(Fg2 * np.conj(Fw), (Hp, Wp))
+    C = np.fft.irfft2(Fw * np.conj(Fg2), (Hp, Wp)); N = np.fft.irfft2(Fw * np.conj(Fw), (Hp, Wp))
+    corr = A / np.sqrt(np.maximum(B * C, 1e-12))
+    dy = np.fft.fftfreq(Hp, 1 / Hp).round().astype(int)[:, None]; dx = np.fft.fftfreq(Wp, 1 / Wp).round().astype(int)[None, :]
+    rr = np.hypot(dx, dy) * px
+    ok = (rr >= min_shift_m) & (rr <= max_shift_m) & (N > max(0.15 * bgok.sum(), 400))
+    cm = np.where(ok, corr, -1.0)
+    loc = (cm >= cv2.dilate(cm.astype(np.float32), np.ones((9, 9), np.uint8)) - 1e-9) & ok & (rr >= min_shift_m + 3 * px)
+    # a lattice peak stands out of the correlation at the same radius (smooth texture decays radially)
+    rb = np.round(rr / px).astype(int); prof = np.bincount(rb[ok], cm[ok], rb.max() + 1) / np.maximum(np.bincount(rb[ok], None, rb.max() + 1), 1)
+    loc &= (cm - prof[rb]) > min_prom
+    pk = np.argwhere(loc); vals = cm[loc]
+    if not len(vals) or vals.max() < min_corr:
+        return img, np.zeros((H, W), bool), {"corr": round(float(vals.max()) if len(vals) else -1, 3)}
+    order = np.argsort(-vals); pk, vals = pk[order], vals[order]
+    T1 = np.array([dx[0, pk[0][1]], dy[pk[0][0], 0]], float); c1 = float(vals[0]); T2, c2 = None, 0.0
+    if bgok.sum() < 6 * (T1 @ T1):                                         # too few observed periods to trust it
+        return img, np.zeros((H, W), bool), {"corr": round(c1, 3), "T1_m": (T1 * px).round(3).tolist(), "rejected": "small source"}
+    for (i, j), v_ in zip(pk[1:], vals[1:]):
+        T = np.array([dx[0, j], dy[i, 0]], float)
+        if v_ < min_corr:
+            break
+        if abs(T @ T1) / (np.linalg.norm(T) * np.linalg.norm(T1)) < 0.85:   # not collinear: second lattice axis
+            T2, c2 = T, float(v_); break
+    K = int(np.ceil(max(H, W) / np.linalg.norm(T1))) + 1
+    cands = [(k, 0) for k in range(-K, K + 1)] if T2 is None else \
+        [(k, l) for k in range(-K, K + 1) for l in range(-K, K + 1)]
+    shifts = sorted(((k * T1 + (l * T2 if T2 is not None else 0)) for k, l in cands if (k, l) != (0, 0)), key=np.linalg.norm)
+    out = img.copy(); todo = hole.copy(); copied = np.zeros((H, W), bool)
+    ys, xs = np.nonzero(todo)
+    for S_ in shifts:
+        if not len(ys):
+            break
+        sx, sy = int(round(xs[0] * 0 + S_[0])), int(round(S_[1]))
+        x2, y2 = xs + sx, ys + sy
+        ins = (x2 >= 0) & (x2 < W) & (y2 >= 0) & (y2 < H)
+        hit = np.zeros(len(xs), bool); hit[ins] = bgok[y2[ins], x2[ins]]
+        out[ys[hit], xs[hit]] = img[y2[hit], x2[hit]]; copied[ys[hit], xs[hit]] = True
+        ys, xs = ys[~hit], xs[~hit]
+    return out, copied, {"T1_m": (T1 * px).round(3).tolist(), "corr1": round(c1, 3),
+                         "T2_m": None if T2 is None else (T2 * px).round(3).tolist(), "corr2": round(c2, 3)}
 
 
 def look_at_quat(C, target, up):
@@ -194,6 +269,9 @@ def main():
     ap.add_argument("--tol-m", type=float, default=0.04, help="depth agreement tolerance along the normal (m)")
     ap.add_argument("--top-k", type=int, default=7)
     ap.add_argument("--min-glimpse", type=int, default=2, help="views needed for a texel inside the fill footprint")
+    ap.add_argument("--height-sigma-m", type=float, default=0.1, help="surface height smoothing (m)")
+    ap.add_argument("--lattice", type=int, default=1, help="copy the hole from lattice translates of the observed texture")
+    ap.add_argument("--lattice-min-corr", type=float, default=0.25)
     ap.add_argument("--lines", type=int, default=1, help="continue straight colour features (tape) through holes")
     ap.add_argument("--line-min-m", type=float, default=0.3)
     ap.add_argument("--line-dev", type=float, default=0.12, help="colour deviation from the local background (sum RGB)")
@@ -312,7 +390,8 @@ def main():
             else:
                 vis_l = np.zeros(len(r), bool)
             ins = inside[ii]
-            use = np.where(ins, vis_l, vis_s | (vis_l & not_front)) & ~edge[vi, ui]
+            # LiDAR agreement wins over the splat: a floater in front of the floor was fit to the floor's colour
+            use = np.where(ins, vis_l, vis_s | vis_l) & ~edge[vi, ui]
             if use.sum() < 20:
                 continue
             ii, u, v, foot, cosv, ins = ii[use], u[use], v[use], foot[use], cosv[use], ins[use]
@@ -330,8 +409,9 @@ def main():
         good = (Q > 0) & (Q >= 0.4 * Q.max(1, keepdims=True))
         nsamp = good.sum(1)
         Cn = np.where(good[..., None], Cs, np.nan)
-        with np.errstate(all="ignore"):
-            tex = np.nanmedian(Cn, 1)
+        import warnings
+        with np.errstate(all="ignore"), warnings.catch_warnings():
+            warnings.simplefilter("ignore"); tex = np.nanmedian(Cn, 1)
         valid = (nsamp >= 1) & ~(inside & (nsamp < args.min_glimpse))
         tex[~valid] = 0
         return tex, valid, nsamp, nview, gains
@@ -362,7 +442,7 @@ def main():
             np.add.at(hacc, (np.clip(fv.round().astype(int), 0, H - 1), np.clip(fu.round().astype(int), 0, W - 1)), dfill * 5)
             np.add.at(hw, (np.clip(fv.round().astype(int), 0, H - 1), np.clip(fu.round().astype(int), 0, W - 1)), 5.0)
             hacc += hgt * wsum * ~fp; hw += wsum * ~fp
-            sg = max(1.5, 0.03 / px)
+            sg = max(1.5, args.height_sigma_m / px)                  # smooth: height noise shifts grazing views
             hb = cv2.GaussianBlur(hacc, (0, 0), sg) / np.maximum(cv2.GaussianBlur(hw, (0, 0), sg), 1e-9)
             hb2 = cv2.GaussianBlur(hacc, (0, 0), 8 * sg) / np.maximum(cv2.GaussianBlur(hw, (0, 0), 8 * sg), 1e-9)
             hfin = np.where(cv2.GaussianBlur(hw, (0, 0), sg) > 1e-3, hb, hb2)
@@ -396,15 +476,19 @@ def main():
         known = Mc | (Ms & ~fp)
         hole = ~known
         hole = hole | (cv2.dilate(hole.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool) & ~Mc)   # half-covered rims
-        painted = np.zeros((H, W), bool); lines = []
+        painted = np.zeros((H, W), bool); lines = []; lat = {}
         if args.lines and hole.any():
             I, painted, lines = extend_lines(I, known & ~hole, hole, px, args.line_min_m, args.line_dev)
-        res = inp(I, hole & ~painted) if (hole & ~painted).any() else I
+        copied = np.zeros((H, W), bool)
+        if args.lattice and (hole & ~painted).any():
+            I, copied, lat = lattice_fill(I, Mc & ~hole, hole & ~painted, px, args.lattice_min_corr)
+        rest = hole & ~painted & ~copied
+        res = inp(I, rest) if rest.any() else I
         dc_new = (np.clip(bilinear(res, fu, fv), 0, 1) - 0.5) / C0
         new_dc[idx] = dc_new
         fi_, fj_ = np.clip(fv.round().astype(int), 0, H - 1), np.clip(fu.round().astype(int), 0, W - 1)
-        src[idx] = np.where(Mc[fi_, fj_], 1, np.where(painted[fi_, fj_], 2, 3))
-        info.update({"lines": len(lines), "discs_camera": int(Mc[fi_, fj_].sum()), "discs_line": int((~Mc[fi_, fj_] & painted[fi_, fj_]).sum())})
+        src[idx] = np.where(Mc[fi_, fj_], 1, np.where(painted[fi_, fj_], 2, np.where(copied[fi_, fj_], 4, 3)))
+        info.update({"lines": len(lines), "lattice": lat, "discs_lattice": int((src[idx] == 4).sum()), "discs_camera": int(Mc[fi_, fj_].sum()), "discs_line": int((~Mc[fi_, fj_] & painted[fi_, fj_]).sum())})
         stats["patches"].append(info)
         if args.debug_dir and pi < args.debug_n:
             def lab(x, s_):
@@ -438,6 +522,7 @@ def main():
     stats.update({"patches_n": len(patches), "patches_done": int(sum("fallback" not in p for p in stats["patches"])),
                   "discs_prev": int((src == 0).sum()), "discs_camera": int((src == 1).sum()),
                   "discs_line": int((src == 2).sum()), "discs_lama": int((src == 3).sum()),
+                  "discs_lattice": int((src == 4).sum()),
                   "mean_abs_rgb_change_vs_prev": round(float((C0 * np.abs(new_dc - prev_dc)).mean()), 4),
                   "out": args.out_ply, "seconds": round(time.time() - t0, 1)})
 
