@@ -115,7 +115,11 @@ case " $ARMS " in *" solo "*)                              # reference-only trai
     awk -v r="$REF/" 'NF >= 10 && index($10, r) == 1 {print; print ""}' "$W/data/sparse/0/images.txt" > "$SD/sparse/0/images.txt"
     rm -rf "$W/solo_edgs"; "$EPY" scripts/edgs_init.py --dataset "$SD" --out "$W/solo_edgs" --test-split-interval 0 \
       --sim3-json "$F/sim3.json" > "$W/solo_edgs_init.log" 2>&1 || { tail -40 "$W/solo_edgs_init.log"; exit 1; }
-  fi;;
+  fi
+  for d in "$SD" "$W/solo_edgs"; do                         # keep only the cameras its frames use (3DGRUT needs that)
+    awk 'NR == FNR {if (NF >= 10) u[$9] = 1; next} /^#/ || ($1 in u)' "$d/sparse/0/images.txt" "$d/sparse/0/cameras.txt" \
+      > "$d/sparse/0/cameras.tmp" && mv "$d/sparse/0/cameras.tmp" "$d/sparse/0/cameras.txt"
+  done;;
 esac
 declare -A ACK
 for arm in $ARMS; do
