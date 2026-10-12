@@ -55,10 +55,16 @@ case " $STAGES " in *" B "*)
     mkdir -p "$Y/train"; date
     ( cd "$DDIR" && "${IGS_ENV[@]}" "$GPY" train.py --config-name apps/colmap_3dgut_improved.yaml path="$P/edgs/on/data" \
         out_dir="$RUN" experiment_name=run dataset.downsample_factor=1 n_iterations="$ITERS" dataset.test_split_interval=8 \
-        strategy.budget=4000000 loss.use_depth=false model.background.color=random ) > "$RUN.log" 2>&1 || { tail -40 "$RUN.log"; exit 1; }
-    CK="$(ls -t "$RUN"/run/*/ckpt_last.pt | head -1)"; date
+        strategy.budget=4000000 loss.use_depth=false model.background.color=random ) > "$RUN.log" 2>&1 || true
+    # 3DGRUT's Renderer (end-of-training test pass) only knows black/white: it asserts after ckpt_last.pt is written
+    CK="$(ls -t "$RUN"/run/*/ckpt_last.pt 2>/dev/null | head -1 || true)"; date
+    [ -n "$CK" ] && [ -d "$(dirname "$CK")/ours_$ITERS" ] || { tail -40 "$RUN.log"; exit 1; }
   fi
   grep -n -A2 "^  background:" "$(dirname "$CK")/parsed.yaml" || true
+  # evaluation copy: 'random' is black when not training, so store it as black for Renderer.from_checkpoint
+  CKE="$(dirname "$CK")/ckpt_eval_black.pt"
+  [ -f "$CKE" ] || "$GPY" -c "import torch,sys; c=torch.load(sys.argv[1],weights_only=False); c['config'].model.background.color='black'; torch.save(c,sys.argv[2])" "$CK" "$CKE"
+  CK="$CKE"
   [ -f "$REP/3dgrut_$ARM.json" ] || "${IGS_ENV[@]}" "$GPY" scripts/eval_views.py --checkpoint "$CK" --dataset "$TEST" \
     --tag "on_$ARM" --json-out "$REP/3dgrut_$ARM.json" --save-dir "$Y/renders_3dgrut/$ARM" | tail -1
   "$CPUPY" scripts/accept_gate.py --pair onpath_3dgrut "$P/edgs/report/on_edgs_igs4m.json" "$REP/3dgrut_$ARM.json" \
@@ -140,7 +146,7 @@ if cmp:
         [[(cv2.imread(os.path.join(Y, "onpath", "current", t, b, n)), f"{t} {b}") for b in ("black", "grey")] +
          [(cv2.imread(os.path.join(Y, "onpath", "current", t, "_alpha", n)), f"{t} alpha")] for t in cmp], []), pick,
         os.path.join(Y, "onpath_rbg_montage.jpg"))
-offd = os.path.join(Y, "offpath", tags[0]); off = sorted(f for f in os.listdir(offd) if f.endswith(".png"))[:5] if os.path.isdir(offd) else []
+offd = os.path.join(Y, "offpath", tags[0], "black"); off = sorted(f for f in os.listdir(offd) if f.endswith(".png"))[:5] if os.path.isdir(offd) else []
 if off:
     montage(lambda n: sum([[(cv2.imread(os.path.join(Y, "offpath", t, b, n)), f"{t} {b}") for b in ("black", "grey")]
                            for t in tags], []), off, os.path.join(Y, "offpath_montage.jpg"))
