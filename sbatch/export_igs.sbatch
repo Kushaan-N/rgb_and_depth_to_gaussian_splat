@@ -73,7 +73,7 @@ for arm in ${ARMS:-igs igs_d}; do
   fi
   # every other surface the LiDAR measured but no camera supports (object backs, walls behind the path):
   # fill it, coloured from neighbouring observed surfaces, except where a training camera sees it
-  [ -d "$F/${arm}_depth" ] || "$GPY" scripts/eval_views.py --checkpoint "$CK" --dataset "$DATA" --no-metrics \
+  ls "$F/${arm}_depth"/*_splatopacity.npy >/dev/null 2>&1 || "$GPY" scripts/eval_views.py --checkpoint "$CK" --dataset "$DATA" --no-metrics \
     --save-depth-dir "$F/${arm}_depth" | tail -1
   CLOUD="$P/offpath/depth/lidar_static.ply"; [ -f "$CLOUD" ] || CLOUD="$P/depth_cloud.ply"
   "$CPUPY" scripts/fill_unseen_surfaces.py --splat-ply "$E/${NAME}_filled.ply" --cloud "$CLOUD" \
