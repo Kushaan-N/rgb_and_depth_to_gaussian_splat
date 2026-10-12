@@ -7,7 +7,7 @@
 # base / complete / inpainted (the fill must not change real views).
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o logs/fill-inpaint-%j.out sbatch/fill_inpaint.sbatch configs/<seq>.yaml
 # Env: NAME (edgs_igs), BASE (exports/<NAME>.ply), ARM (igs_full/<ARM>_depth: edgs_igs), METHOD (lama|shiftmap|telea), MOVE ("0 -0.6 1.5"),
-#      EVERY_OFF (40), TAG (inpainted), SMOKE=1 (round trip + inpaint + debug textures only).
+#      EVERY_OFF (40), TAG (inpainted), ENGINE (current = live SuperSplat on WebGPU | pc274), BGS ("black grey"), SMOKE=1 (round trip + inpaint + debug textures only).
 #SBATCH -J fill-inpaint
 #SBATCH -p gpu,gpu-preempt
 #SBATCH --gres=gpu:a100:1
@@ -25,7 +25,8 @@ export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$CEAR_WS/playwright
 get() { "$CPUPY" scripts/cfg_get.py "$CFG" "$@"; }
 OUT="$(get paths.out_root)"; P="$OUT/pipeline"; E="$OUT/exports"; FRAME="$(get pipeline.export_frame_model)"
 NAME="${NAME:-edgs_igs}"; ARM="${ARM:-edgs_igs}"; METHOD="${METHOD:-lama}"; TAG="${TAG:-inpainted}"
-MOVE="${MOVE:-0 -0.6 1.5}"; EVERY_OFF="${EVERY_OFF:-40}"
+MOVE="${MOVE:-0 -0.6 1.5}"; EVERY_OFF="${EVERY_OFF:-40}"; BGS="${BGS:-black grey}"; BG0="${BGS%% *}"
+VS=(scripts/viewer_shots.py --engine "${ENGINE:-current}")
 BASE="${BASE:-$E/$NAME.ply}"; S="$P/fill_inpaint/$NAME"; RT="$P/viewer_bench/reference_dataset"; DATA="$P/onpath/data_orig"
 hostname; date; nvidia-smi --query-gpu=name --format=csv,noheader || true; mkdir -p "$S"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
@@ -35,7 +36,7 @@ bash env/make_inpaint_venv.sh; bash env/make_viewer_venv.sh
 
 # (1) does SuperSplat's engine show rgb = 0.5 + C0 * f_dc ?
 "$IPY" scripts/fill_inpaint.py --roundtrip-make "$S/roundtrip" --dataset "$RT"
-"$VPY" scripts/viewer_shots.py --ply "$S/roundtrip/roundtrip.ply" --dataset "$RT" --every 100000 --out-dir "$S/roundtrip/shots"
+"$VPY" "${VS[@]}" --bg black --ply "$S/roundtrip/roundtrip.ply" --dataset "$RT" --every 100000 --out-dir "$S/roundtrip/shots"
 "$IPY" scripts/fill_inpaint.py --roundtrip-make "$S/roundtrip" --roundtrip-check "$S/roundtrip/shots"
 
 # fill discs (as export_igs.sbatch), then their inpainted colours
@@ -56,27 +57,31 @@ done
 
 # (2) off the recorded path + the editor's default view (reference axes)
 for v in complete "$TAG"; do
-  "$VPY" scripts/viewer_shots.py --ply "$E/${NAME}_${v}_refaxes.ply" --dataset "$RT" --every "$EVERY_OFF" --move $MOVE \
+  "$VPY" "${VS[@]}" --bg $BGS --ply "$E/${NAME}_${v}_refaxes.ply" --dataset "$RT" --every "$EVERY_OFF" --move $MOVE \
     --out-dir "$S/offpath/$v" --editor
 done
 # (3) held-out on-path views (pipeline frame): scores + pixel difference vs the splat without the unseen fill
 for v in base complete "$TAG"; do
   ply="$E/${NAME}_$v.ply"; [ "$v" = base ] && ply="$BASE"
-  "$VPY" scripts/viewer_shots.py --ply "$ply" --dataset "$P/onpath/test" --out-dir "$S/onpath/$v"
+  "$VPY" "${VS[@]}" --bg "$BG0" --ply "$ply" --dataset "$P/onpath/test" --out-dir "$S/onpath/$v"
   "$GPY" scripts/eval_views.py --pred-dir "$S/onpath/$v" --dataset "$P/onpath/test" --tag "$v" --json-out "$S/onpath_$v.json" | tail -1
 done
 
-"$CPUPY" - "$S" "$TAG" <<'PY'
-import json, os, sys, cv2, numpy as np
-S, tag = sys.argv[1], sys.argv[2]; K = ("complete", tag)
-names = sorted(f for f in os.listdir(os.path.join(S, "offpath", K[0])) if f.endswith(".png") and not f.startswith("_"))
-rows = []
-for n in names:
-    ims = [cv2.resize(cv2.imread(os.path.join(S, "offpath", k, n)), (560, 420)) for k in K]
-    for x, l in zip(ims, ("blend (complete)", "inpainted")): cv2.putText(x, l, (8, 26), 0, 0.8, (0, 0, 255), 2)
-    rows.append(np.hstack(ims))
-ed = [cv2.resize(cv2.imread(os.path.join(S, "offpath", k, "_supersplat_editor.png")), (560, 350)) for k in K]
-cv2.imwrite(os.path.join(S, "offpath_montage.jpg"), np.vstack(rows + [np.hstack(ed)])); print("montage ->", os.path.join(S, "offpath_montage.jpg"))
+"$CPUPY" - "$S" "$TAG" $BGS <<'PY'
+import glob, json, os, sys, cv2, numpy as np
+S, tag, bgs = sys.argv[1], sys.argv[2], sys.argv[3:]; K = ("complete", tag)
+def d(k, bg):                                                         # one --bg writes straight into out-dir
+    return os.path.join(S, "offpath", k, bg) if len(bgs) > 1 else os.path.join(S, "offpath", k)
+for bg in bgs:
+    names = sorted(f for f in os.listdir(d(K[0], bg)) if f.endswith(".png") and not f.startswith("_"))
+    rows = []
+    for n in names:
+        ims = [cv2.resize(cv2.imread(os.path.join(d(k, bg), n)), (560, 420)) for k in K]
+        for x, l in zip(ims, ("blend (complete)", "inpainted")): cv2.putText(x, l, (8, 26), 0, 0.8, (0, 0, 255), 2)
+        rows.append(np.hstack(ims))
+    ed = [glob.glob(os.path.join(S, "offpath", k, "**", "_supersplat_editor*.png"), recursive=True) for k in K]
+    if all(ed): rows.append(np.hstack([cv2.resize(cv2.imread(sorted(e)[0]), (560, 350)) for e in ed]))
+    out = os.path.join(S, f"offpath_montage_{bg}.jpg"); cv2.imwrite(out, np.vstack(rows)); print("montage ->", out)
 res = {}
 for v in ("base", "complete", tag):
     r = json.load(open(os.path.join(S, f"onpath_{v}.json"))); res[v] = {k: r[k] for k in ("psnr", "ssim", "lpips")}
