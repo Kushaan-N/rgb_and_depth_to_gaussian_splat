@@ -15,11 +15,13 @@
 #    lmask  same + reliability mask                                      (Y3 a)
 #    pda    PromptDA dense depth + its mask                              (Y3 b)
 #    pdan   pda + normal consistency (LNORM)                             (Y3 c)
-#  scoring per arm and for base (edgs_igs4m) / base_depth (edgs_igs4m_depth, old LiDAR loss): SuperSplat's engine
-#  (scripts/viewer_shots.py, pinned to the committed version, + eval_views --pred-dir) on $P/onpath/test, PSNR split by
-#  the LiDAR reliability mask of the test frames (trusted / dropped / no target), 3DGRUT renders with depth AbsRel vs
-#  LiDAR (old targets of $P/onpath/test and the rebuilt ones), off-path SuperSplat shots (MOVES), accept_gate.py vs
-#  base on both renderers; summary + montages (CROPS="stem:x,y,w,h:label ..." adds zoomed crops).
+#    fp / <arm>fp  screen-footprint cap (loss.use_footprint, FPPX px, LFP): no depth / on top of <arm>, e.g. lmaskfp
+#  scoring per arm and for base (edgs_igs4m) / base_depth (edgs_igs4m_depth, old LiDAR loss): the live SuperSplat
+#  v3.5.2 editor (scripts/viewer_shots.py --engine current, WebGPU) on black and grey backgrounds (+ alpha-hole fraction)
+#  and PlayCanvas 2.7.4 (older SuperSplat engine), scored with eval_views --pred-dir on $P/onpath/test; PSNR split by the
+#  LiDAR reliability mask of the test frames (trusted / dropped / no target); 3DGRUT renders with depth AbsRel vs LiDAR
+#  (old targets of $P/onpath/test and the rebuilt ones); off-path v3.5.2 shots (MOVES); accept_gate.py vs base on
+#  v3.5.2 black + grey + 3DGRUT; summary + montages (CROPS="[off1/]stem:x,y,w,h:label ..." adds zoomed crops).
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o logs/depthprior-%j.out sbatch/depthprior_bench.sbatch configs/<seq>.yaml
 #   ARMS="pda pdan" sbatch ... ;  STAGE=report sbatch -p cpu ... (summary/montages only)
 #SBATCH -J depthprior
@@ -45,15 +47,13 @@ OUT="$(get paths.out_root)"; P="$OUT/pipeline"; E="$P/edgs"; D="$P/depthprior"; 
 ITERS="$(get pipeline.train_iterations 30000)"; SRC="$E/on/data"; TEST="$P/onpath/test"
 BASE_CK="$(ls -t "$E"/on/edgs_igs4m/run/*/ckpt_last.pt | head -1)"; BASED_CK="$(ls -t "$E"/on/edgs_igs4m_depth/run/*/ckpt_last.pt 2>/dev/null | head -1 || true)"
 STATIC="$("$CPUPY" -c "import json,sys; print(json.load(open(sys.argv[1]))['cloud'])" "$SRC/depth_targets.json")"
-hostname; date; mkdir -p "$D/on" "$REP" "$D/tools"
+hostname; date; mkdir -p "$D/on" "$REP"
 module load cuda/12.4.1 gcc/9.4.0 2>/dev/null || true
 export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"; export PATH="$THREEDGRUT_DIR/.venv/bin:$PATH"
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0}" OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-12}"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 bash env/make_3dgrut_depthmask.sh; bash env/make_viewer_venv.sh
-# SuperSplat-engine renderer pinned to the committed version (the scored baselines used it)
-git show HEAD:scripts/viewer_shots.py > "$D/tools/viewer_shots.py"
-VS() { PYTHONPATH="$REPO/scripts" "$VPY" "$D/tools/viewer_shots.py" "$@"; }
+VS() { "$VPY" scripts/viewer_shots.py "$@"; }
 
 linkcopy() {  # src_ds dst_ds: sparse files + images linked (no depth / mask files)
   mkdir -p "$2/sparse/0" "$2/images"
@@ -95,12 +95,18 @@ score() {  # name ckpt_or_empty ply -> 3DGRUT + SuperSplat scores, off-path shot
       --json-out "$REP/g2_$n.json" | tail -1
     [ -f "$ply" ] || "${RUN[@]}" "$GPY" scripts/export_gaussian_ply.py --checkpoint "$ck" --out "$ply"
   fi
-  if [ ! -f "$REP/ss_$n.json" ]; then
+  if [ ! -f "$REP/curgrey_$n.json" ]; then                 # primary: live SuperSplat v3.5.2 (WebGPU), black + grey bg
+    VS --engine current --bg black grey --ply "$ply" --dataset "$TEST" --out-dir "$D/cur/on/$n" 2>&1 | tail -1
+    for bg in black grey; do "$GPY" scripts/eval_views.py --pred-dir "$D/cur/on/$n/$bg" --dataset "$TEST" --tag "cur${bg}_$n" \
+      --json-out "$REP/cur${bg}_$n.json" | tail -1; done
+  fi
+  if [ ! -f "$REP/ss_$n.json" ]; then                      # secondary: PlayCanvas 2.7.4 gsplat (older SuperSplat engine)
     VS --ply "$ply" --dataset "$TEST" --out-dir "$D/ss/on/$n" 2>&1 | tail -1
     "$GPY" scripts/eval_views.py --pred-dir "$D/ss/on/$n" --dataset "$TEST" --tag "ss_$n" --json-out "$REP/ss_$n.json" | tail -1
   fi
   local i=0; IFS=';' read -ra MV <<< "$MOVES"
-  for m in "${MV[@]}"; do i=$((i + 1)); [ -d "$D/ss/off$i/$n" ] || VS --ply "$ply" --dataset "$TEST" --every 4 --move $m --out-dir "$D/ss/off$i/$n" 2>&1 | tail -1; done
+  for m in "${MV[@]}"; do i=$((i + 1)); [ -f "$D/cur/off$i/$n/_viewer.json" ] || VS --engine current --bg black --ply "$ply" --dataset "$TEST" \
+    --every 4 --move $m --out-dir "$D/cur/off$i/$n" 2>&1 | tail -1; done
 }
 
 echo "== baselines"
@@ -121,8 +127,10 @@ for arm in $ARMS; do
     lmask*) DS="$D/on/data_lidar";;
     pdan*)  DS="$D/on/data_pda"; X+=(loss.use_normal=true loss.lambda_normal="$LNORM" loss.normal_start_iteration="${NSTART:-3000}");;
     pda*)   DS="$D/on/data_pda";;
+    fp*)    DS="$D/on/data_lidar"; X=(loss.use_depth=false);;
     *) echo "unknown arm $arm"; exit 1;;
   esac
+  case $arm in *fp*) X+=(loss.use_footprint=true loss.lambda_footprint="${LFP:-0.1}" loss.footprint_max_px="${FPPX:-10}");; esac
   if [[ $arm =~ _s([0-9]+)$ ]]; then X+=(seed_initialization="${BASH_REMATCH[1]}"); fi
   if [ -z "$CK" ]; then
     echo "== $arm: $DS ${X[*]}"; date
@@ -132,7 +140,8 @@ for arm in $ARMS; do
     CK="$(ls -t "$RD"/run/*/ckpt_last.pt | head -1)"; date
   fi
   score "$arm" "$CK" "$D/ply/$arm.ply"
-  "$CPUPY" scripts/accept_gate.py --pair supersplat "$REP/ss_base.json" "$REP/ss_$arm.json" \
+  "$CPUPY" scripts/accept_gate.py --pair ss_black "$REP/curblack_base.json" "$REP/curblack_$arm.json" \
+    --pair ss_grey "$REP/curgrey_base.json" "$REP/curgrey_$arm.json" \
     --pair grut "$REP/g_base.json" "$REP/g_$arm.json" --out "$REP/gate_$arm.json" | tail -2 || true
 done 2>&1
 fi
@@ -142,14 +151,14 @@ echo "== summary + montages"
 import cv2, json, os, sys, numpy as np
 D, test, crops = sys.argv[1], sys.argv[2], sys.argv[3].split()
 rep = os.path.join(D, "report"); ld = lambda f: json.load(open(os.path.join(rep, f))) if os.path.isfile(os.path.join(rep, f)) else None
-tags = ["base", "base_depth"] + sorted({f[3:-5] for f in os.listdir(rep) if f.startswith("ss_") and f.endswith(".json")} - {"base", "base_depth"})
-tags = [t for t in tags if ld(f"ss_{t}.json")]
+tags = ["base", "base_depth"] + sorted({f[9:-5] for f in os.listdir(rep) if f.startswith("curblack_") and f.endswith(".json")} - {"base", "base_depth"})
+tags = [t for t in tags if ld(f"curblack_{t}.json")]
 L = os.path.join(D, "on", "data_lidar", "images")
 def region_psnr(t):                     # SuperSplat renders, PSNR within the LiDAR reliability classes of the test frames
     se = {"trusted": [0., 0], "dropped": [0., 0], "no_target": [0., 0]}
     for n in sorted(os.listdir(os.path.join(test, "images"))):
         if not n.endswith(".png") or n.endswith(("_covis.png", "_mask.png")): continue
-        st = os.path.splitext(n)[0]; pr = cv2.imread(os.path.join(D, "ss", "on", t, st + ".png")); m = cv2.imread(os.path.join(L, st + "_depthmask.png"), 0)
+        st = os.path.splitext(n)[0]; pr = cv2.imread(os.path.join(D, "cur", "on", t, "black", st + ".png")); m = cv2.imread(os.path.join(L, st + "_depthmask.png"), 0)
         dp = os.path.join(L, st + "_depth.npy")
         if pr is None or m is None or not os.path.isfile(dp): continue
         gt = cv2.imread(os.path.join(test, "images", n)); e = ((pr.astype(np.float32) - gt) / 255.) ** 2
@@ -157,13 +166,16 @@ def region_psnr(t):                     # SuperSplat renders, PSNR within the Li
         for k, sel in (("trusted", m > 127), ("dropped", tgt & (m <= 127)), ("no_target", ~tgt)):
             se[k][0] += e[sel].sum(); se[k][1] += int(sel.sum())
     return {k: round(float(-10 * np.log10(a / b)), 3) if b else None for k, (a, b) in se.items()}
-out = {"supersplat": {}, "grut": {}, "region_psnr_supersplat": {}, "gates": {}}
+out = {"ss_black": {}, "ss_grey": {}, "pc274": {}, "alpha_hole_frac": {}, "grut": {}, "region_psnr_ss_black": {}, "gates": {}}
 for t in tags:
-    out["supersplat"][t] = {k: ld(f"ss_{t}.json").get(k) for k in ("psnr", "ssim", "lpips")}
+    for k_, f_ in (("ss_black", "curblack"), ("ss_grey", "curgrey"), ("pc274", "ss")):
+        r_ = ld(f"{f_}_{t}.json"); out[k_][t] = {k: r_.get(k) for k in ("psnr", "ssim", "lpips")} if r_ else {}
+    vj = os.path.join(D, "cur", "on", t, "_viewer.json")
+    out["alpha_hole_frac"][t] = json.load(open(vj)).get("alpha_hole_frac") if os.path.isfile(vj) else None
     g, g2 = ld(f"g_{t}.json"), ld(f"g2_{t}.json")
     if g: out["grut"][t] = {**{k: g.get(k) for k in ("psnr", "ssim", "lpips", "depth_absrel", "depth_within5pct")},
                             **({"depth_absrel_unbiased": g2.get("depth_absrel"), "depth_within5pct_unbiased": g2.get("depth_within5pct")} if g2 else {})}
-    out["region_psnr_supersplat"][t] = region_psnr(t)
+    out["region_psnr_ss_black"][t] = region_psnr(t)
     gt_ = ld(f"gate_{t}.json")
     if gt_: out["gates"][t] = {"accept": gt_["accept"], "failures": gt_["failures"]}
 for f, k in (("depth_reliability.json", "lidar_mask"), ):
@@ -174,23 +186,29 @@ if os.path.isfile(p): r = json.load(open(p)); out["promptda"] = {k: v for k, v i
 p = os.path.join(D, "on", "data_pda", "depth_reliability.json")
 if os.path.isfile(p): out["pda_mask"] = json.load(open(p))["of_target"]
 json.dump(out, open(os.path.join(rep, "summary.json"), "w"), indent=2)
-print(f"{'arm':12s}{'SS psnr':>9s}{'ssim':>8s}{'lpips':>8s} | {'grut psnr':>9s}{'ssim':>8s}{'lpips':>8s}{'AbsRel':>8s}{'AbsRel*':>8s} | {'trusted':>8s}{'dropped':>8s}{'noLiDAR':>8s}")
+f = lambda x, w=8, d=4: f"{x:{w}.{d}f}" if isinstance(x, (int, float)) else f"{'-':>{w}s}"
+print("SuperSplat v3.5.2 black / grey bg, PlayCanvas 2.7.4 (pc274), 3DGRUT (AbsRel vs LiDAR, * = unbiased targets), "
+      "region PSNR on v3.5.2/black by LiDAR reliability of the test pixels")
+print(f"{'arm':12s}{'blk psnr':>9s}{'ssim':>7s}{'lpips':>7s}{'grey':>7s}{'holes':>7s}{'pc274':>7s} | {'grut':>7s}{'ssim':>7s}{'lpips':>7s}"
+      f"{'AbsRel':>7s}{'AbsRel*':>8s} | {'trusted':>8s}{'dropped':>8s}{'noLiDAR':>8s}")
 for t in tags:
-    s, g, r = out["supersplat"][t], out["grut"].get(t, {}), out["region_psnr_supersplat"][t]
-    f = lambda x, w=8, d=4: f"{x:{w}.{d}f}" if isinstance(x, (int, float)) else f"{'-':>{w}s}"
-    print(f"{t:12s}{f(s['psnr'], 9, 2)}{f(s['ssim'])}{f(s['lpips'])} | {f(g.get('psnr'), 9, 2)}{f(g.get('ssim'))}{f(g.get('lpips'))}"
-          f"{f(g.get('depth_absrel'))}{f(g.get('depth_absrel_unbiased'))} | {f(r['trusted'], 8, 2)}{f(r['dropped'], 8, 2)}{f(r['no_target'], 8, 2)}")
+    b, gy, pc, g, r = out["ss_black"][t], out["ss_grey"][t], out["pc274"][t], out["grut"].get(t, {}), out["region_psnr_ss_black"][t]
+    print(f"{t:12s}{f(b.get('psnr'), 9, 2)}{f(b.get('ssim'), 7)}{f(b.get('lpips'), 7)}{f(gy.get('psnr'), 7, 2)}{f(out['alpha_hole_frac'][t], 7)}"
+          f"{f(pc.get('psnr'), 7, 2)} | {f(g.get('psnr'), 7, 2)}{f(g.get('ssim'), 7)}{f(g.get('lpips'), 7)}{f(g.get('depth_absrel'), 7)}"
+          f"{f(g.get('depth_absrel_unbiased'))} | {f(r['trusted'], 8, 2)}{f(r['dropped'], 8, 2)}{f(r['no_target'], 8, 2)}")
 print("gates:", json.dumps(out["gates"]))
 def lab(im, s):
     cv2.putText(im, s, (6, 22), 0, 0.6, (0, 0, 0), 3); cv2.putText(im, s, (6, 22), 0, 0.6, (0, 255, 255), 1); return im
+def rp(sub, t, n):                                                           # v3.5.2 black render path
+    return os.path.join(D, "cur", sub, t, "black", n) if sub == "on" else os.path.join(D, "cur", sub, t, n)
 for sub, first_gt in (("on", True), ("off1", False), ("off2", False)):
-    base = os.path.join(D, "ss", sub, "base")
+    base = os.path.dirname(rp(sub, "base", "x"))
     if not os.path.isdir(base): continue
     names = sorted(f for f in os.listdir(base) if f.endswith(".png") and not f.startswith("_"))
     rows = []
     for n in [names[i] for i in np.linspace(0, len(names) - 1, min(5, len(names))).astype(int)]:
         ims = [lab(cv2.imread(os.path.join(test, "images", n)), "real")] if first_gt else []
-        ims += [lab(cv2.imread(os.path.join(D, "ss", sub, t, n)), t) for t in tags if os.path.isfile(os.path.join(D, "ss", sub, t, n))]
+        ims += [lab(cv2.imread(rp(sub, t, n)), t) for t in tags if os.path.isfile(rp(sub, t, n))]
         rows.append(np.hstack([cv2.resize(x, (400, 300)) for x in ims]))
     p = os.path.join(rep, f"montage_{sub}.jpg"); cv2.imwrite(p, np.vstack(rows)); print("montage ->", p)
 rows = []                                                                    # CROPS: zoomed regions, real | arms
@@ -200,8 +218,7 @@ for c in crops:
     for s_ in ("on", "off1", "off2"):
         if st.startswith(s_ + "/"): sub, st = s_, st[len(s_) + 1:]
     ims = [lab(cv2.imread(os.path.join(test, "images", st + ".png"))[y:y + h, x:x + w].copy(), name)] if sub == "on" else []
-    ims += [lab(cv2.imread(os.path.join(D, "ss", sub, t, st + ".png"))[y:y + h, x:x + w].copy(), t) for t in tags
-            if os.path.isfile(os.path.join(D, "ss", sub, t, st + ".png"))]
+    ims += [lab(cv2.imread(rp(sub, t, st + ".png"))[y:y + h, x:x + w].copy(), t) for t in tags if os.path.isfile(rp(sub, t, st + ".png"))]
     rows.append(np.hstack([cv2.resize(i, (300, int(300 * h / w)), interpolation=cv2.INTER_CUBIC) for i in ims]))
 if rows:
     Wm = max(r.shape[1] for r in rows); rows = [np.pad(r, ((0, 0), (0, Wm - r.shape[1]), (0, 0))) for r in rows]
