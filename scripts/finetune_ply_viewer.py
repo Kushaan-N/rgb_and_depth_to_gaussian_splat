@@ -144,16 +144,20 @@ class ViewerRaster:
     """Differentiable copy of a viewer's splat renderer (see module docstring)."""
 
     def __init__(self, viewer="pc274", raster="exact", quant=False, tile=16, cull=True, cutoff=True, a255=True,
-                 shbug=None, dil=None):
+                 shbug=None, dil=None, display_scale=1.0):
         """Ablation knobs (gap attribution): cull = minimum-size cull, cutoff = d^2 <= 8 kernel cut, a255 = 1/255
-        discard (pc274), shbug = 2.7.4's SH band-2 typo (default: on for pc274), dil = dilation in px^2."""
+        discard (pc274), shbug = 2.7.4's SH band-2 typo (default: on for pc274), dil = dilation in px^2.
+        display_scale (ss352): on-screen canvas pixels per rendered pixel. SuperSplat's projector takes focal, the 0.3
+        dilation, the 2 px size cull and the radius cap in scene.targetSize (the on-screen canvas) pixels even for
+        offscreen renders (render.offscreen / Render > Image), so in rendered pixels: dilation 0.3/r^2, cull 0.5/r^2."""
         assert viewer in ("pc274", "ss352") and raster in ("exact", "cuda")
         if viewer == "ss352" and raster == "cuda":
             raise SystemExit("ss352's normalised kernel needs --raster exact")
         self.viewer, self.raster, self.quant, self.tile = viewer, raster, quant, tile
         self.cull, self.cutoff, self.a255 = cull, cutoff, a255
         self.shbug = (viewer == "pc274") if shbug is None else shbug
-        self.dil = (0.075 if viewer == "pc274" else 0.3) if dil is None else dil
+        self.r = display_scale if viewer == "ss352" else 1.0
+        self._dil = dil
         self.last = {}
 
     @staticmethod
@@ -174,9 +178,13 @@ class ViewerRaster:
         cov = J @ S @ J.transpose(1, 2)
         return pc[:, 0] / zs, pc[:, 1] / zs, z, (cov[:, 0, 0], cov[:, 0, 1], cov[:, 1, 1])
 
+    @property
+    def dil(self):
+        return (0.075 if self.viewer == "pc274" else 0.3 / self.r ** 2) if self._dil is None else self._dil
+
     def min_lambda(self):
         """Dilated max eigenvalue (px^2) below which the viewer drops a splat."""
-        return 0.125 if self.viewer == "pc274" else 0.5
+        return 0.125 if self.viewer == "pc274" else 0.5 / self.r ** 2
 
     def project(self, p, w2c, fx, fy, cx, cy, W, H):
         """-> means2d (N,2), conics (N,3), opacity (N,), depth z (N,), radii int (N,2), keep mask."""
@@ -197,8 +205,8 @@ class ViewerRaster:
             l1c, l2c = l1.clamp_max(cap), l2.clamp_max(cap)
             big = (l1 > cap) | (l2 > cap)
         else:
-            keep = valid & ((l1 >= 0.5) | (not self.cull)) & (a * c - b * b > 0)    # 2 sqrt(2 l1) < minPixelSize (2)
-            s2 = (min(1024.0, W, H) ** 2 / (8 * l1)).clamp_max(1.0)  # radius cap scales both axes
+            keep = valid & ((l1 >= self.min_lambda()) | (not self.cull)) & (a * c - b * b > 0)    # 2 sqrt(2 l1) < minPixelSize
+            s2 = ((min(1024.0, W * self.r, H * self.r) / self.r) ** 2 / (8 * l1)).clamp_max(1.0)  # radius cap, both axes
             l2 = (mid - rad).clamp_min(0.1)
             l1c, l2c = l1 * s2, l2 * s2
             big = s2 < 1
@@ -269,9 +277,12 @@ class ViewerRaster:
         if self.viewer == "pc274":
             al = op[gid] * torch.exp(-0.5 * s2)
             ok = ((s2 <= 8) | (not self.cutoff)) & ((al >= 1 / 255) | (not self.a255))
-        else:
+        elif self.cutoff:
             al = op[gid] * (torch.exp(-0.5 * s2) - E4) / (1 - E4)
             ok = (s2 <= 8) & (al > 0)
+        else:                                                               # ablation: plain exp kernel, 1/255 cut
+            al = op[gid] * torch.exp(-0.5 * s2)
+            ok = al >= 1 / 255
         al = torch.where(ok, al, torch.zeros_like(al)).clamp(0, 1 - 1e-6)
         lt = torch.log1p(-al.double())
         cs = torch.cumsum(lt, 0) - lt                                       # exclusive, global
@@ -297,20 +308,23 @@ def frames(dataset, test_split_interval=0, subset="train"):
     return out
 
 
-def viewer_intrinsics(cam):
+def viewer_intrinsics(cam, profile="pc274"):
     """The camera viewer_shots.py actually renders: canvas centred on the principal point (integer size), cropped at an
-    integer offset, square pixels from the vertical fov (f = fy) -> (f, f, cx_eff, cy_eff)."""
+    integer offset, square pixels; pc274 sets the vertical fov (f = fy), SuperSplat 3.x (ss352 / --engine current)
+    the horizontal one when the canvas is wider than tall (f = fx) -> (f, f, cx_eff, cy_eff)."""
     _K, W, H = intrinsics(cam)[0], cam[1], cam[2]
-    fy, cx, cy = _K[1, 1], _K[0, 2], _K[1, 2]
+    fx, fy, cx, cy = _K[0, 0], _K[1, 1], _K[0, 2], _K[1, 2]
     CW = int(np.ceil(2 * max(cx, W - cx))); CH = int(np.ceil(2 * max(cy, H - cy)))
     x0 = int(round(CW / 2 - cx)); y0 = int(round(CH / 2 - cy))
-    return fy, fy, CW / 2 - x0, CH / 2 - y0
+    f = fx if (profile == "ss352" and CW > CH) else fy
+    return f, f, CW / 2 - x0, CH / 2 - y0
 
 
 def cam_args(cam, viewer_cam=False):
+    """viewer_cam: False = the dataset's true intrinsics; 'pc274' / 'ss352' (True = 'pc274') = that viewer's camera."""
     K, W, H = intrinsics(cam)
     if viewer_cam:
-        fx, fy, cx, cy = viewer_intrinsics(cam)
+        fx, fy, cx, cy = viewer_intrinsics(cam, "pc274" if viewer_cam is True else viewer_cam)
     else:
         fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
     return float(fx), float(fy), float(cx), float(cy), int(W), int(H)
@@ -343,6 +357,7 @@ def compare(args):
     _, p = load_ply(args.ply, dev); deg = sh_deg(p)
     fr = frames(args.dataset, 0, "all")[args.offset::args.every]
     variants = args.variants.split(",")
+    prof = "ss352" if args.engine == "current" else "pc274"       # whose camera the viewer renders were taken with
     res = {v: {"vs_viewer": [], "vs_gt": [], "ms": []} for v in variants}
     res["viewer"] = {"vs_gt": []}
     t0 = time.time()
@@ -360,7 +375,7 @@ def compare(args):
             with torch.no_grad():
                 if var.startswith("gsplat"):                    # stock gsplat.rasterization, classic mode, given eps2d
                     from gsplat import rasterization
-                    fx, fy, cx, cy, W, H = cam_args(cam, True)
+                    fx, fy, cx, cy, W, H = cam_args(cam, prof)
                     Kt = torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], device=dev)
                     eps = float(var.split("_")[1]) if "_" in var else 0.3
                     out, _, _ = rasterization(p["means"], p["quats"], torch.exp(p["scales"]), torch.sigmoid(p["opacities"]),
@@ -371,8 +386,9 @@ def compare(args):
                     parts = var.split("_"); fl = parts[2:]
                     dd = [float(x[1:]) for x in fl if x.startswith("d") and x[1:2].isdigit()]
                     r = ViewerRaster(parts[0], parts[1], quant="q" in fl, cull="nocull" not in fl, cutoff="nocut" not in fl,
-                                     a255="no255" not in fl, shbug=False if "nobug" in fl else None, dil=dd[0] if dd else None)
-                    img = r.render(p, w2c, *cam_args(cam, "truecam" not in parts), sh_degree=deg)[0]
+                                     a255="no255" not in fl, shbug=False if "nobug" in fl else (True if "bug" in fl else None), dil=dd[0] if dd else None,
+                                     display_scale=next((float(x[1:]) for x in fl if x.startswith("r") and x[1:2].isdigit()), args.display_scale))
+                    img = r.render(p, w2c, *cam_args(cam, False if "truecam" in parts else prof), sh_degree=deg)[0]
             torch.cuda.synchronize(); res[var]["ms"].append((time.time() - t1) * 1000)
             img = u8(img)
             res[var]["vs_viewer"].append(psnr(img, vimg)); res[var]["vs_gt"].append(psnr(img, gt))
@@ -404,7 +420,7 @@ def render(args):
     r = ViewerRaster(args.viewer, args.raster, quant=args.quant)
     for name, cam, c2w in frames(args.dataset, 0, "all")[args.offset::args.every]:
         with torch.no_grad():
-            img = r.render(p, to_t(np.linalg.inv(c2w), dev), *cam_args(cam, args.viewer_cam), sh_degree=deg)[0]
+            img = r.render(p, to_t(np.linalg.inv(c2w), dev), *cam_args(cam, args.viewer if args.viewer_cam else False), sh_degree=deg)[0]
         save_png(os.path.join(args.out_dir, os.path.splitext(name)[0] + ".png"), img)
     print("FTV_RENDER_DONE")
 
@@ -447,7 +463,9 @@ def finetune(args):
     opt = torch.optim.Adam([{"params": [params[k]], "lr": lr[k], "name": k} for k in params], eps=1e-15)
     decay = args.means_lr_final / args.means_lr
     gm = next(g for g in opt.param_groups if g["name"] == "means")
-    raster = ViewerRaster(args.viewer, args.raster)
+    rs = [float(x) for x in str(args.display_scale).split(":")]
+    r_eval = rs[0] if len(rs) == 1 else float(args.eval_display_scale or rs[0])
+    raster = ViewerRaster(args.viewer, args.raster, display_scale=r_eval)
     eval_ds = args.eval_dataset
     ev = []
     if eval_ds:                                       # held-out monitor (matched renderer, viewer camera)
@@ -460,7 +478,7 @@ def finetune(args):
         p = {k: v.detach() for k, v in params.items()}
         e = {"step": step, "train_psnr": round(evaluate(raster, p, trs, dev, deg), 3)}
         if ev:
-            e["heldout_psnr"] = round(evaluate(raster, p, ev, dev, deg, viewer_cam=True), 3)
+            e["heldout_psnr"] = round(evaluate(raster, p, ev, dev, deg, viewer_cam=raster.viewer), 3)
         log["curve"].append(e); print(f"[ftv] eval {e}", flush=True)
 
     report(0)
@@ -470,6 +488,8 @@ def finetune(args):
             order = list(np.random.permutation(len(tr)))
         k = 0 if args.overfit_one else int(order.pop()); name, cam, c2w = tr[k]
         fx, fy, cx, cy, W, H = cam_args(cam)
+        if len(rs) == 2:                                   # robust to the display: log-uniform on-screen scale per step
+            raster.r = float(np.exp(np.random.uniform(np.log(rs[0]), np.log(rs[1]))))
         frac = step / args.iters
         wu = min(1.0, step / args.warmup) if args.warmup > 0 else 1.0     # Adam's first steps are full-size: ramp in
         for g in opt.param_groups:
@@ -509,8 +529,8 @@ def finetune(args):
                   f"vis {raster.last.get('n_visible')} pairs {raster.last.get('n_pairs')} "
                   f"mem {torch.cuda.max_memory_allocated() / 2**30:.1f}G ({time.time() - t0:.0f}s)", flush=True)
         if args.eval_interval and step % args.eval_interval == 0 and step != args.iters:
-            report(step)
-    report(args.iters)
+            raster.r = r_eval; report(step)
+    raster.r = r_eval; report(args.iters)
     with torch.no_grad():
         dm = (params["means"] - p0["means"]).norm(dim=-1)
         log["delta"] = {"means_median": float(dm.median()), "means_p99": float(torch.quantile(dm[::max(1, N // 1000000)], 0.99)),
@@ -531,21 +551,26 @@ def main():
     c.add_argument("--ply", required=True); c.add_argument("--dataset", required=True)
     c.add_argument("--viewer-dir", required=True, help="viewer_shots.py renders of --ply at --dataset's cameras")
     c.add_argument("--variants", default="gsplat_0.3,gsplat_0.075,pc274_cuda,pc274_exact,pc274_exact_q,ss352_exact",
-                   help="gsplat_<eps2d> | <pc274|ss352>_<exact|cuda>[_q][_nocull][_nocut][_no255][_nobug][_d<dilation>][_truecam]")
+                   help="gsplat_<eps2d> | <pc274|ss352>_<exact|cuda>[_q][_nocull][_nocut][_no255][_nobug|_bug][_d<dilation>][_truecam]")
+    c.add_argument("--engine", default="pc274", choices=("pc274", "current"), help="viewer_shots.py --engine of --viewer-dir")
+    c.add_argument("--display-scale", type=float, default=1.0, help="ss352: on-screen px per rendered px (variant _r<x>)")
     c.add_argument("--every", type=int, default=1); c.add_argument("--offset", type=int, default=0)
     c.add_argument("--save-dir", default=None); c.add_argument("--save-n", type=int, default=3)
     c.add_argument("--json-out", default=None)
     r = sub.add_parser("render")
     r.add_argument("--ply", required=True); r.add_argument("--dataset", required=True); r.add_argument("--out-dir", required=True)
-    r.add_argument("--viewer", default="pc274", choices=("pc274", "ss352")); r.add_argument("--raster", default="exact", choices=("exact", "cuda"))
+    r.add_argument("--viewer", default="ss352", choices=("pc274", "ss352")); r.add_argument("--raster", default="exact", choices=("exact", "cuda"))
     r.add_argument("--quant", action="store_true"); r.add_argument("--viewer-cam", action="store_true")
     r.add_argument("--every", type=int, default=1); r.add_argument("--offset", type=int, default=0)
     f = sub.add_parser("finetune")
     f.add_argument("--ply", required=True); f.add_argument("--dataset", required=True, help="COLMAP text dataset, PLY's frame")
     f.add_argument("--out", required=True)
     f.add_argument("--test-split-interval", type=int, default=0, help="3DGRUT's rule: frame k held out iff k %% N == 0")
-    f.add_argument("--viewer", default="pc274", choices=("pc274", "ss352"))
+    f.add_argument("--viewer", default="ss352", choices=("pc274", "ss352"), help="ss352 = today's SuperSplat (default)")
     f.add_argument("--raster", default="exact", choices=("exact", "cuda"))
+    f.add_argument("--display-scale", default="1.0", help="ss352: on-screen canvas px per image px (see ViewerRaster); "
+                   "'a:b' samples it log-uniformly per step (robust to the user's window / DPI)")
+    f.add_argument("--eval-display-scale", type=float, default=None, help="scale for the monitor evals (default: a)")
     f.add_argument("--iters", type=int, default=7000)
     f.add_argument("--lr-mult", type=float, default=1.0, help="scales every learning rate")
     f.add_argument("--means-lr", type=float, default=1.6e-5, help="x scene scale, decays log-linearly to --means-lr-final")
