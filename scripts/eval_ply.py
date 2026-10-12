@@ -3,14 +3,18 @@
 eval_views.py renders the 3DGRUT checkpoint with 3DGRUT's own renderer; what people look at is the
 exported PLY in a standard 3DGS rasteriser (EWA splatting, 0.3 px screen-space dilation, SH degree 3).
 This renders the PLY with gsplat in that classic mode at the cameras of a COLMAP dataset (the PLY must
-be in that dataset's frame) and scores PSNR / SSIM / LPIPS against the real images.
+be in that dataset's frame) and scores PSNR / SSIM / LPIPS against the real images. The dataset needs a COLMAP
+TEXT model (convert a binary one with pycolmap's write_text first).
 
     python scripts/eval_ply.py --ply splat.ply --dataset <dir with sparse/0 + images> [--every 8 --offset 0]
         [--names-from <dataset whose image names to use>] [--tag t] [--json-out r.json] [--save-dir renders/]
 """
 from __future__ import annotations
-import argparse, json, os
+import argparse, json, os, sys
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from build_depth_targets import quat_to_R, read_text_model
 
 
 def load_ply(path, dev):
@@ -37,44 +41,41 @@ def main():
     ap.add_argument("--json-out", default=None)
     ap.add_argument("--save-dir", default=None)
     args = ap.parse_args()
-    import torch, pycolmap
+    import torch
     from PIL import Image
     from gsplat import rasterization
     from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
     from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
     dev = "cuda"
     G = load_ply(args.ply, dev)
-    rec = pycolmap.Reconstruction(os.path.join(args.dataset, "sparse", "0"))
-    imgs = sorted(rec.images.values(), key=lambda i: i.name)
+    cams, imgs = read_text_model(os.path.join(args.dataset, "sparse", "0"))
+    imgs = sorted(imgs, key=lambda i: i[0])
     if args.names_from:
-        keep = {i.name for i in pycolmap.Reconstruction(os.path.join(args.names_from, "sparse", "0")).images.values()}
-        imgs = [i for i in imgs if i.name in keep]
+        keep = {i[0] for i in read_text_model(os.path.join(args.names_from, "sparse", "0"))[1]}
+        imgs = [i for i in imgs if i[0] in keep]
     imgs = imgs[args.offset::args.every]
     psnr = PeakSignalNoiseRatio(data_range=1.0).to(dev); ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(dev)
     lpips = LearnedPerceptualImagePatchSimilarity(net_type="vgg", normalize=True).to(dev)
     P, S, L = [], [], []
-    for im in imgs:
-        cam = rec.cameras[im.camera_id]
-        fx, fy, cx, cy = (cam.params[0], cam.params[1], cam.params[2], cam.params[3]) if cam.model.name == "PINHOLE" \
-            else (cam.params[0], cam.params[0], cam.params[1], cam.params[2])
-        cfw = im.cam_from_world; M = np.asarray((cfw() if callable(cfw) else cfw).matrix())
-        V = np.eye(4); V[:3] = M
+    for name, cid, q, t in imgs:
+        W, H, (fx, fy, cx, cy) = cams[cid]                         # PINHOLE (undistorted datasets)
+        V = np.eye(4); V[:3, :3] = quat_to_R(q); V[:3, 3] = t        # world -> camera
         K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
         with torch.no_grad():
             rgb, _, _ = rasterization(G["means"], G["quats"], G["scales"], G["opacities"], G["sh"],
                                       torch.tensor(V, dtype=torch.float32, device=dev)[None],
-                                      torch.tensor(K, dtype=torch.float32, device=dev)[None], cam.width, cam.height,
+                                      torch.tensor(K, dtype=torch.float32, device=dev)[None], W, H,
                                       sh_degree=G["deg"], eps2d=0.3, rasterize_mode="classic",
                                       backgrounds=torch.zeros(1, 3, device=dev))
         pred = rgb[0].clamp(0, 1)
-        gt = torch.tensor(np.asarray(Image.open(os.path.join(args.dataset, "images", im.name)).convert("RGB")),
+        gt = torch.tensor(np.asarray(Image.open(os.path.join(args.dataset, "images", name)).convert("RGB")),
                           device=dev).float() / 255
         a, b = pred.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None]
         P.append(psnr(a, b).item()); S.append(ssim(a, b).item()); L.append(lpips(a, b).item())
         if args.save_dir:
             os.makedirs(args.save_dir, exist_ok=True)
             Image.fromarray((pred.cpu().numpy() * 255).round().astype(np.uint8)).save(
-                os.path.join(args.save_dir, os.path.splitext(im.name)[0] + ".png"))
+                os.path.join(args.save_dir, os.path.splitext(name)[0] + ".png"))
     res = {"tag": args.tag, "ply": args.ply, "renderer": "gsplat classic 3DGS (eps2d 0.3)", "n": len(P),
            "psnr": round(float(np.mean(P)), 3), "ssim": round(float(np.mean(S)), 4), "lpips": round(float(np.mean(L)), 4)}
     print("EVAL_PLY", json.dumps(res), flush=True)
