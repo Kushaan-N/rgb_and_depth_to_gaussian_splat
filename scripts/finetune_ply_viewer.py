@@ -417,11 +417,15 @@ def render(args):
     import torch
     dev = "cuda"
     _, p = load_ply(args.ply, dev); deg = sh_deg(p)
-    r = ViewerRaster(args.viewer, args.raster, quant=args.quant)
+    r = ViewerRaster(args.viewer, args.raster, quant=args.quant, display_scale=args.display_scale)
+    bgs = {b: torch.tensor([float(x) for x in b.split(",")] if "," in b else
+                           {"black": [0.0] * 3, "grey": [0.5] * 3, "white": [1.0] * 3}[b], device=dev) for b in args.bg}
     for name, cam, c2w in frames(args.dataset, 0, "all")[args.offset::args.every]:
         with torch.no_grad():
-            img = r.render(p, to_t(np.linalg.inv(c2w), dev), *cam_args(cam, args.viewer if args.viewer_cam else False), sh_degree=deg)[0]
-        save_png(os.path.join(args.out_dir, os.path.splitext(name)[0] + ".png"), img)
+            img, alpha, _ = r.render(p, to_t(np.linalg.inv(c2w), dev), *cam_args(cam, args.viewer if args.viewer_cam else False), sh_degree=deg)
+        for b, c in bgs.items():                       # premultiplied over the background, as the viewer composites
+            od = args.out_dir if len(bgs) == 1 else os.path.join(args.out_dir, b)
+            save_png(os.path.join(od, os.path.splitext(name)[0] + ".png"), img + (1 - alpha.clamp(0, 1))[..., None] * c)
     print("FTV_RENDER_DONE")
 
 
@@ -481,6 +485,18 @@ def finetune(args):
             e["heldout_psnr"] = round(evaluate(raster, p, ev, dev, deg, viewer_cam=raster.viewer), 3)
         log["curve"].append(e); print(f"[ftv] eval {e}", flush=True)
 
+    wdnet = None
+    if args.lambda_wd > 0:
+        from wasserstein_distortion import VGG16WassersteinDistortion
+        wdnet = VGG16WassersteinDistortion().to(dev).eval()
+        for q in wdnet.parameters():
+            q.requires_grad_(False)
+    lpnet = None
+    if args.lpips_lambda > 0:
+        from torchmetrics.functional.image.lpips import _NoTrainLpips
+        lpnet = _NoTrainLpips(net="vgg").to(dev).eval()
+        for q in lpnet.parameters():
+            q.requires_grad_(False)
     report(0)
     order, t0 = [], time.time()
     for step in range(1, args.iters + 1):
@@ -498,8 +514,14 @@ def finetune(args):
         img, alpha, d = raster.render(params, to_t(np.linalg.inv(c2w), dev), fx, fy, cx, cy, W, H, sh_degree=deg,
                                       depth=dep[k] is not None)
         gt = rgb[k].float() / 255
-        loss = (1 - args.ssim_lambda) * (img - gt).abs().mean() + \
-            args.ssim_lambda * (1 - ssim(img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None]))
+        loss = args.rgb_scale * ((1 - args.ssim_lambda) * (img - gt).abs().mean() +
+                                 args.ssim_lambda * (1 - ssim(img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None])))
+        if wdnet is not None:                           # Wasserstein Distortion: local VGG-16 feature statistics
+            pc_, gc_ = img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None]
+            loss = loss + args.lambda_wd * wdnet(pc_, gc_, torch.full_like(gc_[:, :1], args.wd_log2_sigma),
+                                                 num_scales=args.wd_num_scales)
+        if lpnet is not None:                           # perceptual term (the gate's LPIPS-VGG, torchmetrics weights)
+            loss = loss + args.lpips_lambda * lpnet(img.permute(2, 0, 1)[None] * 2 - 1, gt.permute(2, 0, 1)[None] * 2 - 1).mean()
         ld = torch.zeros((), device=dev)
         if dep[k] is not None:
             key = (fx, fy, cx, cy, W, H)
@@ -515,6 +537,10 @@ def finetune(args):
             loss = loss + args.anchor * ((params["means"] - p0["means"]) ** 2).sum(-1).mean() / scene_scale ** 2
         opt.zero_grad(set_to_none=True)
         loss.backward()
+        if args.freeze_color_last > 0:                  # e.g. inpainted fill discs: keep their colours exactly
+            for k in ("sh0", "shN"):
+                if params[k].grad is not None:
+                    params[k].grad[-args.freeze_color_last:] = 0
         nbad = 0
         for prm in params.values():
             if prm.grad is not None:
@@ -532,6 +558,9 @@ def finetune(args):
             raster.r = r_eval; report(step)
     raster.r = r_eval; report(args.iters)
     with torch.no_grad():
+        if args.freeze_color_last > 0:                  # exact copy-back (Adam with all-zero grads never moves them anyway)
+            for k in ("sh0", "shN"):
+                params[k][-args.freeze_color_last:] = p0[k][-args.freeze_color_last:]
         dm = (params["means"] - p0["means"]).norm(dim=-1)
         log["delta"] = {"means_median": float(dm.median()), "means_p99": float(torch.quantile(dm[::max(1, N // 1000000)], 0.99)),
                         "opacity_mean_before": float(torch.sigmoid(p0["opacities"]).mean()),
@@ -561,6 +590,8 @@ def main():
     r.add_argument("--ply", required=True); r.add_argument("--dataset", required=True); r.add_argument("--out-dir", required=True)
     r.add_argument("--viewer", default="ss352", choices=("pc274", "ss352")); r.add_argument("--raster", default="exact", choices=("exact", "cuda"))
     r.add_argument("--quant", action="store_true"); r.add_argument("--viewer-cam", action="store_true")
+    r.add_argument("--display-scale", type=float, default=1.0, help="ss352: on-screen canvas px per image px")
+    r.add_argument("--bg", nargs="+", default=["black"], help="black|grey|white|R,G,B; several -> <out-dir>/<bg>/")
     r.add_argument("--every", type=int, default=1); r.add_argument("--offset", type=int, default=0)
     f = sub.add_parser("finetune")
     f.add_argument("--ply", required=True); f.add_argument("--dataset", required=True, help="COLMAP text dataset, PLY's frame")
@@ -577,6 +608,11 @@ def main():
     f.add_argument("--means-lr-final", type=float, default=1.6e-6)
     f.add_argument("--opacity-lr", type=float, default=0.025)
     f.add_argument("--ssim-lambda", type=float, default=0.2)
+    f.add_argument("--lpips-lambda", type=float, default=0.0, help="LPIPS-VGG term (as eval_views / the accept gate)")
+    f.add_argument("--lambda-wd", type=float, default=0.0, help="Wasserstein Distortion (VGG-16) term, e.g. 0.025")
+    f.add_argument("--wd-log2-sigma", type=float, default=4.0, help="WD pooling scale (log2 px)")
+    f.add_argument("--wd-num-scales", type=int, default=3)
+    f.add_argument("--rgb-scale", type=float, default=1.0, help="weight of the L1/SSIM terms")
     f.add_argument("--depth-lambda", type=float, default=0.0, help="LiDAR ray-distance L1 where <image>_depth.npy exists; 0 = off")
     f.add_argument("--depth-trim", type=float, default=0.95)
     f.add_argument("--anchor", type=float, default=0.0, help="penalty on centre drift (scene-scale units^2)")
@@ -585,6 +621,7 @@ def main():
     f.add_argument("--eval-interval", type=int, default=2000)
     f.add_argument("--seed", type=int, default=0)
     f.add_argument("--log-every", type=int, default=500)
+    f.add_argument("--freeze-color-last", type=int, default=0, help="keep SH (f_dc, f_rest) of the last N gaussians fixed")
     f.add_argument("--warmup", type=int, default=300, help="linear LR warm-up steps")
     f.add_argument("--overfit-one", action="store_true", help="debug: train on the first training frame only")
     args = ap.parse_args()
