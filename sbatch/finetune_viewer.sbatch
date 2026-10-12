@@ -168,7 +168,9 @@ print(f"{'splat':32s}{'viewer PSNR':>12s}{'SSIM':>8s}{'LPIPS':>8s}{'grey PSNR':>
 res = {}
 for f in sorted(os.listdir(rep)):
     if f.endswith(".json") and not f.startswith(("gate", "agreement", "attribution", "summary")):
-        r = json.load(open(os.path.join(rep, f))); res[r["tag"]] = r
+        r = json.load(open(os.path.join(rep, f)))
+        if "tag" not in r or "psnr" not in r: continue                # agreement / sweep jsons
+        res[r["tag"]] = r
         g = os.path.join(rep, "grey", f); r["grey"] = json.load(open(g)) if os.path.exists(g) else None
         v = os.path.join(F, "onpath", r["tag"], "_viewer.json"); r["alpha_hole_frac"] = json.load(open(v)).get("alpha_hole_frac") if os.path.exists(v) else None
         gp = f"{r['grey']['psnr']:11.2f}" if r["grey"] else f"{'-':>11s}"; ah = f"{r['alpha_hole_frac']:12.4f}" if r["alpha_hole_frac"] is not None else f"{'-':>12s}"
