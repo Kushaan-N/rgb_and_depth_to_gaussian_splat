@@ -5,9 +5,9 @@ backs of objects, walls behind the robot) end up as holes or grey speckle. Measu
 appearance comes from the surroundings the cameras did see:
 
   WHERE   points of the (dynamic-free) depth cloud, voxel-thinned to --cell, with no opaque splat gaussian
-          within --covered-m, and that NO training camera sees in front of the splat's own surface (rendered
-          depth per training view, eval_views.py --save-depth-dir): there the camera's version wins, so real
-          views are untouched. Without depth renders only the coverage test applies.
+          within --covered-m, and that NO training camera sees in front of, or within --min-hidden-m behind, the
+          splat's own surface (rendered depth per training view, eval_views.py --save-depth-dir): there the
+          camera's version wins (real views untouched), and clutter just behind seen surfaces is not filled. Without depth renders only the coverage test applies.
   COLOUR  for each such point, a blend of the colours (SH DC of the nearest opaque splat gaussian) of the --k
           nearest covered points, weighted by distance and by normal agreement (wall colour does not bleed
           onto floor); view-dependent SH is left at zero (matte).
@@ -41,6 +41,8 @@ def main():
     ap.add_argument("--min-opacity", type=float, default=0.3)
     ap.add_argument("--k", type=int, default=24)
     ap.add_argument("--tol-rel", type=float, default=0.05, help="behind the splat surface by more = hidden")
+    ap.add_argument("--min-hidden-m", type=float, default=0.15,
+                    help="a point hidden by less than this behind a seen surface is clutter around it, not a missing surface")
     ap.add_argument("--opacity", type=float, default=0.95)
     args = ap.parse_args()
     import open3d as o3d
@@ -84,7 +86,8 @@ def main():
                 continue
             D = np.load(f).astype(np.float32)[vv[ia], u[ia]]
             r = np.linalg.norm(Pc[ia], axis=1)
-            seen[ia[(D <= 0) | (r < D * (1 + args.tol_rel))]] = True        # visible: nothing / not behind
+            # visible (nothing rendered / not behind the surface) or only just behind it (thickness, clutter)
+            seen[ia[(D <= 0) | (r < D * (1 + args.tol_rel)) | (r < D + args.min_hidden_m / s)]] = True
         print(f"[fill] {len(cand):,} uncovered; {seen.sum():,} visible to a training camera (left to the camera)", flush=True)
         cand = cand[~seen]
     if not len(cand):
