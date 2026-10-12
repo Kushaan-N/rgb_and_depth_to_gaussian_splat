@@ -18,7 +18,7 @@ GPU jobs auto-use the `pi_donghyunkim_umass_edu` account (high fairshare) and th
 ## 1. See the results (works today, no GPU)
 
 ```
-cd /work/pi_donghyunkim_umass_edu/kushaan/rgb_and_depth_to_gaussian_splat
+cd /work/pi_donghyunkim_umass_edu/kushaan/scan2sim
 ./launch.sh view
 ```
 This builds a **single self-contained** `results/results.html` (all videos + frames embedded)
