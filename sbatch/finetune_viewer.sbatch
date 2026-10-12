@@ -9,7 +9,7 @@
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o logs/finetune_viewer-%j.out sbatch/finetune_viewer.sbatch configs/<seq>.yaml
 # Env: STAGE (all, or a space list of: compare attrib fix smoke heldout deliver), ARMS ("edgs_igs4m lidar_init"), ITERS (7000), VIEWER
 # (pc274), RASTER (exact), DEPTH (0 = no LiDAR term), FTARGS (extra finetune flags), TAG (output suffix),
-# MOVE ("0 -0.3 1.0"), EVERY_OFF (40).
+# MOVE ("0 -0.3 1.0"), EVERY_OFF (40), DELIV ("edgs_igs edgs_igs_complete": exports/<name>.ply).
 #SBATCH -J finetune-viewer
 #SBATCH -p gpu,gpu-preempt
 #SBATCH --gres=gpu:a100:1
@@ -121,19 +121,24 @@ if has heldout; then
   done
 fi
 
-# ---- 3. all-frames deliverable (trained on every frame: its on-path score is NOT held-out)
+# ---- 3. all-frames deliverables (trained on every frame: on-path scores are NOT held-out); gate vs the input
 if has deliver; then
-  EX="$OUT/exports"; b="$EX/edgs_igs.ply"; ft="$EX/edgs_igs_$TAG.ply"
-  if [ -f "$b" ]; then
-    [ -f "$ft" ] || FT "$b" "$ft" "$ALLDS" 0 2>&1 | tee "$F/edgs_igs_all_$TAG.log" || true
+  EX="$OUT/exports"
+  for d in ${DELIV:-edgs_igs edgs_igs_complete}; do
+    b="$EX/$d.ply"; ft="$EX/${d}_$TAG.ply"; t="${d}_all"; [ "$d" = edgs_igs ] || t="$d"
+    [ -f "$b" ] || { echo "no $b"; continue; }
+    [ -f "$ft" ] || FT "$b" "$ft" "$ALLDS" 0 2>&1 | tee "$F/${t}_$TAG.log" || true
+    [ -f "$ft" ] || { echo "fine-tune of $d failed"; continue; }
     mv -f "${ft%.ply}_ftv.json" "$F/" 2>/dev/null || true             # keep exports/ to plys
     "$CPUPY" scripts/sim3_align_splat.py --colmap-model "$P/dataset/sparse/0" --gt-model "$FRAME" --in-ply "$ft" \
-      --out-ply "$EX/edgs_igs_${TAG}_refaxes.ply"
-    shots "$b" "$TEST" "$F/onpath/edgs_igs_all"; shots "$ft" "$TEST" "$F/onpath/edgs_igs_all_$TAG"
-    score edgs_igs_all "$F/onpath/edgs_igs_all"; score "edgs_igs_all_$TAG" "$F/onpath/edgs_igs_all_$TAG"
-    shots "$b" "$TRAIN" "$F/offpath/edgs_igs_all" --every "$EVERY_OFF" --move $MOVE
-    shots "$ft" "$TRAIN" "$F/offpath/edgs_igs_all_$TAG" --every "$EVERY_OFF" --move $MOVE
-  fi
+      --out-ply "$EX/${d}_${TAG}_refaxes.ply"
+    shots "$b" "$TEST" "$F/onpath/$t"; shots "$ft" "$TEST" "$F/onpath/${t}_$TAG"
+    score "$t" "$F/onpath/$t"; score "${t}_$TAG" "$F/onpath/${t}_$TAG"
+    "$CPUPY" scripts/accept_gate.py --pair onpath_all_frames "$REP/$t.json" "$REP/${t}_$TAG.json" --out "$REP/gate_${t}_$TAG.json" \
+      && echo "GATE ${t}_$TAG ACCEPT" || echo "GATE ${t}_$TAG REJECT"
+    shots "$b" "$TRAIN" "$F/offpath/$t" --every "$EVERY_OFF" --move $MOVE
+    shots "$ft" "$TRAIN" "$F/offpath/${t}_$TAG" --every "$EVERY_OFF" --move $MOVE
+  done
 fi
 
 # ---- summary + montages (real | base | fine-tuned per arm)
