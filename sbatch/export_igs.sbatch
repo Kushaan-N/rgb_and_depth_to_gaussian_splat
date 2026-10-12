@@ -1,8 +1,10 @@
 #!/bin/bash
 # Deliverable splat with Improved-GS densification (patches/3dgrut-improved-densify.patch; best on-path arm of
 # sbatch/densify_bench.sbatch): trained on ALL frames, exported in the COLMAP frame and the metric frame.
-#   igs   Improved-GS, 1M budget                       -> <out>/exports/igs.ply, igs_metric.ply
-#   igs_d Improved-GS, 2M budget + LiDAR depth loss    -> <out>/exports/igs_depth.ply, igs_depth_metric.ply
+#   igs   Improved-GS, 1M budget                       -> <out>/exports/igs*.ply
+#   igs_d Improved-GS, 2M budget + LiDAR depth loss    -> <out>/exports/igs_depth*.ply
+# then the floor fill (infill_floor.py, as the pipeline's post stage) -> <name>_filled.ply (COLMAP frame),
+# <name>_filled_metric.ply (metric) and <name>_filled_refaxes.ply (pipeline.export_frame_model's axes).
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o <log> sbatch/export_igs.sbatch configs/<seq>.yaml
 # Env: ARMS ("igs igs_d").
 #SBATCH -J export-igs
@@ -45,11 +47,27 @@ for arm in ${ARMS:-igs igs_d}; do
       || { tail -40 "$RUN.log"; exit 1; }
     CK="$(ls -t "$RUN"/run/*/ckpt_last.pt | head -1)"
   fi
-  # sanity: fit to the training frames (held-out quality is in densify_bench's report)
-  "$GPY" scripts/eval_views.py --checkpoint "$CK" --dataset "$DATA" --tag "$arm" --json-out "$F/$arm.json" | tail -1
-  "$GPY" scripts/export_gaussian_ply.py --checkpoint "$CK" --out "$E/$NAME.ply"
+  if [ ! -f "$E/$NAME.ply" ]; then
+    # sanity: fit to the training frames (held-out quality is in densify_bench's report)
+    "$GPY" scripts/eval_views.py --checkpoint "$CK" --dataset "$DATA" --tag "$arm" --json-out "$F/$arm.json" | tail -1
+    "$GPY" scripts/export_gaussian_ply.py --checkpoint "$CK" --out "$E/$NAME.ply"
+  fi
+  # floor no camera faced is pruned in training: put back the LiDAR-measured floor, coloured from the real
+  # pixels that saw it (or the nearest reconstructed floor) — the pipeline's post stage (infill_floor.py)
+  if [ "$(get pipeline.floor_fill 1)" = 1 ]; then
+    "$CPUPY" scripts/infill_floor.py --depth-cloud "$P/depth_cloud.ply" --splat-ply "$E/$NAME.ply" \
+      --sim3-json "$P/sim3.json" --gt-model "$GT" --images "$OUT/precond/$(get sequence.rgb_dir rgb)" \
+      --out-ply "$E/${NAME}_filled.ply" | tail -3
+  else
+    cp "$E/$NAME.ply" "$E/${NAME}_filled.ply"
+  fi
   "$CPUPY" scripts/sim3_align_splat.py --colmap-model "$P/dataset/sparse/0" --gt-model "$GT" \
-    --in-ply "$E/$NAME.ply" --out-ply "$E/${NAME}_metric.ply"
+    --in-ply "$E/${NAME}_filled.ply" --out-ply "$E/${NAME}_filled_metric.ply"
+  FRAME="$(get pipeline.export_frame_model "")"                     # deliver in the viewer reference's axes
+  if [ -n "$FRAME" ]; then
+    "$CPUPY" scripts/sim3_align_splat.py --colmap-model "$P/dataset/sparse/0" --gt-model "$FRAME" \
+      --in-ply "$E/${NAME}_filled.ply" --out-ply "$E/${NAME}_filled_refaxes.ply"
+  fi
 done
 ls -la "$E"/igs*.ply
 echo "EXPORT_IGS_DONE"
