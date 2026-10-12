@@ -1,0 +1,177 @@
+diff --git a/configs/base_gs.yaml b/configs/base_gs.yaml
+index 56b4957..95550c5 100644
+--- a/configs/base_gs.yaml
++++ b/configs/base_gs.yaml
+@@ -187,6 +187,17 @@ loss:
+   lambda_depth: 0.05
+   lambda_depth_opacity: 0.0    # push accumulated opacity to 1 where depth was measured
+   depth_trim: 0.95             # drop the worst 5% of per-pixel depth errors (edges, misalignment)
++  valid_mask: false            # weight the photometric loss by <image stem><valid_suffix> where present
++  valid_suffix: _valid.png     # 255 = supervise, 0 = ignore (e.g. scripts/change_masks.py change masks)
++
++# Per-recording / per-frame appearance (fusion of several recordings): a learnable colour transform applied
++# to the render during TRAINING only; rendering, eval and export stay the standard splat.
++appearance:
++  mode: none                   # none | recording (one per image sub-folder) | frame (one per training frame)
++  model: affine                # affine (3x3 matrix + bias) | gain (per-channel gain + bias)
++  reference: ""                # sub-folder whose frames stay identity ("" = first sorted sub-folder)
++  lr: 0.001
++  start_iteration: 0
+ 
+ # Post-processing configuration
+ post_processing:
+diff --git a/threedgrut/appearance.py b/threedgrut/appearance.py
+new file mode 100644
+index 0000000..f72d881
+--- /dev/null
++++ b/threedgrut/appearance.py
+@@ -0,0 +1,80 @@
++# Fusion of several recordings (CEAR patch, patches/3dgrut-fusion.patch): per-recording / per-frame colour
++# transforms applied to the render during training only, and per-frame valid-pixel masks for the loss.
++import json
++import os
++
++import numpy as np
++import torch
++import torch.nn as nn
++from PIL import Image
++
++
++def recording_of(path: str) -> str:
++    """Recording = the image's sub-folder inside the dataset's image folder (fuse_sequences.py layout)."""
++    return os.path.basename(os.path.dirname(str(path)))
++
++
++class RecordingAppearance(nn.Module):
++    """y = A_k x + b_k on the rendered RGB of training frame k's recording (mode=recording) or of frame k itself
++    (mode=frame). Frames of the reference recording use the identity (not learnt), so the splat stays in the
++    reference recording's colours and the transforms only absorb the other recordings' exposure / white balance."""
++
++    def __init__(self, image_paths, mode="recording", model="affine", reference=""):
++        super().__init__()
++        recs = [recording_of(p) for p in image_paths]
++        self.recordings = sorted(set(recs))
++        self.reference = reference or self.recordings[0]
++        if self.reference not in self.recordings:
++            raise ValueError(f"appearance.reference '{self.reference}' is not one of {self.recordings}")
++        self.mode, self.model_kind, self.names = mode, model, [str(p) for p in image_paths]
++        keys = self.recordings if mode == "recording" else [str(i) for i in range(len(recs))]
++        self.key_names = keys if mode == "recording" else self.names
++        ref = [k == self.reference for k in keys] if mode == "recording" else [r == self.reference for r in recs]
++        rec_idx = {r: i for i, r in enumerate(self.recordings)}
++        # frame -> parameter slot
++        slot = [rec_idx[r] for r in recs] if mode == "recording" else list(range(len(recs)))
++        self.register_buffer("slot", torch.tensor(slot, dtype=torch.long))
++        self.register_buffer("is_ref", torch.tensor(ref, dtype=torch.bool))
++        n = len(keys)
++        if model == "affine":
++            self.A = nn.Parameter(torch.eye(3).repeat(n, 1, 1))
++        elif model == "gain":
++            self.A = nn.Parameter(torch.ones(n, 3))
++        else:
++            raise ValueError(f"unknown appearance.model {model}")
++        self.b = nn.Parameter(torch.zeros(n, 3))
++
++    def forward(self, rgb: torch.Tensor, frame_idx: int) -> torch.Tensor:
++        k = int(self.slot[frame_idx])
++        if bool(self.is_ref[k]):
++            return rgb
++        A = self.A[k] if self.model_kind == "affine" else torch.diag(self.A[k])
++        return rgb @ A.T + self.b[k]
++
++    def to_json(self, path: str, step: int):
++        out = {"mode": self.mode, "model": self.model_kind, "reference": self.reference, "step": int(step),
++               "recordings": self.recordings, "transforms": {}}
++        with torch.no_grad():
++            for k, name in enumerate(self.key_names):
++                if bool(self.is_ref[k]):
++                    continue
++                A = self.A[k] if self.model_kind == "affine" else torch.diag(self.A[k])
++                out["transforms"][name] = {"A": A.cpu().numpy().round(5).tolist(), "b": self.b[k].cpu().numpy().round(5).tolist()}
++        json.dump(out, open(path, "w"), indent=1)
++
++
++class ValidMasks:
++    """<image stem><suffix> per training frame, loaded lazily and cached as [1, H, W, 1] float in [0, 1]."""
++
++    def __init__(self, image_paths, suffix="_valid.png", device="cuda"):
++        self.paths = [os.path.splitext(str(p))[0] + suffix for p in image_paths]
++        self.present = np.array([os.path.exists(p) for p in self.paths])
++        self.device, self.cache = device, {}
++
++    def __call__(self, frame_idx: int):
++        if not self.present[frame_idx]:
++            return None
++        if frame_idx not in self.cache:
++            m = np.asarray(Image.open(self.paths[frame_idx]).convert("L"), dtype=np.uint8)
++            self.cache[frame_idx] = torch.from_numpy(m)[None, :, :, None]
++        return self.cache[frame_idx].to(self.device, non_blocking=True).float() / 255.0
+diff --git a/threedgrut/trainer.py b/threedgrut/trainer.py
+index c2ffaa5..1c996bd 100644
+--- a/threedgrut/trainer.py
++++ b/threedgrut/trainer.py
+@@ -146,6 +146,7 @@ class Trainer3DGRUT:
+         # Feature decoder and post-processing must exist before setup_training so resume can load their state.
+         self.init_feature_decoder(conf)
+         self.init_post_processing(conf)
++        self.init_appearance(conf)
+         self.setup_training(conf, self.model, self.train_dataset)
+         self.init_experiments_tracking(conf)
+         self.init_gui(conf, self.model, self.train_dataset, self.val_dataset, self.scene_bbox)
+@@ -529,6 +530,23 @@ class Trainer3DGRUT:
+         else:
+             raise ValueError(f"Unknown post-processing method: {method}")
+ 
++    def init_appearance(self, conf: DictConfig):
++        """Training-only per-recording colour transforms and per-frame valid-pixel masks (fusion patch)."""
++        from threedgrut.appearance import RecordingAppearance, ValidMasks
++
++        self.appearance, self.appearance_optimizer, self.valid_masks = None, None, None
++        paths = getattr(self.train_dataset, "image_paths", None)
++        app = conf.get("appearance", None)
++        if app is not None and app.get("mode", "none") != "none" and paths is not None:
++            self.appearance = RecordingAppearance(paths, app.mode, app.get("model", "affine"),
++                                                  app.get("reference", "")).to(self.device)
++            self.appearance_optimizer = torch.optim.Adam(self.appearance.parameters(), lr=app.get("lr", 1e-3))
++            logger.info(f"🎨 Appearance ({app.mode}, {app.get('model', 'affine')}): recordings "
++                        f"{self.appearance.recordings}, reference {self.appearance.reference}")
++        if conf.loss.get("valid_mask", False) and paths is not None:
++            self.valid_masks = ValidMasks(paths, conf.loss.get("valid_suffix", "_valid.png"), self.device)
++            logger.info(f"🎭 Valid masks for {int(self.valid_masks.present.sum())}/{len(paths)} training frames")
++
+     def init_feature_decoder(self, conf: DictConfig):
+         """Initialize feature decoder for learned features mode."""
+         from threedgrut.model.features import Features
+@@ -1112,6 +1130,8 @@ class Trainer3DGRUT:
+         else:
+             ckpt_path = os.path.join(out_dir, "ckpt_last.pt")
+         torch.save(parameters, ckpt_path)
++        if getattr(self, "appearance", None) is not None:
++            self.appearance.to_json(os.path.join(os.path.dirname(ckpt_path), "appearance.json"), global_step)
+         logger.info(f'💾 Saved checkpoint to: "{os.path.abspath(ckpt_path)}"')
+ 
+     def render_gui(self, scene_updated):
+@@ -1199,6 +1219,12 @@ class Trainer3DGRUT:
+                 outputs = apply_post_processing(self.post_processing, outputs, gpu_batch, training=True)
+ 
+         # Compute the losses of a single batch
++        # Fusion patch: this recording's colour transform on the render, change/valid mask on the loss
++        if self.appearance is not None and global_step >= self.conf.appearance.get("start_iteration", 0):
++            outputs["pred_features"] = self.appearance(outputs["pred_features"], gpu_batch.frame_idx)
++        if self.valid_masks is not None and (vm := self.valid_masks(gpu_batch.frame_idx)) is not None:
++            gpu_batch.mask = vm if gpu_batch.mask is None else gpu_batch.mask * vm
++
+         with torch.cuda.nvtx.range(f"train_{global_step}_loss"):
+             batch_losses = self.get_losses(gpu_batch, outputs)
+ 
+@@ -1263,6 +1289,10 @@ class Trainer3DGRUT:
+                 self.feature_decoder_scheduler.step()
+                 self.feature_decoder.ema_update(global_step)
+ 
++        if self.appearance_optimizer is not None:
++            self.appearance_optimizer.step()
++            self.appearance_optimizer.zero_grad()
++
+         # Post-processing optimizer/scheduler step
+         if self.post_processing_optimizers is not None:
+             with torch.cuda.nvtx.range(f"train_{global_step}_post_processing_opt"):
