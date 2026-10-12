@@ -17,7 +17,7 @@ Only the fill discs' f_dc change; every other gaussian (all the camera-supported
 so real views are unchanged. Discs with too little observed context keep the blend colour, de-speckled by
 averaging over neighbouring fill discs (--smooth-m).
 
-    python scripts/fill_inpaint.py --splat-ply X_filled.ply --fill-ply X_complete.ply --sim3-json sim3.json \
+    python scripts/fill_inpaint.py --splat-ply X.ply --fill-ply X_complete.ply --sim3-json sim3.json \
         --out-ply X_inpainted.ply [--method lama --lama-pt big-lama.pt --debug-dir dbg/]
 Round trip (does SuperSplat show rgb = 0.5 + C0 dc?): --roundtrip-make DIR --dataset <ds>, render DIR/roundtrip.ply
 with viewer_shots.py --every 100000, then --roundtrip-check <shots dir> --roundtrip-make DIR.
