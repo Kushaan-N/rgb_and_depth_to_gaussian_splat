@@ -318,7 +318,7 @@ def render_ply(args, rast, dev):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dataset", default=None, help="COLMAP text dataset (sparse/0/*.txt incl. points3D.txt, images/)")
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out", default=None, help="output dir (required for training; --render-ply: optional render dir)")
     ap.add_argument("--test-split-interval", type=int, default=8)
     ap.add_argument("--eval-dataset", default=None, help="held-out set scored at the end in this rasteriser")
     ap.add_argument("--iters", type=int, default=30000)
@@ -370,6 +370,8 @@ def main():
     rast = ViewerGS(args)
     if args.render_ply:                                     # diagnostics: render a PLY, score vs GT and a viewer's renders
         render_ply(args, rast, dev); return
+    if not (args.dataset and args.out):
+        raise SystemExit("--dataset and --out are required for training")
     tr = load_views(args.dataset, args.test_split_interval, "train", dev, depth=args.depth_lambda > 0)
     ev = load_views(args.eval_dataset, 0, "all", dev) if args.eval_dataset else []
     nd = sum(v[6] is not None for v in tr)
