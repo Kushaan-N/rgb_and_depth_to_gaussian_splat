@@ -3,3 +3,9 @@
 base: datasets/cear.yaml
 sequence:
   name: mocap2_well-lit_trot
+pipeline:
+  # the splat the user judged best in a viewer (COLMAP-points init, stock 3DGRUT, Sep 28) and its own COLMAP
+  # reconstruction: viewer_bench.sbatch scores against it, and exports are delivered in ITS axes
+  viewer_reference_ply: "${CEAR_OUT}/{seq}/gaussians_colmap.ply"
+  viewer_reference_dataset: "${CEAR_OUT}/{seq}/dataset_colmap"
+  export_frame_model: "${CEAR_OUT}/{seq}/dataset_colmap/sparse/0"
