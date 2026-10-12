@@ -24,6 +24,9 @@ OUT="$(get paths.out_root)"; P="$OUT/pipeline"; VB="$P/viewer_bench"; S="$P/supe
 REF_PLY="$(get pipeline.viewer_reference_ply)"; REF_DS="$(get pipeline.viewer_reference_dataset)"
 FRAME="$(get pipeline.export_frame_model)"; MOVE="${MOVE:-0 -0.3 1.0}"; EVERY_OFF="${EVERY_OFF:-40}"
 hostname; date; mkdir -p "$REP"; nvidia-smi --query-gpu=name --format=csv,noheader || true
+module load cuda/12.4.1 gcc/9.4.0 2>/dev/null || true               # exporting checkpoints builds 3DGRUT kernels
+export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"; export PATH="$THREEDGRUT_DIR/.venv/bin:$PATH"
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0}"
 bash env/make_viewer_venv.sh
 RT="$VB/reference_dataset"                                     # text-model view of the reference reconstruction
 if [ ! -f "$RT/sparse/0/images.txt" ]; then
