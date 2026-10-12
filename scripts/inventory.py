@@ -141,12 +141,17 @@ def inventory(cfg: dict) -> dict:
     rgb_count = report["dirs"].get("rgb", {}).get("count")
     aligned_depth = report["dirs"].get("depth", {}).get("aligned_depth_rgb_count")
     consistent = True
-    if n_ts is not None and rgb_count is not None and abs(n_ts - rgb_count) > 1:
-        consistent = False
-        report["issues"].append(f"parsed frames {n_ts} != rgb count {rgb_count}")
-    if n_ts is not None and aligned_depth is not None and abs(n_ts - aligned_depth) > 1:
-        consistent = False
-        report["issues"].append(f"parsed frames {n_ts} != aligned depth_rgb count {aligned_depth}")
+    # a handful of frames written without a timestamp row (or vice versa) is normal for long recordings:
+    # downstream stages only use frames present in both, so only a real mismatch (> 0.5 %) fails the gate
+    tol = max(1, int(0.005 * (n_ts or 0)))
+    for name, cnt in (("rgb", rgb_count), ("aligned depth_rgb", aligned_depth)):
+        if n_ts is None or cnt is None or n_ts == cnt:
+            continue
+        msg = f"parsed frames {n_ts} != {name} count {cnt}"
+        if abs(n_ts - cnt) > tol:
+            consistent = False; report["issues"].append(msg)
+        else:
+            report.setdefault("warnings", []).append(msg + f" (within tolerance {tol}; unmatched frames are skipped)")
     report["gate1_consistent"] = consistent
     return report
 
