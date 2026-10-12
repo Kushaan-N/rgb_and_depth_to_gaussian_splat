@@ -54,6 +54,7 @@ def score_dataset(checkpoint, ds, save_dir=None, metrics=True, opacity_dir=None,
             op = out["pred_opacity"][0, ..., 0]
             dd = torch.where(op > 0.5, out["pred_dist"][0, ..., 0] / op.clamp_min(1e-3), torch.zeros_like(op))
             np.save(dst, dd.half().cpu().numpy())
+            np.save(dst.replace("_splatdepth.npy", "_splatopacity.npy"), op.clamp(0, 1).half().cpu().numpy())
         if not metrics:
             continue
         gt = gb.rgb_gt[..., :3]
@@ -137,7 +138,7 @@ def main():
     ap.add_argument("--save-dir", default=None)
     ap.add_argument("--no-metrics", action="store_true")
     ap.add_argument("--save-opacity-dir", default=None, help="also write accumulated opacity as greyscale PNGs")
-    ap.add_argument("--save-depth-dir", default=None, help="also write rendered ray distance as <image>_splatdepth.npy")
+    ap.add_argument("--save-depth-dir", default=None, help="also write rendered ray distance as <image>_splatdepth.npy (+ accumulated opacity, _splatopacity.npy)")
     args = ap.parse_args()
     if args.pred_dir:
         res = {"tag": args.tag, "pred_dir": args.pred_dir, **score_images(args.pred_dir, args.dataset, args.gt_dir)}
