@@ -65,8 +65,7 @@ def main():
             rgb, _, _ = rasterization(G["means"], G["quats"], G["scales"], G["opacities"], G["sh"],
                                       torch.tensor(V, dtype=torch.float32, device=dev)[None],
                                       torch.tensor(K, dtype=torch.float32, device=dev)[None], W, H,
-                                      sh_degree=G["deg"], eps2d=0.3, rasterize_mode="classic",
-                                      backgrounds=torch.zeros(1, 3, device=dev))
+                                      sh_degree=G["deg"], eps2d=0.3, rasterize_mode="classic")   # black background
         pred = rgb[0].clamp(0, 1)
         gt = torch.tensor(np.asarray(Image.open(os.path.join(args.dataset, "images", name)).convert("RGB")),
                           device=dev).float() / 255
