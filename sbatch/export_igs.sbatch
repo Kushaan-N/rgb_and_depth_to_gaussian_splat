@@ -76,7 +76,9 @@ for arm in ${ARMS:-igs igs_d}; do
   ls "$F/${arm}_depth"/*_splatopacity.npy >/dev/null 2>&1 || "$GPY" scripts/eval_views.py --checkpoint "$CK" --dataset "$DATA" --no-metrics \
     --save-depth-dir "$F/${arm}_depth" | tail -1
   CLOUD="$P/offpath/depth/lidar_static.ply"; [ -f "$CLOUD" ] || CLOUD="$P/depth_cloud.ply"
-  "$CPUPY" scripts/fill_unseen_surfaces.py --splat-ply "$E/${NAME}_filled.ply" --cloud "$CLOUD" \
+  # on the UNFILLED splat: the floor is a LiDAR surface too, and this fill (unlike infill_floor.py) leaves every
+  # training view unchanged (SuperSplat check: floor fill -0.1..0.2 dB on seen views, this fill 0.0)
+  "$CPUPY" scripts/fill_unseen_surfaces.py --splat-ply "$E/${NAME}.ply" --cloud "$CLOUD" \
     --sim3-json "$P/sim3.json" --dataset "$DATA" --splat-depth-dir "$F/${arm}_depth" --out-ply "$E/${NAME}_complete.ply"
   FRAME="$(get pipeline.export_frame_model "")"                     # deliver in the viewer reference's axes
   for v in filled complete; do
