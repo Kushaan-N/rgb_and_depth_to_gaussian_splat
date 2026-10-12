@@ -3,6 +3,7 @@
 # sbatch/densify_bench.sbatch): trained on ALL frames, exported in the COLMAP frame and the metric frame.
 #   igs   Improved-GS, 1M budget                       -> <out>/exports/igs*.ply
 #   igs_d Improved-GS, 2M budget + LiDAR depth loss    -> <out>/exports/igs_depth*.ply
+#   edgs_igs  EDGS dense-correspondence init (scripts/edgs_init.py, all frames) + Improved-GS 4M -> edgs_igs*.ply
 # then the floor fill (infill_floor.py, as the pipeline's post stage) -> <name>_filled.ply (COLMAP frame),
 # <name>_filled_metric.ply (metric) and <name>_filled_refaxes.ply (pipeline.export_frame_model's axes); then
 # every other LiDAR-measured surface no camera supports (fill_unseen_surfaces.py) -> <name>_complete*.ply.
@@ -37,12 +38,20 @@ for arm in ${ARMS:-igs igs_d}; do
   case "$arm" in
     igs)   BUDGET=1000000; DEPTH=false; NAME=igs ;;
     igs_d) BUDGET=2000000; DEPTH=true;  NAME=igs_depth ;;
+    edgs_igs) BUDGET=4000000; DEPTH=false; NAME=edgs_igs ;;
     *) echo "unknown arm $arm"; exit 1 ;;
   esac
+  TRAIN="$DATA"
+  if [ "$arm" = edgs_igs ]; then                                    # EDGS dense-correspondence init, all frames
+    TRAIN="$F/edgs_data"
+    [ -f "$TRAIN/edgs_init.json" ] || "${EDGS_VENV:-$CEAR_WS/venv-edgs}/bin/python" scripts/edgs_init.py \
+      --dataset "$DATA" --out "$TRAIN" --test-split-interval 0 --sim3-json "$P/sim3.json" > "$F/edgs_init.log" 2>&1 \
+      || { tail -40 "$F/edgs_init.log"; exit 1; }
+  fi
   RUN="$F/$arm"; CK="$(ls -t "$RUN"/run/*/ckpt_last.pt 2>/dev/null | head -1 || true)"
   if [ -z "$CK" ]; then
     echo "== $arm: Improved-GS budget $BUDGET, depth loss $DEPTH, all frames"
-    ( cd "$DDIR" && "$GPY" train.py --config-name apps/colmap_3dgut_improved.yaml path="$DATA" out_dir="$RUN" \
+    ( cd "$DDIR" && "$GPY" train.py --config-name apps/colmap_3dgut_improved.yaml path="$TRAIN" out_dir="$RUN" \
         experiment_name=run dataset.downsample_factor=1 n_iterations="$ITERS" dataset.test_split_interval=100000 \
         loss.use_depth="$DEPTH" loss.lambda_depth="$LAMBDA" strategy.budget="$BUDGET" ) > "$RUN.log" 2>&1 \
       || { tail -40 "$RUN.log"; exit 1; }
