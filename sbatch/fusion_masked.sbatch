@@ -11,13 +11,16 @@
 #        app       + per-recording colour affine on the render (training only; reference = identity)
 #        mask      + change masks
 #        mask_app  + both
-#   4. SuperSplat's engine (scripts/viewer_shots.py) at each member's held-out frames (fuse_sequences.py's
+#        solo      control: the reference recording's frames ONLY, same fused (metric) frame and recipe -> separates
+#                  what fusing costs from what the fused frame / units cost
+#   4. SuperSplat (scripts/viewer_shots.py; primary: --engine current = live v3.5.2 editor, WebGPU, black + grey
+#      background -> report/cur_<bg>_*; also the older PlayCanvas 2.7.4 engine -> report/ss_*) at each member's held-out frames (fuse_sequences.py's
 #      eval/<m>/fused vs eval/<m>/single for the member's own splat) -> eval_views.py --pred-dir; never-worse
 #      gate per member (accept_gate.py); also 3DGRUT renders, and for non-reference members the score after the
 #      learnt appearance transform (what the model knows, not what SuperSplat shows); off-path + editor views in
 #      the reference's viewer axes vs its own splat; montages. Everything under <out>/pipeline/fusion_masked.
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o logs/fusion-masked-%j.out sbatch/fusion_masked.sbatch configs/fused_<name>.yaml
-# Env: ARMS ("plain app mask_app"), STOP_AFTER (masks|baselines), MASK_ARGS (extra change_masks.py masks flags),
+# Env: ARMS ("plain app mask_app"), ENGINES ("current pc274"), STOP_AFTER (masks|baselines), MASK_ARGS (extra change_masks.py masks flags),
 #      REFERENCE (member kept fully supervised; default fuse.members[0]), BUDGET (4000000), APP_MODEL (affine),
 #      FORCE_MASKS=1 (recompute masks), MOVE ("0 -0.3 1.0", reference dataset units), EVERY_OFF (40).
 #SBATCH -J fusion-masked
@@ -40,7 +43,7 @@ export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$CEAR_WS/playwright
 get() { "$CPUPY" scripts/cfg_get.py "$CFG" "$@"; }
 OUT="$(get paths.out_root)"; F="$OUT/pipeline"; W="$F/fusion_masked"; REP="$W/report"
 ITERS="$(get pipeline.train_iterations 30000)"; BUDGET="${BUDGET:-4000000}"; ARMS="${ARMS:-plain app mask_app}"
-MOVE="${MOVE:-0 -0.3 1.0}"; EVERY_OFF="${EVERY_OFF:-40}"
+MOVE="${MOVE:-0 -0.3 1.0}"; EVERY_OFF="${EVERY_OFF:-40}"; ENGINES="${ENGINES:-current pc274}"
 [ -f "$F/fuse.json" ] || { echo "no $F/fuse.json: run scripts/fuse_sequences.py --config $CFG first"; exit 1; }
 mapfile -t MEMBERS < <("$CPUPY" -c "import json,sys; print('\n'.join(json.load(open(sys.argv[1]))['members']))" "$F/fuse.json")
 REF="${REFERENCE:-${MEMBERS[0]}}"
@@ -104,12 +107,22 @@ if [ ! -f "$W/edgs_data/edgs_init.json" ]; then
     > "$W/edgs_init.log" 2>&1 || { tail -40 "$W/edgs_init.log"; exit 1; }
 fi
 "$CPUPY" -c "import json,sys; d=json.load(open(sys.argv[1])); d.pop('args'); print(' ', d)" "$W/edgs_data/edgs_init.json"
+case " $ARMS " in *" solo "*)                              # reference-only training set + its own EDGS init
+  SD="$W/solo_data"
+  if [ ! -f "$W/solo_edgs/edgs_init.json" ]; then
+    mkdir -p "$SD/sparse/0"; ln -sfn "$W/data/images" "$SD/images"
+    cp "$W/data/sparse/0/cameras.txt" "$W/data/sparse/0/points3D.txt" "$SD/sparse/0/"
+    awk -v r="$REF/" 'NF >= 10 && index($10, r) == 1 {print; print ""}' "$W/data/sparse/0/images.txt" > "$SD/sparse/0/images.txt"
+    rm -rf "$W/solo_edgs"; "$EPY" scripts/edgs_init.py --dataset "$SD" --out "$W/solo_edgs" --test-split-interval 0 \
+      --sim3-json "$F/sim3.json" > "$W/solo_edgs_init.log" 2>&1 || { tail -40 "$W/solo_edgs_init.log"; exit 1; }
+  fi;;
+esac
 declare -A ACK
 for arm in $ARMS; do
   RUN="$W/$arm"; CK="$(ls -t "$RUN"/run/*/ckpt_last.pt 2>/dev/null | head -1 || true)"
   X=(strategy.budget="$BUDGET" loss.use_depth=false)
   case $arm in
-    plain) ;;
+    plain|solo) ;;
     app) X+=(appearance.mode=recording appearance.model="${APP_MODEL:-affine}" appearance.reference="$REF") ;;
     mask) X+=(loss.valid_mask=true) ;;
     mask_app) X+=(loss.valid_mask=true appearance.mode=recording appearance.model="${APP_MODEL:-affine}" appearance.reference="$REF") ;;
@@ -117,7 +130,8 @@ for arm in $ARMS; do
   esac
   if [ -z "$CK" ]; then
     echo "== $arm: ${X[*]}"; date
-    ( cd "$FDIR" && "${F_ENV[@]}" "$GPY" train.py --config-name apps/colmap_3dgut_improved.yaml path="$W/edgs_data" out_dir="$RUN" \
+    TD="$W/edgs_data"; [ "$arm" = solo ] && TD="$W/solo_edgs"
+    ( cd "$FDIR" && "${F_ENV[@]}" "$GPY" train.py --config-name apps/colmap_3dgut_improved.yaml path="$TD" out_dir="$RUN" \
         experiment_name=run dataset.downsample_factor=1 n_iterations="$ITERS" dataset.test_split_interval=100000 "${X[@]}" ) \
       > "$RUN.log" 2>&1 || { tail -40 "$RUN.log"; exit 1; }
     CK="$(ls -t "$RUN"/run/*/ckpt_last.pt | head -1)"; date
@@ -128,23 +142,10 @@ for arm in $ARMS; do
   [ -f "$(dirname "$CK")/appearance.json" ] && cat "$(dirname "$CK")/appearance.json" | tr -d '\n ' | head -c 600 && echo
 done
 
-echo "== 4. held-out frames of each member: SuperSplat engine (+ 3DGRUT renders)"
+echo "== 4. held-out frames of each member: SuperSplat (engines: $ENGINES) + 3DGRUT renders"
 bash env/make_viewer_venv.sh | tail -1
-for m in "${MEMBERS[@]}"; do
-  EV="$F/eval/$m"; S="$W/ss/$m"; mkdir -p "$S"
-  [ -f "$REP/ss_${m}_base.json" ] || { "$VPY" scripts/viewer_shots.py --ply "${BPLY[$m]}" --dataset "$EV/single" --out-dir "$S/base" | tail -1
-    "$GPY" scripts/eval_views.py --pred-dir "$S/base" --dataset "$EV/single" --tag "ss:$m:base" --json-out "$REP/ss_${m}_base.json" | tail -1; }
-  [ -f "$REP/gr_${m}_base.json" ] || CUDA_LAUNCH_BLOCKING=1 "${R_ENV[@]}" "$GPY" scripts/eval_views.py --checkpoint "${BCK[$m]}" \
-    --dataset "$EV/single" --tag "gr:$m:base" --json-out "$REP/gr_${m}_base.json" | tail -1
-  for arm in $ARMS; do
-    [ -f "$REP/ss_${m}_$arm.json" ] || { "$VPY" scripts/viewer_shots.py --ply "$W/ply/$arm.ply" --dataset "$EV/fused" --out-dir "$S/$arm" | tail -1
-      "$GPY" scripts/eval_views.py --pred-dir "$S/$arm" --dataset "$EV/fused" --tag "ss:$m:$arm" --json-out "$REP/ss_${m}_$arm.json" | tail -1; }
-    [ -f "$REP/gr_${m}_$arm.json" ] || CUDA_LAUNCH_BLOCKING=1 "${R_ENV[@]}" "$GPY" scripts/eval_views.py --checkpoint "${ACK[$arm]}" \
-      --dataset "$EV/fused" --tag "gr:$m:$arm" --json-out "$REP/gr_${m}_$arm.json" | tail -1
-    # non-reference member, arm with appearance: the SuperSplat renders through that member's learnt transform
-    AJ="$(dirname "${ACK[$arm]}")/appearance.json"
-    if [ "$m" != "$REF" ] && [ -f "$AJ" ] && [ ! -f "$REP/ssam_${m}_$arm.json" ]; then
-      "$CPUPY" - "$AJ" "$m" "$S/$arm" "$S/${arm}_am" <<'PY'
+appmatch() {  # appearance.json member src dst: the renders through that member's learnt colour transform
+  "$CPUPY" - "$@" <<'PY'
 import json, os, sys, numpy as np
 from PIL import Image
 j, m, src, dst = json.load(open(sys.argv[1])), sys.argv[2], sys.argv[3], sys.argv[4]
@@ -155,34 +156,59 @@ for n in os.listdir(src):
         x = np.asarray(Image.open(os.path.join(src, n)).convert("RGB"), np.float32) / 255
         Image.fromarray((np.clip(x @ A.T + b, 0, 1) * 255).round().astype(np.uint8)).save(os.path.join(dst, n))
 PY
-      "$GPY" scripts/eval_views.py --pred-dir "$S/${arm}_am" --dataset "$EV/fused" --tag "ssam:$m:$arm" --json-out "$REP/ssam_${m}_$arm.json" | tail -1
-    fi
+}
+shots() {  # engine ply dataset member tag [appearance.json]: render + score -> report/<kind>_<member>_<tag>.json
+  local eng="$1" ply="$2" ds="$3" m="$4" t="$5" aj="${6:-}" o
+  if [ "$eng" = current ]; then
+    o="$W/cur/$m/$t"
+    [ -f "$REP/cur_grey_${m}_$t.json" ] || { "$VPY" scripts/viewer_shots.py --engine current --bg black grey --ply "$ply" --dataset "$ds" --out-dir "$o" | tail -1
+      for bg in black grey; do "$GPY" scripts/eval_views.py --pred-dir "$o/$bg" --dataset "$ds" --tag "cur_$bg:$m:$t" \
+        --json-out "$REP/cur_${bg}_${m}_$t.json" | tail -1; done; }
+    o="$o/black"; k=curam_black
+  else
+    o="$W/ss/$m/$t"
+    [ -f "$REP/ss_${m}_$t.json" ] || { "$VPY" scripts/viewer_shots.py --ply "$ply" --dataset "$ds" --out-dir "$o" | tail -1
+      "$GPY" scripts/eval_views.py --pred-dir "$o" --dataset "$ds" --tag "ss:$m:$t" --json-out "$REP/ss_${m}_$t.json" | tail -1; }
+    k=ssam
+  fi
+  if [ -n "$aj" ] && [ -f "$aj" ] && [ "$m" != "$REF" ] && [ ! -f "$REP/${k}_${m}_$t.json" ]; then
+    appmatch "$aj" "$m" "$o" "${o}_am"
+    "$GPY" scripts/eval_views.py --pred-dir "${o}_am" --dataset "$ds" --tag "$k:$m:$t" --json-out "$REP/${k}_${m}_$t.json" | tail -1
+  fi
+}
+for m in "${MEMBERS[@]}"; do
+  EV="$F/eval/$m"
+  for eng in $ENGINES; do shots "$eng" "${BPLY[$m]}" "$EV/single" "$m" base; done
+  [ -f "$REP/gr_${m}_base.json" ] || CUDA_LAUNCH_BLOCKING=1 "${R_ENV[@]}" "$GPY" scripts/eval_views.py --checkpoint "${BCK[$m]}" \
+    --dataset "$EV/single" --tag "gr:$m:base" --json-out "$REP/gr_${m}_base.json" | tail -1
+  for arm in $ARMS; do
+    for eng in $ENGINES; do shots "$eng" "$W/ply/$arm.ply" "$EV/fused" "$m" "$arm" "$(dirname "${ACK[$arm]}")/appearance.json"; done
+    [ -f "$REP/gr_${m}_$arm.json" ] || CUDA_LAUNCH_BLOCKING=1 "${R_ENV[@]}" "$GPY" scripts/eval_views.py --checkpoint "${ACK[$arm]}" \
+      --dataset "$EV/fused" --tag "gr:$m:$arm" --json-out "$REP/gr_${m}_$arm.json" | tail -1
   done
 done
-for arm in $ARMS; do
-  PAIRS=(); for m in "${MEMBERS[@]}"; do PAIRS+=(--pair "$m" "$REP/ss_${m}_base.json" "$REP/ss_${m}_$arm.json"); done
-  "$CPUPY" scripts/accept_gate.py "${PAIRS[@]}" --out "$REP/gate_$arm.json" | tail -2 || true
-  PAIRS=(); for m in "${MEMBERS[@]}"; do PAIRS+=(--pair "$m" "$REP/gr_${m}_base.json" "$REP/gr_${m}_$arm.json"); done
-  "$CPUPY" scripts/accept_gate.py "${PAIRS[@]}" --out "$REP/gate3dgrut_$arm.json" > /dev/null || true
+for arm in $ARMS; do                       # never-worse gate per member: gate_cur_black_<arm> is THE decision
+  for k in cur_black cur_grey ss gr; do
+    [ -f "$REP/${k}_${MEMBERS[0]}_base.json" ] || continue
+    PAIRS=(); for m in "${MEMBERS[@]}"; do PAIRS+=(--pair "$m" "$REP/${k}_${m}_base.json" "$REP/${k}_${m}_$arm.json"); done
+    "$CPUPY" scripts/accept_gate.py "${PAIRS[@]}" --out "$REP/gate_${k}_$arm.json" | tail -1 | sed "s/^/  $k $arm: /" || true
+  done
 done
 
 echo "== 5. off-path + editor views in the reference's viewer axes ($REF)"
 RCFG="$(mpipe "$REF" config)"; RP="$(mpipe "$REF" pipeline)"
 FRAME="$("$CPUPY" scripts/cfg_get.py "$RCFG" pipeline.export_frame_model "")"; RT="$RP/viewer_bench/reference_dataset"
 if [ -n "$FRAME" ] && [ -f "$RT/sparse/0/images.txt" ]; then
-  OFFB="$RP/supersplat_check/offpath/edgs_igs$((BUDGET / 1000000))m"                 # supersplat_check's render, if any
-  if [ ! -f "$OFFB/_supersplat_editor.png" ]; then
-    OFFB="$W/offpath/base"; RB="$W/ply/base_refaxes.ply"
-    [ -f "$RB" ] || "$CPUPY" scripts/sim3_align_splat.py --colmap-model "$RP/dataset/sparse/0" --gt-model "$FRAME" \
-      --in-ply "${BPLY[$REF]}" --out-ply "$RB" | tail -1
-    [ -f "$OFFB/_supersplat_editor.png" ] || "$VPY" scripts/viewer_shots.py --ply "$RB" --dataset "$RT" --every "$EVERY_OFF" --move $MOVE \
-      --out-dir "$OFFB" --editor | tail -1
-  fi
+  OFFB="$W/offpath_cur/base"; RB="$W/ply/base_refaxes.ply"
+  [ -f "$RB" ] || "$CPUPY" scripts/sim3_align_splat.py --colmap-model "$RP/dataset/sparse/0" --gt-model "$FRAME" \
+    --in-ply "${BPLY[$REF]}" --out-ply "$RB" | tail -1
+  [ -f "$OFFB/_supersplat_editor.png" ] || "$VPY" scripts/viewer_shots.py --engine current --bg black --ply "$RB" --dataset "$RT" \
+    --every "$EVERY_OFF" --move $MOVE --out-dir "$OFFB" --editor | tail -1
   for arm in $ARMS; do
     [ -f "$W/ply/${arm}_refaxes.ply" ] || "$CPUPY" scripts/sim3_align_splat.py --colmap-model "$F/eval/$REF/fused/sparse/0" \
       --gt-model "$FRAME" --in-ply "$W/ply/$arm.ply" --out-ply "$W/ply/${arm}_refaxes.ply" | tail -1
-    [ -f "$W/offpath/$arm/_supersplat_editor.png" ] || "$VPY" scripts/viewer_shots.py --ply "$W/ply/${arm}_refaxes.ply" --dataset "$RT" \
-      --every "$EVERY_OFF" --move $MOVE --out-dir "$W/offpath/$arm" --editor | tail -1
+    [ -f "$W/offpath_cur/$arm/_supersplat_editor.png" ] || "$VPY" scripts/viewer_shots.py --engine current --bg black --ply "$W/ply/${arm}_refaxes.ply" --dataset "$RT" \
+      --every "$EVERY_OFF" --move $MOVE --out-dir "$W/offpath_cur/$arm" --editor | tail -1
   done
 else
   OFFB=""; echo "  no viewer reference for $REF: skipped"
@@ -197,16 +223,16 @@ keys = ("psnr", "ssim", "lpips")
 out = {"reference": ref, "members": {}, "gates": {}, "change_masks": json.load(open(os.path.join(W, "change_masks.json")))["pairs"]}
 for m in members:
     out["members"][m] = {}
-    for kind in ("ss", "gr", "ssam"):
+    for kind in ("cur_black", "cur_grey", "curam_black", "ss", "ssam", "gr"):
         for t in ["base"] + arms:
             r = ld(f"{kind}_{m}_{t}.json")
             if r: out["members"][m][f"{kind}:{t}"] = {k: r[k] for k in keys}
 for a in arms:
-    for g in ("gate", "gate3dgrut"):
-        d = ld(f"{g}_{a}.json")
+    for g in ("cur_black", "cur_grey", "ss", "gr"):
+        d = ld(f"gate_{g}_{a}.json")
         if d: out["gates"][f"{g}:{a}"] = {"accept": d["accept"], "failures": d["failures"]}
 json.dump(out, open(os.path.join(rep, "fusion_summary.json"), "w"), indent=2)
-print("SuperSplat engine (ss) / 3DGRUT (gr) / SuperSplat + learnt appearance (ssam), held-out frames per member")
+print("SuperSplat v3.5.2 black/grey bg (cur_*), PlayCanvas 2.7.4 (ss), 3DGRUT (gr), + learnt appearance (*am*); held-out per member")
 for m, rows in out["members"].items():
     print(f"--- {m}" + ("  (reference)" if m == ref else ""))
     for t, r in rows.items(): print(f"  {t:18s}" + "".join(f"{r[k]:10.4f}" for k in keys))
@@ -214,18 +240,18 @@ print("gates:", json.dumps({k: v["accept"] for k, v in out["gates"].items()}))
 def lab(im, t):
     im = cv2.resize(im, (400, 300)); cv2.putText(im, t, (6, 22), 0, 0.7, (0, 0, 255), 2); return im
 for m in members:                                                    # real | base | arms, 5 held-out frames
-    S = os.path.join(W, "ss", m); g = os.path.join(F, "eval", m, "fused", "images")
-    names = sorted(n for n in os.listdir(os.path.join(S, "base")) if not n.startswith("_"))
+    S = os.path.join(W, "cur", m); g = os.path.join(F, "eval", m, "fused", "images")
+    names = sorted(n for n in os.listdir(os.path.join(S, "base", "black")) if not n.startswith("_"))
     rows = []
     for n in names[:: max(1, len(names) // 5)][:5]:
         cols = [lab(cv2.imread(os.path.join(g, n)), "real")]
         for t in ["base"] + arms:
-            p = os.path.join(S, t, n)
+            p = os.path.join(S, t, "black", n)
             if os.path.exists(p): cols.append(lab(cv2.imread(p), t))
         rows.append(np.hstack(cols))
     cv2.imwrite(os.path.join(rep, f"onpath_montage_{m}.jpg"), np.vstack(rows)); print("montage ->", os.path.join(rep, f"onpath_montage_{m}.jpg"))
 if offb:
-    dirs = [("base", offb)] + [(a, os.path.join(W, "offpath", a)) for a in arms]
+    dirs = [("base", offb)] + [(a, os.path.join(W, "offpath_cur", a)) for a in arms]
     names = sorted(n for n in os.listdir(offb) if not n.startswith("_"))[:6]
     rows = [np.hstack([lab(cv2.imread(os.path.join(d, n)), t) for t, d in dirs if os.path.exists(os.path.join(d, n))]) for n in names]
     if rows: cv2.imwrite(os.path.join(rep, "offpath_montage.jpg"), np.vstack(rows)); print("montage ->", os.path.join(rep, "offpath_montage.jpg"))
