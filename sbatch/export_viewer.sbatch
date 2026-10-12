@@ -4,7 +4,8 @@
 #      frames, Improved-GS 4M, random background so nothing is see-through) -> <F>/train/splat.ply
 #   2. viewer-exact fine-tune at random display scales (scripts/finetune_ply_viewer.py, SuperSplat 3.5.2 profile)
 #   3. every LiDAR surface no camera supports, filled (scripts/fill_unseen_surfaces.py; visibility from this splat's
-#      own depth/opacity, scripts/render_ply_depth.py) and LaMa-inpainted (scripts/fill_inpaint.py)
+#      own depth/opacity, scripts/render_ply_depth.py), checked in the viewer-exact rasteriser so no training view
+#      changes (scripts/fill_harm_ply.py), and LaMa-inpainted (scripts/fill_inpaint.py)
 #   4. exports in the viewer reference's axes: <out>/exports/<NAME>{,_refaxes}.ply
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o <log> sbatch/export_viewer.sbatch configs/<seq>.yaml
 # Env: NAME (viewer_igs), ARM_FLAGS (train_viewer_gsplat.py flags; default the best held-out arm igs4m_pc274),
@@ -52,7 +53,10 @@ echo "== 3. unseen LiDAR surfaces: fill + inpaint"
 [ -d "$F/depth" ] || "$SPY" scripts/render_ply_depth.py --ply "$E/$NAME.ply" --dataset "$DATA" --out-dir "$F/depth"
 CLOUD="$P/offpath/depth/lidar_static.ply"; [ -f "$CLOUD" ] || CLOUD="$P/depth_cloud.ply"
 "$CPUPY" scripts/fill_unseen_surfaces.py --splat-ply "$E/$NAME.ply" --cloud "$CLOUD" --sim3-json "$P/sim3.json" \
-  --dataset "$DATA" --splat-depth-dir "$F/depth" --out-ply "$E/${NAME}_complete.ply" | tail -3
+  --dataset "$DATA" --splat-depth-dir "$F/depth" --out-ply "$E/${NAME}_fill_raw.ply" | tail -3
+# measured, in the viewer itself: drop fill gaussians that change any training view (e.g. seen through windows)
+"$SPY" scripts/fill_harm_ply.py --base "$E/$NAME.ply" --filled "$E/${NAME}_fill_raw.ply" --dataset "$DATA" \
+  --out "$E/${NAME}_complete.ply"
 "$IPY" scripts/fill_inpaint.py --splat-ply "$E/$NAME.ply" --fill-ply "$E/${NAME}_complete.ply" --sim3-json "$P/sim3.json" \
   --method lama --lama-pt "${LAMA_PT:-$CEAR_WS/torch-hub/lama/big-lama.pt}" --out-ply "$E/${NAME}_inpainted.ply" | tail -3
 
