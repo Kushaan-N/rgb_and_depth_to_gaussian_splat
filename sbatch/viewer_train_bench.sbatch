@@ -15,7 +15,11 @@
 #   default (gsplat DefaultStrategy, AbsGS) | base (no training: the baseline PLY);
 #   flags: ss352 (default) / pc274 (viewer profile + kernel build: SuperSplat 3.5.2 / PlayCanvas 2.7.4), aa
 #   (antialiased mode, PLY tagged `comment SplatRenderMode mip`), ss<k> (render k x, area-downsample, loss at 1x),
-#   mp<x> (3D scale floor x px), e<x> (dilation x px^2 instead of the profile's), zero / pcbug / std (SH band-2 handling), d (LiDAR depth loss, LAMBDA), noeas, nomu.
+#   mp<x> (3D scale floor x px), e<x> (dilation x px^2 instead of the profile's), zero / pcbug / std (SH band-2 handling), d (LiDAR depth loss, LAMBDA), noeas, nomu,
+#   appgain / appaffine (per-frame exposure / white-balance transform on the render in training, --appearance), appr<x> (its
+#   identity pull, --app-reg x). GATE_REF=<arm> gates against that arm's viewer scores instead of `base`.
+# Every scored PLY is also scored with a per-frame least-squares colour affine fitted on each held-out frame itself
+#   (shots/onpath_fit/, report/<name>_<bg>_fit.json; leaks 12 numbers per frame, so informative only -- the gate uses raw).
 # Outputs under $VT (default $P/viewer_train): <arm>/{splat.ply,train.json,train.log,renders_trainer/},
 #   shots/{onpath,offpath}/<arm>/, report/<arm>_<bg>.json (viewer metric), report/gate_<arm>.json,
 #   report/summary.{json,md}, montage_{onpath,offpath}.jpg.
@@ -65,13 +69,31 @@ arm_args() {  # <arm> -> A (train_viewer_gsplat.py flags), PROF (kernel build)
       ss[0-9]*) A+=(--ss "${t#ss}") ;;      mp*) A+=(--min-px "${t#mp}") ;;
       e[0-9]*) A+=(--eps2d "${t#e}") ;;     # screen dilation override (px^2)
       d) A+=(--depth-lambda "$LAMBDA") ;;   noeas) A+=(--no-eas) ;;  nomu) A+=(--no-mu) ;;
+      appgain|appaffine) A+=(--appearance "${t#app}") ;;  appr*) A+=(--app-reg "${t#appr}") ;;
       *) echo "unknown arm flag $t in $1"; return 1 ;;
     esac
   done
   A+=(--viewer "$PROF")
 }
 
-score_ply() {  # <name> <ply>: SuperSplat renders at the held-out cameras -> report/<name>_<bg>.json; off-path renders
+fit_dir() {  # <pred dir> <out dir>: each render with the least-squares colour affine (3x3 + bias) to its own real frame
+  "$CPUPY" - "$1" "$TEST/images" "$2" <<'PY'
+import cv2, json, os, sys, numpy as np
+pd, gd, od = sys.argv[1:4]; os.makedirs(od, exist_ok=True); fits = {}
+for n in sorted(x for x in os.listdir(pd) if x.endswith(".png") and not x.startswith("_")):
+    p, g = cv2.imread(os.path.join(pd, n))[..., ::-1] / 255.0, cv2.imread(os.path.join(gd, n))[..., ::-1] / 255.0
+    X = np.c_[p.reshape(-1, 3), np.ones(p.shape[0] * p.shape[1])]
+    S = np.linalg.lstsq(X, g.reshape(-1, 3), rcond=None)[0]                      # (4,3): [M^T; b]
+    cv2.imwrite(os.path.join(od, n), np.round((X @ S).reshape(p.shape).clip(0, 1) * 255).astype(np.uint8)[..., ::-1])
+    fits[n] = {"M": np.round(S[:3].T, 5).tolist(), "b": np.round(S[3], 5).tolist()}
+G = np.array([np.diagonal(f["M"]) for f in fits.values()]); lum = G @ [0.299, 0.587, 0.114]
+json.dump({"gain_pct_0_5_50_95_100": np.round(np.percentile(lum, [0, 5, 50, 95, 100]), 4).tolist(),
+           "gain_std_rgb": np.round(G.std(0), 4).tolist(), "frames": fits}, open(os.path.join(od, "_fit.json"), "w"), indent=1)
+print(f"fit {len(fits)} frames -> {od}: luminance gain pct 0/5/50/95/100 {np.round(np.percentile(lum, [0, 5, 50, 95, 100]), 3).tolist()}")
+PY
+}
+
+score_ply() {  # <name> <ply>: SuperSplat renders at the held-out cameras -> report/<name>_<bg>.json (+ _fit); off-path renders
   local n="$1" ply="$2" bg d
   if [ ! -f "$REP/${n}_${BGA[-1]}.json" ]; then
     "$VPY" scripts/viewer_shots.py --engine "$ENGINE" --bg $BGS --ply "$ply" --dataset "$TEST" --out-dir "$VT/shots/onpath/$n" | tail -2
@@ -80,12 +102,19 @@ score_ply() {  # <name> <ply>: SuperSplat renders at the held-out cameras -> rep
       "$GPY" scripts/eval_views.py --pred-dir "$d" --dataset "$TEST" --tag "${n}_$bg" --json-out "$REP/${n}_$bg.json" | tail -1
     done
   fi
+  for bg in "${BGA[@]}"; do
+    [ -f "$REP/${n}_${bg}_fit.json" ] && continue
+    d="$VT/shots/onpath/$n"; [ "${#BGA[@]}" -gt 1 ] && d="$d/$bg"
+    fit_dir "$d" "$VT/shots/onpath_fit/$n/$bg" && \
+      "$GPY" scripts/eval_views.py --pred-dir "$VT/shots/onpath_fit/$n/$bg" --dataset "$TEST" --tag "${n}_${bg}_fit" \
+        --json-out "$REP/${n}_${bg}_fit.json" | tail -1
+  done
   [ -f "$VT/shots/offpath/$n/_viewer.json" ] || "$VPY" scripts/viewer_shots.py --engine "$ENGINE" --bg black --ply "$ply" \
     --dataset "$TEST" --every "$EVERY_OFF" --move $MOVE --out-dir "$VT/shots/offpath/$n" | tail -1
 }
 
 run_arm() {  # <arm>
-  local arm="$1" R="$VT/$1" bg PAIRS=()
+  local arm="$1" R="$VT/$1" bg PAIRS=() ref="${GATE_REF:-base}"
   lock "$VT/.base_lock"; score_ply base "$BASE_PLY" || true; rmdir "$VT/.base_lock"
   [ "$arm" = base ] && return 0
   arm_args "$arm"
@@ -94,10 +123,12 @@ run_arm() {  # <arm>
     PATH="$(dirname "$SPY"):$PATH" PYTHONPATH="$CEAR_WS/gsplat-viewer-$PROF" TORCH_EXTENSIONS_DIR="$CEAR_WS/torch-ext-gsplat-viewer-$PROF" \
       "$SPY" scripts/train_viewer_gsplat.py --dataset "$DS" --out "$R" --test-split-interval "$TSI" --eval-dataset "$TEST" \
       --iters "$ITERS" "${A[@]}" > "$R/train.log" 2>&1 || { tail -40 "$R/train.log"; return 1; }
-    grep -E '^\[vgs\] (held-out|[0-9]+ gaussians)' "$R/train.log" || true; date
+    grep -E '^\[vgs\] (held-out|appearance|[0-9]+ gaussians)' "$R/train.log" || true; date
   fi
   score_ply "$arm" "$R/splat.ply"
-  for bg in "${BGA[@]}"; do PAIRS+=(--pair "onpath_$bg" "$REP/base_$bg.json" "$REP/${arm}_$bg.json"); done
+  [ "$arm" = "$ref" ] && return 0
+  [ -f "$REP/${ref}_${BGA[-1]}.json" ] || { echo "[$arm] gate ref $ref not scored yet (run it first; MODE=report gates)"; return 0; }
+  for bg in "${BGA[@]}"; do PAIRS+=(--pair "onpath_$bg" "$REP/${ref}_$bg.json" "$REP/${arm}_$bg.json"); done
   "$CPUPY" scripts/accept_gate.py "${PAIRS[@]}" --out "$REP/gate_$arm.json" | tail -$(( 3 * ${#BGA[@]} + 1 )) || true
 }
 
@@ -111,6 +142,12 @@ fi
 
 echo "== report ($ENGINE engine, backgrounds: $BGS)"
 score_ply base "$BASE_PLY"
+REF="${GATE_REF:-base}"
+for arm in $ARMS; do                                        # (re)gate every scored arm against GATE_REF
+  [ "$arm" = "$REF" ] || [ ! -f "$REP/${arm}_${BGA[-1]}.json" ] || [ ! -f "$REP/${REF}_${BGA[-1]}.json" ] && continue
+  PAIRS=(); for bg in "${BGA[@]}"; do PAIRS+=(--pair "onpath_$bg" "$REP/${REF}_$bg.json" "$REP/${arm}_$bg.json"); done
+  "$CPUPY" scripts/accept_gate.py "${PAIRS[@]}" --out "$REP/gate_$arm.json" > /dev/null || true
+done
 "$CPUPY" - "$VT" "$TEST/images" "$BGS" base $ARMS <<'PY'
 import cv2, json, os, sys, numpy as np
 VT, gt, bgs, tags = sys.argv[1], sys.argv[2], sys.argv[3].split(), list(dict.fromkeys(sys.argv[4:]))
@@ -133,13 +170,17 @@ for t in tags:
            "gate": None if g is None else ("ACCEPT" if g["accept"] else "reject")}
     for bg in bgs:
         if r[bg]: row.update({f"{k}_{bg}": r[bg][k] for k in ("psnr", "ssim", "lpips")})
+    fj = ld(os.path.join(rep, f"{t}_{bgs[0]}_fit.json"))      # per-frame colour affine fitted on the frame (informative)
+    if fj: row.update({f"{k}_{bgs[0]}_fit": fj[k] for k in ("psnr", "ssim", "lpips")})
+    if tj and tj.get("appearance"): row["app_gain_lum_pct"] = tj["appearance"]["gain_pct_0_5_25_50_75_95_100"]["lum"]
     rows.append(row)
 json.dump(rows, open(os.path.join(rep, "summary.json"), "w"), indent=2)
 f = lambda v, p: "-" if v is None else (f"{v:.{p}f}" if isinstance(v, float) else str(v))
-hdr = "| arm | " + " | ".join(f"{bg} PSNR / SSIM / LPIPS" for bg in bgs) + " | trainer PSNR | trainer vs viewer | gaussians | train min | gate vs base |"
-L = [hdr, "|" + "---|" * (len(bgs) + 6)]
+hdr = "| arm | " + " | ".join(f"{bg} PSNR / SSIM / LPIPS" for bg in bgs) + f" | {bgs[0]} colour-fitted | trainer PSNR | trainer vs viewer | gaussians | train min | gate vs base |"
+L = [hdr, "|" + "---|" * (len(bgs) + 7)]
 for r in rows:
     L.append(f"| {r['arm']} | " + " | ".join(f"{f(r.get('psnr_'+bg),3)} / {f(r.get('ssim_'+bg),4)} / {f(r.get('lpips_'+bg),4)}" for bg in bgs)
+             + f" | {f(r.get('psnr_'+bgs[0]+'_fit'),3)} / {f(r.get('ssim_'+bgs[0]+'_fit'),4)} / {f(r.get('lpips_'+bgs[0]+'_fit'),4)}"
              + f" | {f(r['trainer_psnr'],3)} | {f(r['trainer_vs_viewer'],2)} | {f(r['gaussians'],0)} | {f(r['train_min'],1)} | {r['gate'] or '-'} |")
 open(os.path.join(rep, "summary.md"), "w").write("\n".join(L) + "\n"); print("\n".join(L))
 def montage(kind, first_gt, out, k):
