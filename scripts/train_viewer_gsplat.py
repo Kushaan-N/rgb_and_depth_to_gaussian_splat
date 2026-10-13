@@ -24,6 +24,12 @@ std = sqrt(s^2 + floor^2), recomputed after densification, baked into the export
 removes a trained splat), --depth-lambda (LiDAR ray-distance L1 where <image>_depth.npy exists), --bg random
 (default: a random background per step, so the opaque real frames force full coverage; with black, transparent
 holes cost nothing in training and show on a grey viewer background).
+--appearance gain|affine: per-training-frame colour transform (auto-exposure / white balance) applied to the RENDER
+before the loss only -- gain: c' = exp(g) * c + b per channel (6 numbers), affine: c' = (I + A) c + b (12) --
+re-centred to the mean identity after every step (the splat keeps the average exposure; no gauge drift) and pulled
+toward identity (--app-reg). The exported PLY is a standard splat; transforms -> <out>/appearance.json. Held-out
+scores are also reported with a per-frame least-squares colour affine fitted on the frame itself (heldout_*_fit;
+leaks 12 numbers per frame; sbatch/viewer_train_bench.sbatch does the same on the viewer's renders).
 Strategies: improved (Improved-GS: EAS + LAS + RAP + budget + MU, scripts/improved_gs_strategy.py), mcmc
 (gsplat MCMCStrategy, cap = --budget, opacity/scale reg 0.01), default (gsplat DefaultStrategy, AbsGS grads).
 Split: frame k (name order) is held out iff k % --test-split-interval == 0 (3DGRUT's rule).
@@ -33,7 +39,7 @@ held-out PSNR in this rasteriser at --eval-dataset).
 
     PYTHONPATH=$CEAR_WS/gsplat-viewer-ss352 python scripts/train_viewer_gsplat.py --dataset DS --out OUT \
         --test-split-interval 8 [--strategy improved --budget 4000000] [--viewer ss352] [--ss 2 --min-px 0.5] \
-        [--aa] [--iters 30000] [--eval-dataset TEST]
+        [--aa] [--iters 30000] [--eval-dataset TEST] [--appearance affine]
 """
 from __future__ import annotations
 import argparse, json, math, os, sys, time
@@ -227,6 +233,62 @@ class ViewerGS:
         return best * min_px
 
 
+# ---------------------------------------------------------------- appearance (per-frame exposure / white balance)
+class Appearance:
+    """Per-training-frame colour transform on the render: rows of 12 numbers, [A (3x3, row-major) | b (3)].
+    gain: diag(A) = log-gain, off-diagonals unused; affine: M = I + A. Sparse rows (only the frame's own row moves)."""
+
+    def __init__(self, mode, n, lr, dev):
+        import torch
+        self.mode = mode
+        self.emb = torch.nn.Embedding(n, 12, sparse=True).to(dev)
+        torch.nn.init.zeros_(self.emb.weight)
+        self.opt = torch.optim.SparseAdam(self.emb.parameters(), lr=lr)
+
+    def mats(self, w):
+        import torch
+        A, b = w[..., :9].reshape(*w.shape[:-1], 3, 3), w[..., 9:]
+        eye = torch.eye(3, device=w.device)
+        M = torch.diag_embed(torch.exp(torch.diagonal(A, dim1=-2, dim2=-1))) if self.mode == "gain" else eye + A
+        return M, b
+
+    def __call__(self, img, k):
+        import torch
+        w = self.emb(torch.tensor([k], device=img.device))[0]
+        M, b = self.mats(w)
+        return img @ M.T + b, w
+
+    def recentre(self):
+        """Mean transform = identity (gain: geometric mean gain 1): the splat keeps the average exposure."""
+        import torch
+        with torch.no_grad():
+            W = self.emb.weight
+            if self.mode == "gain":                          # only the diagonal and the bias are live
+                m = torch.zeros(12, device=W.device); m[[0, 4, 8, 9, 10, 11]] = 1; W.mul_(m)
+            W.sub_(W.mean(0, keepdim=True))
+
+    def summary(self, names):
+        import torch
+        with torch.no_grad():
+            M, b = self.mats(self.emb.weight)
+            M, b = M.cpu().numpy(), b.cpu().numpy()
+        g = np.stack([np.diagonal(m) for m in M])            # per-channel gain (affine: diagonal of M)
+        lum = g @ np.array([0.299, 0.587, 0.114])
+        pct = lambda x: [round(float(v), 4) for v in np.percentile(x, [0, 5, 25, 50, 75, 95, 100])]
+        return {"mode": self.mode, "gain_pct_0_5_25_50_75_95_100": {"lum": pct(lum), "r": pct(g[:, 0]), "g": pct(g[:, 1]), "b": pct(g[:, 2])},
+                "gain_std": [round(float(v), 4) for v in g.std(0)], "bias_std": [round(float(v), 4) for v in b.std(0)],
+                "rb_ratio_pct": pct(g[:, 0] / g[:, 2]),
+                "frames": {n: {"M": np.round(m, 5).tolist(), "b": np.round(c, 5).tolist()} for n, m, c in zip(names, M, b)}}
+
+
+def fit_affine(pred, gt):
+    """Least-squares colour affine pred -> gt on one image (H,W,3 float in [0,1]); -> fitted image, M (3,3), b (3)."""
+    import torch
+    X = torch.cat([pred.reshape(-1, 3), torch.ones_like(pred.reshape(-1, 3)[:, :1])], 1).double()
+    sol = torch.linalg.lstsq(X, gt.reshape(-1, 3).double()).solution            # (4,3)
+    return (X @ sol).float().reshape(pred.shape).clamp(0, 1), sol[:3].T.float(), sol[3].float()
+
+
 # ---------------------------------------------------------------- export
 def save_ply(path, p, rast, comments=()):
     import torch
@@ -260,9 +322,10 @@ def viewer_K(K, W, H, viewer):
     return Kv
 
 
-def evaluate(rast, p, views, deg, save_dir=None, viewer=None):
+def evaluate(rast, p, views, deg, save_dir=None, viewer=None, fit=False):
+    """-> (PSNR, SSIM) of the 8-bit render; fit: + (PSNR, SSIM) after a per-frame least-squares colour affine."""
     import torch
-    ps, ss_ = [], []
+    ps, ss_, pf, sf = [], [], [], []
     with torch.no_grad():
         for v in views:
             if viewer:
@@ -271,12 +334,16 @@ def evaluate(rast, p, views, deg, save_dir=None, viewer=None):
             img = torch.round(img.clamp(0, 1) * 255) / 255             # what an 8-bit viewer frame holds
             gt = v[5].float() / 255
             ps.append(psnr(img, gt)); ss_.append(float(ssim(img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None])))
+            if fit:
+                fi = torch.round(fit_affine(img, gt)[0] * 255) / 255
+                pf.append(psnr(fi, gt)); sf.append(float(ssim(fi.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None])))
             if save_dir:
                 from PIL import Image
                 os.makedirs(save_dir, exist_ok=True)
                 Image.fromarray((img.cpu().numpy() * 255 + 0.5).astype(np.uint8)).save(
                     os.path.join(save_dir, os.path.splitext(v[0])[0] + ".png"))
-    return (round(float(np.mean(ps)), 3), round(float(np.mean(ss_)), 4)) if ps else (None, None)
+    r = (round(float(np.mean(ps)), 3), round(float(np.mean(ss_)), 4)) if ps else (None, None)
+    return r + ((round(float(np.mean(pf)), 3), round(float(np.mean(sf)), 4)) if pf else (None, None)) if fit else r
 
 
 def load_ply_params(path, dev):
@@ -338,6 +405,11 @@ def main():
     ap.add_argument("--depth-lambda", type=float, default=0.0)
     ap.add_argument("--depth-trim", type=float, default=0.95)
     ap.add_argument("--ssim-lambda", type=float, default=0.2)
+    ap.add_argument("--appearance", choices=("none", "gain", "affine"), default="none",
+                    help="per-training-frame colour transform on the render before the loss (exposure / white balance)")
+    ap.add_argument("--app-reg", type=float, default=0.01, help="L2 pull of the frame's transform toward identity")
+    ap.add_argument("--app-lr", type=float, default=2e-3, help="SparseAdam lr (decays 10x over training)")
+    ap.add_argument("--app-start", type=int, default=None, help="first step the transforms are used (default 1000 x iters/30000)")
     ap.add_argument("--bg", choices=("random", "black"), default="random",
                     help="training background (random: full opacity is learnt, any viewer background works)")
     ap.add_argument("--init-opacity", type=float, default=None, help="default 0.1 (0.5 for mcmc)")
@@ -413,6 +485,9 @@ def main():
             edges[i] = edge_map(v[5]).half()
         return rast.edge_weights(params, v, edges[i].float())
 
+    app = Appearance(args.appearance, len(tr), args.app_lr, dev) if args.appearance != "none" else None
+    app_start = args.app_start if args.app_start is not None else int(1000 * f_it)
+    app_sched = torch.optim.lr_scheduler.ExponentialLR(app.opt, gamma=0.1 ** (1.0 / args.iters)) if app else None
     rn = {}
     curve, order, t0 = [], [], time.time()
     os.makedirs(args.out, exist_ok=True)
@@ -429,6 +504,10 @@ def main():
         gt = v[5].float() / 255
         if args.bg == "random":                             # opaque real frames: transparency must not pay off
             img = img + (1 - alpha[..., None]) * torch.rand(3, device=dev)
+        lapp = None
+        if app is not None and step >= app_start:          # the camera's exposure / WB for this frame, render side only
+            img, w = app(img, k)
+            lapp = (w * w).sum()
         loss = (1 - args.ssim_lambda) * (img - gt).abs().mean() + \
             args.ssim_lambda * (1 - ssim(img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None]))
         ld = torch.zeros((), device=dev)
@@ -443,6 +522,8 @@ def main():
                 err = ((d * rn[key])[msk] - v[6][msk]).abs()
                 err = err.sort().values[: max(1, int(err.numel() * args.depth_trim))]
                 ld = err.mean(); loss = loss + args.depth_lambda * ld
+        if lapp is not None:
+            loss = loss + args.app_reg * lapp
         if args.strategy == "mcmc":
             loss = loss + 0.01 * torch.sigmoid(params["opacities"]).mean() + 0.01 * torch.exp(params["scales"]).mean()
         loss.backward()
@@ -451,6 +532,10 @@ def main():
             for o in opts.values():
                 o.step(); o.zero_grad(set_to_none=True)
         sched.step()
+        if lapp is not None:
+            app.opt.step(); app.opt.zero_grad(set_to_none=True); app.recentre()
+        if app_sched is not None:
+            app_sched.step()
         if args.strategy == "improved":
             strat.step_post_backward(params, opts, state, step, info, edge_fn=edge_fn if not args.no_eas else None, n_views=len(tr))
         elif args.strategy == "mcmc":
@@ -470,11 +555,19 @@ def main():
     deg = min(args.iters // 1000, args.sh_degree)
     res = {"heldout_psnr": None, "heldout_ssim": None}
     if ev:      # at the viewer_shots camera (comparable with the viewer metric) and at the true camera
-        res["heldout_psnr"], res["heldout_ssim"] = evaluate(rast, params, ev, deg, os.path.join(args.out, "renders_trainer"), args.viewer)
+        res["heldout_psnr"], res["heldout_ssim"], res["heldout_psnr_fit"], res["heldout_ssim_fit"] = evaluate(
+            rast, params, ev, deg, os.path.join(args.out, "renders_trainer"), args.viewer, fit=True)
         res["heldout_psnr_truecam"], res["heldout_ssim_truecam"] = evaluate(rast, params, ev, deg)
         print(f"[vgs] held-out ({args.eval_dataset}, this rasteriser, viewer camera): PSNR {res['heldout_psnr']} SSIM "
-              f"{res['heldout_ssim']}; true camera {res['heldout_psnr_truecam']} / {res['heldout_ssim_truecam']}", flush=True)
-    comments = [f"train_viewer_gsplat viewer={args.viewer} eps2d={rast.eps2d} strategy={args.strategy} ss={args.ss} aa={args.aa}"]
+              f"{res['heldout_ssim']} (per-frame colour affine fitted: {res['heldout_psnr_fit']} / {res['heldout_ssim_fit']}); "
+              f"true camera {res['heldout_psnr_truecam']} / {res['heldout_ssim_truecam']}", flush=True)
+    if app is not None:
+        aj = app.summary([v[0] for v in tr]); json.dump(aj, open(os.path.join(args.out, "appearance.json"), "w"), indent=1)
+        res["appearance"] = {k: aj[k] for k in aj if k != "frames"}
+        print(f"[vgs] appearance ({args.appearance}): luminance gain pct 0/5/25/50/75/95/100 "
+              f"{aj['gain_pct_0_5_25_50_75_95_100']['lum']}, gain std rgb {aj['gain_std']}, bias std {aj['bias_std']}", flush=True)
+    comments = [f"train_viewer_gsplat viewer={args.viewer} eps2d={rast.eps2d} strategy={args.strategy} ss={args.ss} aa={args.aa}"
+                + (f" appearance={args.appearance}" if app is not None else "")]
     if args.aa:
         comments.append("SplatRenderMode mip")
     comments += args.ply_comment
