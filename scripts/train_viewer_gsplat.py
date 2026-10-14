@@ -30,6 +30,11 @@ re-centred to the mean identity after every step (the splat keeps the average ex
 toward identity (--app-reg). The exported PLY is a standard splat; transforms -> <out>/appearance.json. Held-out
 scores are also reported with a per-frame least-squares colour affine fitted on the frame itself (heldout_*_fit;
 leaks 12 numbers per frame; sbatch/viewer_train_bench.sbatch does the same on the viewer's renders).
+Opacity clean-up (semi-transparent splats draw differently across viewers / scales: haze, floaters, see-through
+patches off-path): --opa-reg entropy|binary adds --opa-lambda x mean over the step's drawn gaussians of the binary
+entropy (or o(1-o)), ramped in linearly from --opa-start to --opa-start + --opa-ramp (fractions of --iters); after the
+ramp, every --prune-every steps and once at the end, --opa-prune T removes opacity < T and --contrib-prune W removes
+gaussians whose blending weight sum_px T alpha over ALL training views is < W pixels (unconstrained floaters).
 Strategies: improved (Improved-GS: EAS + LAS + RAP + budget + MU, scripts/improved_gs_strategy.py), mcmc
 (gsplat MCMCStrategy, cap = --budget, opacity/scale reg 0.01), default (gsplat DefaultStrategy, AbsGS grads).
 Split: frame k (name order) is held out iff k % --test-split-interval == 0 (3DGRUT's rule).
@@ -39,7 +44,7 @@ held-out PSNR in this rasteriser at --eval-dataset).
 
     PYTHONPATH=$CEAR_WS/gsplat-viewer-ss352 python scripts/train_viewer_gsplat.py --dataset DS --out OUT \
         --test-split-interval 8 [--strategy improved --budget 4000000] [--viewer ss352] [--ss 2 --min-px 0.5] \
-        [--aa] [--iters 30000] [--eval-dataset TEST] [--appearance affine]
+        [--aa] [--iters 30000] [--eval-dataset TEST] [--appearance affine] [--opa-reg entropy --opa-prune 0.05 --contrib-prune 1]
 """
 from __future__ import annotations
 import argparse, json, math, os, sys, time
@@ -289,6 +294,47 @@ def fit_affine(pred, gt):
     return (X @ sol).float().reshape(pred.shape).clamp(0, 1), sol[:3].T.float(), sol[3].float()
 
 
+# ---------------------------------------------------------------- opacity clean-up (--opa-reg / --opa-prune / --contrib-prune)
+def opa_term(op, kind):
+    """Per-gaussian binarisation penalty, 0 at opacity 0 and 1: binary o(1-o) (max 0.25) or entropy -o ln o - (1-o) ln(1-o)."""
+    import torch
+    if kind == "binary":
+        return op * (1 - op)
+    o = op.clamp(1e-6, 1 - 1e-6)
+    return -(o * torch.log(o) + (1 - o) * torch.log(1 - o))
+
+
+def prune_mask(params, opts, state, mask):
+    """Remove gaussians (params, Adam moments, per-gaussian strategy state; MCMC's binomial table is left alone)."""
+    import torch
+    from gsplat.strategy.ops import _update_param_with_optimizer
+    n = len(mask); sel = torch.where(~mask)[0]
+    with torch.no_grad():
+        _update_param_with_optimizer(lambda _k, p: torch.nn.Parameter(p[sel], requires_grad=p.requires_grad),
+                                     lambda _k, v: v[sel], params, opts)
+        for k, v in state.items():
+            if isinstance(v, torch.Tensor) and v.dim() > 0 and len(v) == n:
+                state[k] = v[sel]
+
+
+def contributions(rast, p, views):
+    """Per-gaussian blending weight sum_views sum_px T_i(p) alpha_i(p) over the training views (pixel-equivalents)."""
+    import torch
+    tot = torch.zeros(len(p["means"]), device=p["means"].device)
+    for v in views:
+        w, _ = rast.edge_weights(p, v, torch.ones(v[3], v[2], device=tot.device))
+        tot += w
+    return tot
+
+
+def opa_stats(p):
+    import torch
+    with torch.no_grad():
+        o = torch.sigmoid(p["opacities"].flatten())
+        return {"n": len(o), "lt05": round(float((o < 0.05).float().mean()), 4), "semi": round(float(((o >= 0.05) & (o <= 0.95)).float().mean()), 4),
+                "gt95": round(float((o > 0.95).float().mean()), 4)}
+
+
 # ---------------------------------------------------------------- export
 def save_ply(path, p, rast, comments=()):
     import torch
@@ -417,6 +463,17 @@ def main():
     ap.add_argument("--max-points", type=int, default=0)
     ap.add_argument("--grad-threshold", type=float, default=None, help="improved: 0.0003; default: 0.0008 (absgrad)")
     ap.add_argument("--no-eas", action="store_true"); ap.add_argument("--no-mu", action="store_true")
+    ap.add_argument("--opa-reg", choices=("none", "entropy", "binary"), default="none",
+                    help="late opacity binarisation penalty on the gaussians drawn in the step's view")
+    ap.add_argument("--opa-lambda", type=float, default=0.01, help="--opa-reg weight (x mean over the view's gaussians)")
+    ap.add_argument("--opa-start", type=float, default=0.7, help="fraction of --iters where the --opa-reg ramp starts")
+    ap.add_argument("--opa-ramp", type=float, default=0.1, help="ramp length (fraction of --iters) to the full weight")
+    ap.add_argument("--opa-prune", type=float, default=0.0, help="after the ramp: prune opacity below this (0 = off)")
+    ap.add_argument("--contrib-prune", type=float, default=0.0,
+                    help="after the ramp: prune gaussians whose blending weight summed over all training views is "
+                         "below this many pixels (0 = off)")
+    ap.add_argument("--prune-every", type=int, default=None, help="prune interval after the ramp (default 2000 x iters/30000; "
+                    "also once after the last step)")
     ap.add_argument("--ply-comment", action="append", default=[], help="extra PLY header comment (repeatable)")
     ap.add_argument("--render-ply", default=None, help="diagnostics: render this PLY at --eval-dataset (no training)")
     ap.add_argument("--compare-dir", default=None, help="--render-ply: renders to score against (e.g. viewer_shots output)")
@@ -489,6 +546,30 @@ def main():
     app_start = args.app_start if args.app_start is not None else int(1000 * f_it)
     app_sched = torch.optim.lr_scheduler.ExponentialLR(app.opt, gamma=0.1 ** (1.0 / args.iters)) if app else None
     rn = {}
+    s0 = int(args.opa_start * args.iters); s1 = s0 + max(int(args.opa_ramp * args.iters), 1)   # opacity clean-up schedule
+    pe = args.prune_every or max(int(2000 * f_it), 1)
+    cleaning, clean_log = args.opa_prune > 0 or args.contrib_prune > 0, []
+    if args.opa_reg != "none" or cleaning:
+        print(f"[vgs] opacity clean-up: reg {args.opa_reg} x {args.opa_lambda} ramped {s0}->{s1}; prune opacity < {args.opa_prune}, "
+              f"contribution < {args.contrib_prune} px every {pe} from {s1} and at the end", flush=True)
+
+    def clean(step):
+        n = len(params["means"]); rec = {"step": step, "n": n}
+        with torch.no_grad():
+            m = torch.zeros(n, dtype=torch.bool, device=dev)
+            if args.opa_prune > 0:
+                m |= torch.sigmoid(params["opacities"].flatten()) < args.opa_prune; rec["opa"] = int(m.sum())
+            if args.contrib_prune > 0:
+                c = contributions(rast, params, tr); mc = c < args.contrib_prune
+                rec["contrib"], rec["contrib_only"] = int(mc.sum()), int((mc & ~m).sum())
+                rec["contrib_pct_1_5_25_50"] = [round(float(x), 3) for x in torch.quantile(c[torch.randperm(n, device=dev)[:1 << 20]],
+                                                torch.tensor([0.01, 0.05, 0.25, 0.5], device=dev)).tolist()]
+                m |= mc
+        rec["pruned"] = int(m.sum())
+        if rec["pruned"]:
+            prune_mask(params, opts, state, m)
+        clean_log.append(rec); print(f"[vgs] clean-up {rec}", flush=True)
+
     curve, order, t0 = [], [], time.time()
     os.makedirs(args.out, exist_ok=True)
     for step in range(args.iters):
@@ -524,6 +605,12 @@ def main():
                 ld = err.mean(); loss = loss + args.depth_lambda * ld
         if lapp is not None:
             loss = loss + args.app_reg * lapp
+        lopa = None
+        if args.opa_reg != "none" and step >= s0:          # push the drawn gaussians to opaque or gone
+            vis = (info["radii"][0] > 0).all(-1)
+            if bool(vis.any()):
+                lopa = opa_term(torch.sigmoid(params["opacities"].flatten()[vis]), args.opa_reg).mean()
+                loss = loss + args.opa_lambda * min(1.0, (step - s0 + 1) / (s1 - s0)) * lopa
         if args.strategy == "mcmc":
             loss = loss + 0.01 * torch.sigmoid(params["opacities"]).mean() + 0.01 * torch.exp(params["scales"]).mean()
         loss.backward()
@@ -542,18 +629,25 @@ def main():
             strat.step_post_backward(params, opts, state, step, info, lr=sched.get_last_lr()[0])
         else:
             strat.step_post_backward(params, opts, state, step, info, packed=False)
+        if cleaning and step > s1 and (step - s1) % pe == 0:
+            clean(step)
         if step % args.log_every == 0 or step == args.iters - 1:
             e = {"step": step, "loss": round(loss.item(), 5), "psnr": round(psnr(img.detach().clamp(0, 1), gt), 3),
                  "depth": round(ld.item(), 5), "n": len(params["means"]), "visible": int((info["radii"] > 0).all(-1).sum()),
                  "sec": round(time.time() - t0, 1), "mem_gb": round(torch.cuda.max_memory_allocated() / 2 ** 30, 1)}
+            if args.opa_reg != "none" or cleaning:
+                e["opa"] = opa_stats(params); e["lopa"] = None if lopa is None else round(lopa.item(), 5)
             if args.eval_every and step and step % args.eval_every == 0 and ev:
                 e["heldout_psnr"] = evaluate(rast, params, ev, deg, viewer=args.viewer)[0]
             curve.append(e); print(f"[vgs] {e}", flush=True)
+    if cleaning:
+        clean(args.iters)
     train_s = time.time() - t0
     if args.min_px > 0:
         rast.floor = ViewerGS.floors(params, tr, args.min_px)
     deg = min(args.iters // 1000, args.sh_degree)
-    res = {"heldout_psnr": None, "heldout_ssim": None}
+    res = {"heldout_psnr": None, "heldout_ssim": None, "opacity": opa_stats(params), "clean_up": clean_log}
+    print(f"[vgs] opacity: {res['opacity']}", flush=True)
     if ev:      # at the viewer_shots camera (comparable with the viewer metric) and at the true camera
         res["heldout_psnr"], res["heldout_ssim"], res["heldout_psnr_fit"], res["heldout_ssim_fit"] = evaluate(
             rast, params, ev, deg, os.path.join(args.out, "renders_trainer"), args.viewer, fit=True)
