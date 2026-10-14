@@ -11,7 +11,9 @@
 # Env: NAME (viewer_igs), ARM_FLAGS (train_viewer_gsplat.py flags; default the best held-out arm igs4m_pc274),
 #      PROF (kernel build pc274|ss352), DSCALE (fine-tune display scales, 1.5:4), FT_ITERS (7000),
 #      FT_ARGS (extra fine-tune flags, e.g. "--lambda-wd 0.025 --wd-log2-sigma 4" = perceptual WD-R),
-#      TRAIN_PLY (reuse an already trained stage-1 splat instead of training).
+#      TRAIN_PLY (reuse an already trained stage-1 splat instead of training),
+#      EDGS_DATA (stage-1 training set; e.g. densify_frames.sbatch DENSIFY_ARGS=--include-test -> <DF>/edgs_data
+#      = all frames + extra low-blur frames, with ARM_FLAGS "... --iters 120000").
 #SBATCH -J export-viewer
 #SBATCH -p gpu
 #SBATCH --gres=gpu:a100:1
@@ -26,7 +28,7 @@ cd "$REPO"; source env/cear_env.sh >/dev/null
 CPUPY="$CEAR_VENV/bin/python"; SPY="$CEAR_WS/venv-gsplat/bin/python"; IPY="${INPAINT_VENV:-$CEAR_WS/venv-inpaint}/bin/python"
 get() { "$CPUPY" scripts/cfg_get.py "$CFG" "$@"; }
 OUT="$(get paths.out_root)"; P="$OUT/pipeline"; E="$OUT/exports"; NAME="${NAME:-viewer_igs}"; F="$P/$NAME"
-DATA="$P/onpath/data_orig"; EDGS="$P/igs_full/edgs_data"; FRAME="$(get pipeline.export_frame_model "")"
+DATA="$P/onpath/data_orig"; EDGS="${EDGS_DATA:-$P/igs_full/edgs_data}"; FRAME="$(get pipeline.export_frame_model "")"
 PROF="${PROF:-pc274}"; ARM_FLAGS="${ARM_FLAGS:---strategy improved --budget 4000000}"
 [ -f "$EDGS/edgs_init.json" ] || { echo "missing $EDGS (run export_igs.sbatch ARMS=edgs_igs once)"; exit 1; }
 hostname; date; mkdir -p "$F" "$E"
