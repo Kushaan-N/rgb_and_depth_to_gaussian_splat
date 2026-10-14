@@ -173,6 +173,8 @@ def main():
     ap.add_argument("--max-res-m", type=float, default=0.03); ap.add_argument("--max-rot-deg", type=float, default=2.0)
     ap.add_argument("--threads", type=int, default=int(os.environ.get("SLURM_CPUS_PER_TASK", "4")))
     ap.add_argument("--select-only", action="store_true")
+    ap.add_argument("--include-test", action="store_true",
+                    help="deliverable dataset: keep the held-out test frames too (selection still guards them)")
     args = ap.parse_args()
     cfg = pu.load_config(args.config); P = os.path.join(cfg["paths"]["out_root"], "pipeline")
     args.base_model = args.base_model or os.path.join(P, "dataset", "sparse", "0")
@@ -252,7 +254,7 @@ def main():
     open(os.path.join(ND, "sparse", "0", "points3D.txt"), "w").close()
     cid = open(os.path.join(bsp, "cameras.txt")).read().split()[0]
     root_img = os.path.join(cfg["paths"]["out_root"], "precond", cfg["sequence"].get("rgb_dir", "rgb"))
-    ent = [(n, base[n][0].split()[1:8]) for n in base if n not in test]
+    ent = [(n, base[n][0].split()[1:8]) for n in base if args.include_test or n not in test]
     for n in keep:
         M = np.asarray(by[n].cam_from_world().matrix() if callable(by[n].cam_from_world) else by[n].cam_from_world.matrix())
         q = Rotation.from_matrix(M[:, :3]).as_quat()
@@ -267,11 +269,12 @@ def main():
                 if os.path.exists(os.path.join(bimg, fn)): os.symlink(os.path.realpath(os.path.join(bimg, fn)), os.path.join(D, "images", fn))
         else:
             os.symlink(os.path.join(root_img, n), os.path.join(D, "images", n)); os.symlink(os.path.join(root_img, n), os.path.join(ND, "images", n))
-    info["dataset"] = {"dir": D, "frames": len(ent), "base_train": sum(n in base for n, _ in ent), "new": len(keep), "test_excluded": len(test)}
+    info["dataset"] = {"dir": D, "frames": len(ent), "base_train": sum(n in base for n, _ in ent), "new": len(keep),
+                       "test_excluded": 0 if args.include_test else len(test)}
     info["total_s"] = round(time.time() - T0, 1)
     pu.save_json(os.path.join(args.out, "densify.json"), info)
     print(f"[densify] wrote {D}: {len(ent)} training frames ({info['dataset']['base_train']} base + {len(keep)} new), "
-          f"{len(test)} test frames excluded; {info['total_s']} s")
+          f"{info['dataset']['test_excluded']} test frames excluded; {info['total_s']} s")
     print("DENSIFY_DONE", len(keep))
 
 
