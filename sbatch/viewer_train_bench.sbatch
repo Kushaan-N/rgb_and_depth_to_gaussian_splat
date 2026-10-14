@@ -17,7 +17,9 @@
 #   (antialiased mode, PLY tagged `comment SplatRenderMode mip`), ss<k> (render k x, area-downsample, loss at 1x),
 #   mp<x> (3D scale floor x px), e<x> (dilation x px^2 instead of the profile's), zero / pcbug / std (SH band-2 handling), d (LiDAR depth loss, LAMBDA), noeas, nomu,
 #   appgain / appaffine (per-frame exposure / white-balance transform on the render in training, --appearance), appr<x> (its
-#   identity pull, --app-reg x). GATE_REF=<arm> gates against that arm's viewer scores instead of `base`.
+#   identity pull, --app-reg x), ent[x] / bin[x] (late opacity entropy / o(1-o) penalty, --opa-reg, weight x), opp[x] (prune
+#   opacity < x, default 0.05, after the ramp), cp[x] (prune gaussians with < x px (default 1) blending weight over all
+#   training views). GATE_REF=<arm> gates against that arm's viewer scores instead of `base`.
 # Every scored PLY is also scored with a per-frame least-squares colour affine fitted on each held-out frame itself
 #   (shots/onpath_fit/, report/<name>_<bg>_fit.json; leaks 12 numbers per frame, so informative only -- the gate uses raw).
 # Outputs under $VT (default $P/viewer_train): <arm>/{splat.ply,train.json,train.log,renders_trainer/},
@@ -70,6 +72,10 @@ arm_args() {  # <arm> -> A (train_viewer_gsplat.py flags), PROF (kernel build)
       e[0-9]*) A+=(--eps2d "${t#e}") ;;     # screen dilation override (px^2)
       d) A+=(--depth-lambda "$LAMBDA") ;;   noeas) A+=(--no-eas) ;;  nomu) A+=(--no-mu) ;;
       appgain|appaffine) A+=(--appearance "${t#app}") ;;  appr*) A+=(--app-reg "${t#appr}") ;;
+      ent|ent[0-9]*) A+=(--opa-reg entropy); [ "$t" = ent ] || A+=(--opa-lambda "${t#ent}") ;;
+      bin|bin[0-9]*) A+=(--opa-reg binary); [ "$t" = bin ] || A+=(--opa-lambda "${t#bin}") ;;
+      opp|opp[0-9]*) A+=(--opa-prune "$([ "$t" = opp ] && echo 0.05 || echo "${t#opp}")") ;;
+      cp|cp[0-9]*) A+=(--contrib-prune "$([ "$t" = cp ] && echo 1 || echo "${t#cp}")") ;;
       *) echo "unknown arm flag $t in $1"; return 1 ;;
     esac
   done
