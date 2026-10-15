@@ -34,8 +34,8 @@ views are unchanged (measured in the viewer-exact rasteriser, scripts/finetune_p
            blend-weighted mean training colour), then the minimum-norm SH fit (colours at the directions the training
            cameras saw it from kept, no extrapolation elsewhere), then its original SH - each step only for gaussians
            that blend > --min-w into a training pixel changed by > 2/255. Removes rainbow sparkles from unseen angles.
-  refit    (gsplat venv, GPU) alternative to harm (REFIT=1 in the sbatch): constrained fine-tune of the full build
-           (all discs, snapped needles, removals) - viewer-exact L1+SSIM on every training frame (display scale
+  refit    (gsplat venv, GPU) before harm (REFIT=1 in the sbatch): fine-tune ONLY the added discs and snapped needles
+           (every input gaussian frozen; harm then restores removals / reverts what still shows) - viewer-exact L1+SSIM on every training frame (display scale
            1.5:4), surface prior on discs / snapped needles (thin, normal kept, centre within --pos-tol-m of the
            surface), anti-needle term (s_max/s_mid > --needle-ratio) in object zones, and from random orbit views an
            alpha-hole + colour-smoothness term on the objects' pixels (no RGB target there).
@@ -748,6 +748,8 @@ def refit(args):
         for prm in params.values():
             if prm.grad is not None:
                 prm.grad[~torch.isfinite(prm.grad)] = 0
+                if not args.train_all:
+                    prm.grad[~surf] = 0                                    # input gaussians frozen (Adam: exactly still)
         opt.step()
         if step % args.log_every == 0 or step == 1:
             e = {"step": step, "psnr": round(psnr(img.detach(), gt), 2), "flat": round(float(lflat), 4), "normal": round(float(lnorm), 4),
@@ -758,6 +760,10 @@ def refit(args):
                             for k, (n, cam, c2w) in list(enumerate(tr))[::10]]
         p0v = [psnr(Rv.render(p0, to_t(np.linalg.inv(c2w), dev), *cam_args(cam), sh_degree=deg)[0], rgb[k].float() / 255)
                for k, (n, cam, c2w) in list(enumerate(tr))[::10]]
+    if not args.train_all:                                                 # exact copy-back of the frozen rows
+        with torch.no_grad():
+            for k_ in params:
+                params[k_][~surf] = p0[k_][~surf]
     save_ply(args.out, vtx, params)
     res = {"gaussians": N, "surface_prior": int(len(si)), "object_zone": int(zone.sum()), "orbit_views": len(orb), "iters": args.iters,
            "train_psnr_every10_before": round(float(np.mean(p0v)), 3), "train_psnr_every10_after": round(float(np.mean(pv)), 3),
@@ -1002,13 +1008,14 @@ def main():
     g.add_argument("--dataset", nargs="+", required=True); g.add_argument("--out", required=True)
     g.add_argument("--sim3-json", required=True); g.add_argument("--objects", default=None); g.add_argument("--cloud", default=None)
     g.add_argument("--orbit", default=None, help="orbit cameras (solidify_unseen.py orbit) for the alpha-hole / smoothness terms")
-    g.add_argument("--iters", type=int, default=4000); g.add_argument("--display-scale", default="1.5:4")
+    g.add_argument("--iters", type=int, default=3000); g.add_argument("--display-scale", default="1.5:4")
     g.add_argument("--pos-tol-m", type=float, default=0.015); g.add_argument("--zone-m", type=float, default=0.08)
     g.add_argument("--needle-ratio", type=float, default=3.0)
     g.add_argument("--lam-flat", type=float, default=0.1); g.add_argument("--lam-normal", type=float, default=0.1)
     g.add_argument("--lam-pos", type=float, default=0.1); g.add_argument("--lam-needle", type=float, default=0.05)
     g.add_argument("--lam-hole", type=float, default=0.1); g.add_argument("--lam-tv", type=float, default=0.05)
     g.add_argument("--orbit-every", type=int, default=2); g.add_argument("--log-every", type=int, default=250)
+    g.add_argument("--train-all", action="store_true", help="also fine-tune the input's gaussians (changes seen views)")
     r = sub.add_parser("orbit")
     r.add_argument("--objects", required=True); r.add_argument("--sim3-json", required=True)
     r.add_argument("--dataset", required=True, help="a dataset in the PLY's frame (intrinsics, training centres)")
