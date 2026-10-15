@@ -34,6 +34,11 @@ views are unchanged (measured in the viewer-exact rasteriser, scripts/finetune_p
            blend-weighted mean training colour), then the minimum-norm SH fit (colours at the directions the training
            cameras saw it from kept, no extrapolation elsewhere), then its original SH - each step only for gaussians
            that blend > --min-w into a training pixel changed by > 2/255. Removes rainbow sparkles from unseen angles.
+  refit    (gsplat venv, GPU) alternative to harm (REFIT=1 in the sbatch): constrained fine-tune of the full build
+           (all discs, snapped needles, removals) - viewer-exact L1+SSIM on every training frame (display scale
+           1.5:4), surface prior on discs / snapped needles (thin, normal kept, centre within --pos-tol-m of the
+           surface), anti-needle term (s_max/s_mid > --needle-ratio) in object zones, and from random orbit views an
+           alpha-hole + colour-smoothness term on the objects' pixels (no RGB target there).
   orbit    (CPU) COLMAP text cameras orbiting each object (--n-az azimuths x --heights, --dist m) in the PLY's frame
            for viewer_shots.py; per view, the angle to the nearest training camera (how unseen the view is).
   eval     (gsplat venv, GPU) at the orbit cameras, per PLY: viewer-exact alpha + depth vs the LiDAR/closure depth in
@@ -645,6 +650,122 @@ def shfit(args):
     print("SOLID_SHFIT", json.dumps({k: v for k, v in res.items() if k != "iterations"}), flush=True)
 
 
+# ---------------------------------------------------------------- refit (GPU)
+def refit(args):
+    """Constrained fine-tune of the build (all discs, all snapped needles, all removals) instead of harm's keep/revert:
+    viewer-exact photometric loss on every training frame (seen views are re-fitted), a surface prior on the discs and
+    snapped needles (thin, normal along the LiDAR / height-map normal, centre within --pos-tol-m of the surface), an
+    anti-needle term on gaussians in object zones, and from random virtual orbit views around the objects (no RGB
+    target) an alpha-hole and a colour-smoothness term on the objects' pixels."""
+    import torch
+    from finetune_ply_viewer import ViewerRaster, cam_args, frames, load_ply, save_ply, sh_deg, to_t, quat_to_rot
+    from refine_poses_gsplat import load_rgb, ssim, psnr
+    from build_depth_targets import zbuffer_target
+    from complete_objects import object_surface
+    from scipy.spatial import cKDTree
+    torch.manual_seed(0); np.random.seed(0); dev = "cuda"
+    s, R, t = sim3(args.sim3_json)
+    vtx, p0 = load_ply(args.ply, dev); N = len(p0["means"]); deg = sh_deg(p0)
+    M = np.load(args.meta); keep = M["keep"]; nk = int(keep.sum()); m = N - nk
+    mod = M["mod"][keep] if "mod" in M.files else np.zeros(nk, bool)
+    surf = torch.tensor(np.concatenate([mod, np.ones(m, bool)]), device=dev)
+    si = torch.nonzero(surf)[:, 0]
+    cell_d = float(M["cell"]) / s; tol_d = args.pos_tol_m / s
+    with torch.no_grad():
+        Rq = quat_to_rot(p0["quats"][si])
+        n0 = Rq[torch.arange(len(si)), :, p0["scales"][si].argmin(1)]       # initial thin axis = surface normal
+        x0 = p0["means"][si].clone()
+    # object zones and orbit masks
+    ometa, opts = load_objects(args.objects)
+    zone = torch.zeros(N, dtype=torch.bool, device=dev); orb = []
+    if ometa is not None and len(opts):
+        n_f = np.array(ometa["floor"]["n"]); d_f = float(ometa["floor"]["d"])
+        osurf = np.concatenate([object_surface(X, n_f, d_f, 0.02, 0.02)[0] for X in opts])
+        Gm = s * (p0["means"].double().cpu().numpy() @ R.T) + t
+        zone = torch.tensor(np.isfinite(cKDTree(osurf).query(Gm, distance_upper_bound=args.zone_m)[0]), device=dev)
+        if args.orbit and args.lam_hole + args.lam_tv > 0:
+            from plyfile import PlyData
+            cv = PlyData.read(args.cloud)["vertex"].data; L = np.stack([cv["x"], cv["y"], cv["z"]], 1).astype(np.float64)
+            L = L[np.unique(np.floor(L / 0.02).astype(np.int64), axis=0, return_index=True)[1]]
+            to_d = lambda A: torch.tensor(((A - t) @ R) / s, device=dev)
+            allX, objX = to_d(np.concatenate([L, osurf])), to_d(osurf)
+            for name, cam, c2w in frames(args.orbit, 0, "all"):
+                fx, fy, cx, cy, W, H = cam_args(cam); w2c = np.linalg.inv(c2w)
+                Rc = torch.tensor(w2c[:3, :3], device=dev); tc = torch.tensor(w2c[:3, 3], device=dev)
+                Da, _ = zbuffer_target(allX, Rc, tc, W, H, (fx, fy, cx, cy), 0.02 / s, 1e6)
+                Do, _ = zbuffer_target(objX, Rc, tc, W, H, (fx, fy, cx, cy), 0.02 / s, 1e6, min_support=3)
+                mk = (Do > 0) & (Da > 0) & ((Do - Da).abs() < 0.03 / s)
+                if mk.sum() > 200:
+                    orb.append((to_t(w2c, dev), (fx, fy, cx, cy, W, H), mk))
+    print(f"[refit] {N:,} gaussians ({nk:,} kept input incl. {int(mod.sum()):,} snapped needles, {m:,} discs); surface prior on "
+          f"{len(si):,}; object zone {int(zone.sum()):,}; {len(orb)} orbit views", flush=True)
+    tr = all_frames(args.dataset)
+    def gt_of(n):
+        for ds in args.dataset:
+            f = os.path.join(ds, "images", n)
+            if os.path.exists(f):
+                return f
+    rgb = [load_rgb(gt_of(n), dev) for n, _, _ in tr]
+    centres = np.stack([c[:3, 3] for _, _, c in tr]); scene_scale = float(np.linalg.norm(centres - centres.mean(0), axis=1).max()) * 1.1
+    params = torch.nn.ParameterDict({k: torch.nn.Parameter(v.clone()) for k, v in p0.items()})
+    lr = {"means": 1.6e-5 * scene_scale, "scales": 5e-3, "quats": 1e-3, "opacities": 0.025, "sh0": 2.5e-3, "shN": 2.5e-3 / 20}
+    opt = torch.optim.Adam([{"params": [params[k]], "lr": lr[k], "name": k} for k in params], eps=1e-15)
+    rs = [float(x) for x in args.display_scale.split(":")]
+    Rv = ViewerRaster("ss352", "exact", display_scale=rs[0])
+    zi = torch.nonzero(zone)[:, 0]; log3 = float(np.log(args.needle_ratio))
+    order, t0, log = [], time.time(), []
+    for step in range(1, args.iters + 1):
+        if not order:
+            order = list(np.random.permutation(len(tr)))
+        k = int(order.pop()); name, cam, c2w = tr[k]
+        Rv.r = float(np.exp(np.random.uniform(np.log(rs[0]), np.log(rs[-1]))))
+        wu = min(1.0, step / 200)
+        for g in opt.param_groups:
+            g["lr"] = lr[g["name"]] * wu * (0.1 ** (step / args.iters) if g["name"] == "means" else 1.0)
+        img, _, _ = Rv.render(params, to_t(np.linalg.inv(c2w), dev), *cam_args(cam), sh_degree=deg)
+        gt = rgb[k].float() / 255
+        lph = 0.8 * (img - gt).abs().mean() + 0.2 * (1 - ssim(img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None]))
+        # surface prior
+        sc = params["scales"][si]; ax = quat_to_rot(params["quats"][si])
+        thin = ax[torch.arange(len(si)), :, sc.detach().argmin(1)]
+        lflat = (torch.exp(sc.min(1).values) / cell_d).mean()
+        lnorm = (1 - (thin * n0).sum(-1).abs()).mean()
+        dx = params["means"][si] - x0; dn = (dx * n0).sum(-1); dt = (dx - dn[:, None] * n0).norm(dim=-1)
+        lpos = ((torch.relu(dn.abs() - tol_d) ** 2).mean() + (torch.relu(dt - 2 * tol_d) ** 2).mean()) / tol_d ** 2
+        ss_ = torch.sort(params["scales"][zi], 1).values
+        lneed = torch.relu(ss_[:, 2] - ss_[:, 1] - log3).mean() if len(zi) else torch.zeros((), device=dev)
+        loss = lph + args.lam_flat * lflat + args.lam_normal * lnorm + args.lam_pos * lpos + args.lam_needle * lneed
+        lh = lt = torch.zeros((), device=dev)
+        if orb and step % args.orbit_every == 0:
+            w2c_o, ca, mk = orb[np.random.randint(len(orb))]
+            io, ao, _ = Rv.render(params, w2c_o, *ca, sh_degree=deg)
+            lh = (1 - ao.clamp(0, 1))[mk].mean()
+            gx = (io[:, 1:] - io[:, :-1]).abs().sum(-1)[mk[:, 1:] & mk[:, :-1]]
+            gy = (io[1:] - io[:-1]).abs().sum(-1)[mk[1:] & mk[:-1]]
+            lt = torch.cat([gx, gy]).mean()
+            loss = loss + args.lam_hole * lh + args.lam_tv * lt
+        opt.zero_grad(set_to_none=True); loss.backward()
+        for prm in params.values():
+            if prm.grad is not None:
+                prm.grad[~torch.isfinite(prm.grad)] = 0
+        opt.step()
+        if step % args.log_every == 0 or step == 1:
+            e = {"step": step, "psnr": round(psnr(img.detach(), gt), 2), "flat": round(float(lflat), 4), "normal": round(float(lnorm), 4),
+                 "pos": round(float(lpos), 4), "needle": round(float(lneed), 4), "hole": round(float(lh), 4), "tv": round(float(lt), 4)}
+            log.append(e); print(f"[refit] {e} ({time.time() - t0:.0f}s, {torch.cuda.max_memory_allocated() / 2**30:.1f}G)", flush=True)
+    with torch.no_grad():                                                  # held-out-free check: mean PSNR over the training views
+        Rv.r = rs[0]; pv = [psnr(Rv.render(params, to_t(np.linalg.inv(c2w), dev), *cam_args(cam), sh_degree=deg)[0], rgb[k].float() / 255)
+                            for k, (n, cam, c2w) in list(enumerate(tr))[::10]]
+        p0v = [psnr(Rv.render(p0, to_t(np.linalg.inv(c2w), dev), *cam_args(cam), sh_degree=deg)[0], rgb[k].float() / 255)
+               for k, (n, cam, c2w) in list(enumerate(tr))[::10]]
+    save_ply(args.out, vtx, params)
+    res = {"gaussians": N, "surface_prior": int(len(si)), "object_zone": int(zone.sum()), "orbit_views": len(orb), "iters": args.iters,
+           "train_psnr_every10_before": round(float(np.mean(p0v)), 3), "train_psnr_every10_after": round(float(np.mean(pv)), 3),
+           "seconds": round(time.time() - t0), "curve": log, "args": {k: v for k, v in vars(args).items()}}
+    json.dump(res, open(os.path.splitext(args.out)[0] + "_refit.json", "w"), indent=1)
+    print("SOLID_REFIT", json.dumps({k: v for k, v in res.items() if k not in ("curve", "args")}), flush=True)
+
+
 # ---------------------------------------------------------------- orbit cameras (CPU)
 def look_at(C, target, up):
     from scipy.spatial.transform import Rotation
@@ -876,6 +997,18 @@ def main():
     f.add_argument("--min-w", type=float, default=0.5 / 255); f.add_argument("--iters", type=int, default=8)
     f.add_argument("--gt-aware", action="store_true",
                    help="only pixels that move > thr FURTHER from the real image count as changed (not-worse, instead of unchanged)")
+    g = sub.add_parser("refit")
+    g.add_argument("--ply", required=True, help="build output after colouring (textured.ply)"); g.add_argument("--meta", required=True)
+    g.add_argument("--dataset", nargs="+", required=True); g.add_argument("--out", required=True)
+    g.add_argument("--sim3-json", required=True); g.add_argument("--objects", default=None); g.add_argument("--cloud", default=None)
+    g.add_argument("--orbit", default=None, help="orbit cameras (solidify_unseen.py orbit) for the alpha-hole / smoothness terms")
+    g.add_argument("--iters", type=int, default=4000); g.add_argument("--display-scale", default="1.5:4")
+    g.add_argument("--pos-tol-m", type=float, default=0.015); g.add_argument("--zone-m", type=float, default=0.08)
+    g.add_argument("--needle-ratio", type=float, default=3.0)
+    g.add_argument("--lam-flat", type=float, default=0.1); g.add_argument("--lam-normal", type=float, default=0.1)
+    g.add_argument("--lam-pos", type=float, default=0.1); g.add_argument("--lam-needle", type=float, default=0.05)
+    g.add_argument("--lam-hole", type=float, default=0.1); g.add_argument("--lam-tv", type=float, default=0.05)
+    g.add_argument("--orbit-every", type=int, default=2); g.add_argument("--log-every", type=int, default=250)
     r = sub.add_parser("orbit")
     r.add_argument("--objects", required=True); r.add_argument("--sim3-json", required=True)
     r.add_argument("--dataset", required=True, help="a dataset in the PLY's frame (intrinsics, training centres)")
@@ -893,7 +1026,7 @@ def main():
     mo.add_argument("--dirs", nargs="+", required=True, help="label=dir"); mo.add_argument("--out-dir", required=True)
     mo.add_argument("--w", type=int, default=400)
     args = ap.parse_args()
-    {"support": support, "build": build, "objtex": objtex, "harm": harm, "shfit": shfit, "orbit": orbit, "eval": eval_, "montage": montage}[args.cmd](args)
+    {"support": support, "build": build, "objtex": objtex, "harm": harm, "shfit": shfit, "refit": refit, "orbit": orbit, "eval": eval_, "montage": montage}[args.cmd](args)
 
 
 if __name__ == "__main__":
