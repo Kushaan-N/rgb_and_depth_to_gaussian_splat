@@ -17,7 +17,8 @@
     python scripts/clean_haze.py probe --ply s_refaxes.ply --out-dir D/probe_ref [--sim3-json ref_from_pipe.json] [--orbit 8]
     python scripts/clean_haze.py diagnose --ply s.ply --dataset <training frames> --cams D/probe_ref/cams.json \
         --cloud lidar_static.ply --sim3-json pipeline/sim3.json --out-dir D/diag
-    python scripts/clean_haze.py clean --ply s.ply --dataset <training frames> --stats D/diag/stats.npz --out s_clean.ply
+    python scripts/clean_haze.py clean --ply s.ply --dataset <training frames> [<more frames>] --cloud lidar_static.ply \
+        --sim3-json pipeline/sim3.json --out s_clean.ply [--stats D/stats.npz (diagnose's cache; else computed)]
 """
 from __future__ import annotations
 import argparse, base64, json, math, os, sys, time
@@ -151,13 +152,19 @@ def sub(p, sel):
 
 
 # ---------------------------------------------------------------- diagnose
-def train_stats(p, fr, deg, display_scale, dev):
-    """Per gaussian over all training frames: max / summed blending weight, #views with weight > 1/255, #frustums."""
+DEPTH = {}                                                           # image name -> LiDAR ray-distance map (.npy)
+
+
+def train_stats(p, fr, deg, display_scale, dev, tol_abs=0.0, tol_rel=0.05):
+    """Per gaussian over all training frames: max / summed blending weight, #views with weight > 1/255, #frustums;
+    where the frame has a LiDAR ray-distance map (<stem>_depth.npy, build_depth_targets.py): #views with valid depth
+    at the centre's pixel, #views in which the centre lies behind / in front of the LiDAR surface (beyond tolerance)."""
     import torch
     from finetune_ply_viewer import cam_args, to_t
     R = make_raster(display_scale); N = len(p["means"])
     mx = torch.zeros(N, device=dev); sm = torch.zeros(N, device=dev)
     nv = torch.zeros(N, dtype=torch.int32, device=dev); nf = torch.zeros(N, dtype=torch.int32, device=dev)
+    ndv, nbh, nfr = (torch.zeros(N, dtype=torch.int32, device=dev) for _ in range(3))
     t0 = time.time()
     with torch.no_grad():
         for i, (name, cam, c2w) in enumerate(fr):
@@ -168,10 +175,19 @@ def train_stats(p, fr, deg, display_scale, dev):
             v = torch.zeros(N, dtype=torch.bool, device=dev); v[gid[w > 1 / 255]] = True; nv += v.int()
             Pc = p["means"] @ w2c[:3, :3].T + w2c[:3, 3]; z = Pc[:, 2].clamp_min(1e-6)
             u = fx * Pc[:, 0] / z + cx; vv = fy * Pc[:, 1] / z + cy
-            nf += ((Pc[:, 2] > 1e-3) & (u >= 0) & (u < W) & (vv >= 0) & (vv < H)).int()
+            inf_ = (Pc[:, 2] > 1e-3) & (u >= 0) & (u < W) & (vv >= 0) & (vv < H); nf += inf_.int()
+            if name in DEPTH:
+                D = torch.tensor(np.load(DEPTH[name]), dtype=torch.float32, device=dev)
+                ui = u.clamp(0, D.shape[1] - 1).long(); vi = vv.clamp(0, D.shape[0] - 1).long()
+                L = D[vi, ui]; r = Pc.norm(dim=1); ok = inf_ & (L > 0) & torch.isfinite(L)
+                tol = tol_abs + tol_rel * L
+                ndv += ok.int(); nbh += (ok & (r > L + tol)).int(); nfr += (ok & (r < L - tol)).int()
             if i % 100 == 0:
                 print(f"[haze] train stats {i}/{len(fr)} ({time.time() - t0:.0f}s)", flush=True)
-    return mx.cpu().numpy(), sm.cpu().numpy(), nv.cpu().numpy(), nf.cpu().numpy()
+    out = {"train_max_w": mx, "train_sum_w": sm, "train_nviews": nv, "train_nfrustum": nf}
+    if DEPTH:
+        out.update({"lidar_nviews": ndv, "lidar_behind": nbh, "lidar_front": nfr})
+    return {k: v.cpu().numpy() for k, v in out.items()}
 
 
 def lidar_dist(xyz_ply, cloud, sim3_json):
@@ -185,26 +201,51 @@ def lidar_dist(xyz_ply, cloud, sim3_json):
     return cKDTree(L).query(X, k=1, workers=-1)[0].astype(np.float32), s
 
 
-def diagnose(args):
-    import torch
-    from finetune_ply_viewer import frames, load_ply, sh_deg, to_t, save_png
-    dev = "cuda"; os.makedirs(args.out_dir, exist_ok=True)
-    _, p = load_ply(args.ply, dev); N = len(p["means"]); deg = sh_deg(p)
-    fr = frames(args.dataset, 0, "all")[::args.every]
-    sp = args.stats or os.path.join(args.out_dir, "stats.npz")
-    xyz = p["means"].cpu().numpy()
+def load_frames(datasets, every=1):
+    """training frames of one or more COLMAP text datasets (same frame), name-deduplicated, name order."""
+    from finetune_ply_viewer import frames
+    out = {}
+    for d in datasets:
+        for f in frames(d, 0, "all"):
+            out.setdefault(f[0], f)
+            dp = os.path.join(d, "images", os.path.splitext(f[0])[0] + "_depth.npy")
+            if f[0] not in DEPTH and os.path.exists(dp):
+                DEPTH[f[0]] = dp
+    return [out[k] for k in sorted(out)][::every]
+
+
+def get_stats(args, p, fr, deg, dev, sp):
+    """per-gaussian stats (cached in sp): training support, frustum count, camera / LiDAR distance (metric if LiDAR)."""
     if os.path.exists(sp):
         st = dict(np.load(sp))
+        if len(st["train_max_w"]) == len(p["means"]):
+            return st
+        print(f"[haze] {sp} is for another splat: recomputing", flush=True)
+    xyz = p["means"].cpu().numpy()
+    tol = 0.0
+    if args.sim3_json:                                               # 5 cm (metric) + 5 % depth tolerance, data units
+        from sim3_utils import load_sim3
+        tol = 0.05 / load_sim3(args.sim3_json)[0]
+    st = train_stats(p, fr, deg, args.display_scale, dev, tol_abs=tol)
+    C = np.stack([c2w[:3, 3] for _, _, c2w in fr])
+    from scipy.spatial import cKDTree
+    st["cam_dist"] = cKDTree(C).query(xyz, k=1, workers=-1)[0].astype(np.float32)
+    if args.cloud and os.path.exists(args.cloud) and args.sim3_json:
+        st["lidar_dist_m"], s = lidar_dist(xyz, args.cloud, args.sim3_json); st["cam_dist"] *= s   # metric
+        st["metric_scale"] = np.float32(s)
     else:
-        mx, sm, nv, nf = train_stats(p, fr, deg, args.display_scale, dev)
-        C = np.stack([c2w[:3, 3] for _, _, c2w in fr])
-        from scipy.spatial import cKDTree
-        st = {"train_max_w": mx, "train_sum_w": sm, "train_nviews": nv, "train_nfrustum": nf,
-              "cam_dist": cKDTree(C).query(xyz, k=1, workers=-1)[0].astype(np.float32)}
-        if args.cloud and os.path.exists(args.cloud) and args.sim3_json:
-            st["lidar_dist_m"], s = lidar_dist(xyz, args.cloud, args.sim3_json); st["cam_dist"] *= s   # metric
-            st["metric_scale"] = np.float32(s)
-        np.savez_compressed(sp, **st)
+        print("[haze] no LiDAR cloud / sim3: freespace class = unsupported gaussians anywhere", flush=True)
+    os.makedirs(os.path.dirname(os.path.abspath(sp)), exist_ok=True); np.savez_compressed(sp, **st)
+    return st
+
+
+def diagnose(args):
+    import torch
+    from finetune_ply_viewer import load_ply, sh_deg, to_t, save_png
+    dev = "cuda"; os.makedirs(args.out_dir, exist_ok=True)
+    _, p = load_ply(args.ply, dev); N = len(p["means"]); deg = sh_deg(p)
+    fr = load_frames(args.dataset, args.every)
+    st = get_stats(args, p, fr, deg, dev, args.stats or os.path.join(args.out_dir, "stats.npz"))
     s = float(st.get("metric_scale", 1.0))
     smax = (torch.exp(p["scales"]).max(1).values * s).cpu().numpy(); op = torch.sigmoid(p["opacities"]).cpu().numpy()
     shm = p["shN"].norm(dim=(1, 2)).cpu().numpy()
@@ -222,6 +263,28 @@ def diagnose(args):
     classes["needle"] = (sc[:, 2] > 8 * sc[:, 1]) & (sc[:, 2] > 0.03)
     classes["nofrustum_or_big"] = (st["train_nfrustum"] == 0) | (smax > 0.2)
     classes["big_gt20cm"] = smax > 0.2
+    classes["freespace"] = (mw < 1 / 255) & ((ld if ld is not None else np.inf) > 0.10)
+    classes["giant"] = (smax > 1.0) & ((ld if ld is not None else np.inf) > 1.0)
+    dcn = np.linalg.norm(p["sh0"][:, 0].cpu().numpy(), axis=1)
+    classes["shhigh_weak"] = (shm > dcn + 0.3) & (mw < 0.1)
+    classes["lowsum_offsurf"] = (st["train_sum_w"] < 5) & ((ld if ld is not None else np.inf) > 0.05)
+    if "lidar_nviews" in st:
+        ndv, nbh = st["lidar_nviews"], st["lidar_behind"]
+        classes["occluded"] = (ndv >= 3) & (nbh >= 0.9 * ndv)                # behind the LiDAR surface from (almost) every view
+        classes["occluded_weak"] = classes["occluded"] & (mw < 0.1)
+        classes["front_weak"] = (st["lidar_front"] >= 0.9 * np.maximum(ndv, 1)) & (ndv >= 3) & (mw < 0.1)
+    pre = np.zeros(N, bool)
+    for c in filter(None, args.pre_remove.split(",")):
+        pre |= classes[c]
+    if pre.any():                                                     # analyse what remains after these removals
+        print(f"[haze] pre-removed {int(pre.sum()):,} ({args.pre_remove})", flush=True)
+        keep_i = np.nonzero(~pre)[0]; kt = torch.tensor(keep_i, device=dev)
+        p = sub(p, kt); N = len(keep_i)
+        classes = {k: m[keep_i] for k, m in classes.items() if k not in args.pre_remove.split(",")}
+        smax, op, shm, mw, cd = smax[keep_i], op[keep_i], shm[keep_i], mw[keep_i], cd[keep_i]
+        ld = ld[keep_i] if ld is not None else None
+        st = {k: (v[keep_i] if np.ndim(v) else v) for k, v in st.items()}
+        nb = int((keep_i < nb).sum())
     rep = {"n": N, "n_base": nb, "classes": {k: int(m.sum()) for k, m in classes.items()}, "views": {}}
     print(f"[haze] {N:,} gaussians ({N - nb:,} appended fill); class sizes:", rep["classes"], flush=True)
     for nm, c2w, (fx, fy, cx, cy, W, H), near in load_cams(args.cams):
@@ -230,6 +293,28 @@ def diagnose(args):
             img, alpha, _ = R.render(p, w2c, fx, fy, cx, cy, W, H, sh_degree=deg)
             gid, pid, w = R.pairs
             ew = torch.zeros(N, device=dev).index_add_(0, gid, w).cpu().numpy()
+            for bx in args.box:                                       # "<view>:x0,y0,x1,y1" (pixels): attribute a region
+                bv, bc = bx.split(":")
+                if bv != nm:
+                    continue
+                x0, y0, x1, y1 = (int(t) for t in bc.split(","))
+                inb = ((pid % W) >= x0) & ((pid % W) < x1) & ((pid // W) >= y0) & ((pid // W) < y1)
+                bw = torch.zeros(N, device=dev).index_add_(0, gid[inb], w[inb]).cpu().numpy()
+                o = np.argsort(-bw); cum = np.cumsum(bw[o]) / max(bw.sum(), 1e-9); k = int(np.searchsorted(cum, 0.8)) + 1
+                sel_b = o[:k]
+                def pr(a):
+                    return [round(float(x), 4) for x in np.percentile(a[sel_b], [10, 50, 90])]
+                prof = {"n_80pct": k, "max_w": pr(mw), "sum_w": pr(st["train_sum_w"]), "nviews": pr(st["train_nviews"]),
+                        "scale_m": pr(smax), "opacity": pr(op), "sh_rest": pr(shm), "lidar_m": pr(ld) if ld is not None else None,
+                        "cam_m": pr(cd)}
+                if "lidar_nviews" in st:
+                    prof.update({"lidar_nviews": pr(st["lidar_nviews"]), "lidar_behind": pr(st["lidar_behind"]), "lidar_front": pr(st["lidar_front"])})
+                print(f"[haze] box {nm} {bc}: " + json.dumps(prof), flush=True)
+                kb = torch.zeros(N, dtype=torch.bool, device=dev); kb[torch.tensor(sel_b, device=dev)] = True
+                save_png(os.path.join(args.out_dir, nm, "only_box.png"), R.render(sub(p, kb), w2c, fx, fy, cx, cy, W, H, sh_degree=deg)[0])
+                save_png(os.path.join(args.out_dir, nm, "without_box.png"), R.render(sub(p, ~kb), w2c, fx, fy, cx, cy, W, H, sh_degree=deg)[0])
+                save_png(os.path.join(args.out_dir, nm, "box_sh0.png"), R.render(p, w2c, fx, fy, cx, cy, W, H, sh_degree=0)[0])
+                np.save(os.path.join(args.out_dir, nm, "box_ids.npy"), sel_b)
             save_png(os.path.join(args.out_dir, nm, "full.png"), img)
             if args.renders:
                 save_png(os.path.join(args.out_dir, nm, "sh0.png"), R.render(p, w2c, fx, fy, cx, cy, W, H, sh_degree=0)[0])
@@ -284,11 +369,11 @@ def diagnose(args):
 def clean(args):
     import torch
     from plyfile import PlyData, PlyElement
-    from finetune_ply_viewer import frames, load_ply, sh_deg, to_t, cam_args
+    from finetune_ply_viewer import load_ply, sh_deg, to_t, cam_args
     dev = "cuda"
     vert, p = load_ply(args.ply, dev); N = len(p["means"]); deg = sh_deg(p)
-    st = dict(np.load(args.stats))
-    assert len(st["train_max_w"]) == N, "--stats were computed on another splat"
+    fr = load_frames(args.dataset, args.every)
+    st = get_stats(args, p, fr, deg, dev, args.stats or os.path.splitext(args.out)[0] + "_stats.npz")
     ld = st.get("lidar_dist_m", np.full(N, np.inf, np.float32)); ms = float(st.get("metric_scale", 1.0))
     smax = np.exp(p["scales"].cpu().numpy()).max(1) * ms
     cls = {"freespace": (st["train_max_w"] < args.max_train_w) & (ld > args.min_lidar_dist),   # unconstrained, off every surface
@@ -305,7 +390,6 @@ def clean(args):
     print(f"[haze] candidates: {int(rm.sum()):,} of {N:,} (" + ", ".join(f"{c} {int((cls[c] & cand).sum()):,}" for c in cls)
           + f"; no-restore {int(ex.sum()):,})", flush=True)
     R = make_raster(args.display_scale)
-    fr = frames(args.dataset, 0, "all")[::args.every]
     with torch.no_grad():
         base = {name: R.render(p, to_t(np.linalg.inv(c2w), dev), *cam_args(cam), sh_degree=deg)[0].half() for name, cam, c2w in fr}
     hist = []
@@ -359,15 +443,20 @@ def main():
     a = s.add_parser("probe"); a.add_argument("--ply", required=True); a.add_argument("--out-dir", required=True)
     a.add_argument("--sim3-json", default=None, help="x_ply = s R x + t: write cameras in the x frame")
     a.add_argument("--orbit", type=int, default=8); a.add_argument("--supersplat-url", default="https://superspl.at/editor")
-    a = s.add_parser("diagnose"); a.add_argument("--ply", required=True); a.add_argument("--dataset", required=True)
+    a = s.add_parser("diagnose"); a.add_argument("--ply", required=True); a.add_argument("--dataset", required=True, nargs="+")
     a.add_argument("--cams", required=True); a.add_argument("--out-dir", required=True)
     a.add_argument("--cloud", default=None); a.add_argument("--sim3-json", default=None)
     a.add_argument("--base-ply", default=None, help="splat before the appended fill (to tag fill gaussians)")
     a.add_argument("--display-scale", type=float, default=1.8); a.add_argument("--every", type=int, default=1)
     a.add_argument("--near-cull", action="store_true"); a.add_argument("--renders", default="")
     a.add_argument("--stats", default=None, help="per-gaussian stats cache (default <out-dir>/stats.npz)")
-    a = s.add_parser("clean"); a.add_argument("--ply", required=True); a.add_argument("--dataset", required=True)
-    a.add_argument("--stats", required=True); a.add_argument("--out", required=True)
+    a.add_argument("--box", nargs="*", default=[], help="<view>:x0,y0,x1,y1 regions to attribute (e.g. a haze blob)")
+    a.add_argument("--pre-remove", default="", help="classes removed before the view analysis (e.g. freespace,giant)")
+    a = s.add_parser("clean"); a.add_argument("--ply", required=True); a.add_argument("--out", required=True)
+    a.add_argument("--dataset", required=True, nargs="+", help="training frames (several = union by image name)")
+    a.add_argument("--stats", default=None, help="stats cache (diagnose's, or computed here: default <out>_stats.npz)")
+    a.add_argument("--cloud", default=None, help="static LiDAR cloud (metric); none -> no LiDAR test")
+    a.add_argument("--sim3-json", default=None, help="x_metric = s R x_ply + t")
     a.add_argument("--max-train-w", type=float, default=1 / 255)
     a.add_argument("--min-lidar-dist", type=float, default=0.10, help="metric m; 0 = ignore LiDAR")
     a.add_argument("--classes", default="freespace,giant", help="culprit classes to remove: freespace, giant")
