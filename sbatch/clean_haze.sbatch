@@ -12,6 +12,10 @@
 # Env: NAME (viewer_igs60k_wd), IN (<E>/<NAME>_inpainted.ply), TAG (clean), STAGES ("probe diagnose clean verify"),
 #      E_OUT (where <NAME>_<TAG>{,_refaxes}.ply go; default <E>; use a scratch dir for informational variants),
 #      CLEAN_ARGS (clean flags, e.g. "--max-train-w 0.004 --min-lidar-dist 0.1"), MOVES ("0 -0.3 1.0;0 -0.6 1.5"),
+#      DIAG_PROBES ("probe_ref probe_pipe"), DIAG_TAG (suffix of the diag dirs / stats cache), RENDERS (classes to
+#      render with/without), DIAG_ARGS (extra diagnose flags, e.g. "--pre-remove freespace"),
+#      CLEAN_DATA (harm / support frames; several datasets = union by name; default <P>/onpath/data_orig),
+#      CMP_REPORT (another run's live_<TAG>/report: gate this TAG's on-path black+grey against it),
 #      EVERY_OFF (40), BASE_JSON (on-path live score of IN; default supersplat_check_current/report/<NAME>_inpainted.json)
 #SBATCH -J clean-haze
 #SBATCH -p gpu,gpu-preempt
@@ -29,7 +33,7 @@ GPY="$THREEDGRUT_DIR/.venv/bin/python"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$CEAR_WS/playwright-browsers}"
 get() { "$CPUPY" scripts/cfg_get.py "$CFG" "$@"; }
 OUT="$(get paths.out_root)"; P="$OUT/pipeline"; E="$OUT/exports"; NAME="${NAME:-viewer_igs60k_wd}"; TAG="${TAG:-clean}"
-IN="${IN:-$E/${NAME}_inpainted.ply}"; IN_REF="${IN%.ply}_refaxes.ply"; D="$P/clean_haze/$NAME"; DATA="$P/onpath/data_orig"
+IN="${IN:-$E/${NAME}_inpainted.ply}"; IN_REF="${IN%.ply}_refaxes.ply"; D="$P/clean_haze/$NAME"; DATA="${CLEAN_DATA:-$P/onpath/data_orig}"
 FRAME="$(get pipeline.export_frame_model "")"; REF_DS="$(get pipeline.viewer_reference_dataset "")"
 STAGES="${STAGES:-probe diagnose clean verify}"; MOVES="${MOVES:-0 -0.3 1.0;0 -0.6 1.5}"; EVERY_OFF="${EVERY_OFF:-40}"
 BASE_JSON="${BASE_JSON:-$P/supersplat_check_current/report/${NAME}_inpainted.json}"
@@ -52,25 +56,41 @@ if has probe; then
 fi
 if has diagnose; then
   echo "== 2. diagnose"
-  for pr in probe_ref probe_pipe; do
+  for pr in ${DIAG_PROBES:-probe_ref probe_pipe}; do
     # shellcheck disable=SC2086
-    "$SPY" scripts/clean_haze.py diagnose --ply "$IN" --dataset "$DATA" --cams "$D/$pr/cams.json" --cloud "$CLOUD" \
-      --sim3-json "$P/sim3.json" --base-ply "$E/$NAME.ply" --stats "$D/stats.npz" --out-dir "$D/diag_$pr" ${DIAG_ARGS:-} \
-      --renders "untrained,weak,nofrustum,fill,untrained_lidar_gt10cm,weak_lidar_gt10cm,lidar_gt10cm,nearcam_lt30cm,big_gt20cm,needle,nofrustum_or_big"
+    "$SPY" scripts/clean_haze.py diagnose --ply "$IN" --dataset $DATA --cams "$D/$pr/cams.json" --cloud "$CLOUD" \
+      --sim3-json "$P/sim3.json" --base-ply "$E/$NAME.ply" --stats "$D/stats${DIAG_TAG:-}.npz" --out-dir "$D/diag${DIAG_TAG:-}_$pr" \
+      --renders "${RENDERS:-untrained,weak,nofrustum,fill,untrained_lidar_gt10cm,weak_lidar_gt10cm,lidar_gt10cm,nearcam_lt30cm,big_gt20cm,needle,nofrustum_or_big}" ${DIAG_ARGS:-}
   done
 fi
 if has clean; then
   echo "== 3. clean + measured harm restore"
   # shellcheck disable=SC2086
-  "$SPY" scripts/clean_haze.py clean --ply "$IN" --dataset "$DATA" --stats "$D/stats.npz" --out "$OUTPLY" ${CLEAN_ARGS:-}
+  "$SPY" scripts/clean_haze.py clean --ply "$IN" --dataset $DATA --stats "$D/stats.npz" --out "$OUTPLY" ${CLEAN_ARGS:-}
   "$CPUPY" scripts/sim3_align_splat.py --colmap-model "$P/dataset/sparse/0" --gt-model "$FRAME" --in-ply "$OUTPLY" --out-ply "$OUTREF"
 fi
 if has verify; then
   echo "== 4. live SuperSplat checks"
   V="$D/live_$TAG"; RT="$P/viewer_bench/reference_dataset"; mkdir -p "$V/report"
-  "$VPY" scripts/viewer_shots.py --engine current --ply "$OUTPLY" --dataset "$P/onpath/test" --out-dir "$V/onpath" --bg black
-  "$GPY" scripts/eval_views.py --pred-dir "$V/onpath" --dataset "$P/onpath/test" --tag "${NAME}_$TAG" --json-out "$V/report/onpath.json" | tail -1
-  set +e; "$CPUPY" scripts/accept_gate.py --pair onpath_live "$BASE_JSON" "$V/report/onpath.json" --out "$V/report/gate.json"; echo "gate exit $?"; set -e
+  # on-path held-out, black + grey background, input (shared) and cleaned
+  for which in base after; do
+    o="$V/onpath_bg"; ply="$OUTPLY"; [ "$which" = base ] && { o="$D/live_base/onpath_bg"; ply="$IN"; }
+    [ -f "$o/_viewer.json" ] || "$VPY" scripts/viewer_shots.py --engine current --ply "$ply" --dataset "$P/onpath/test" --out-dir "$o" --bg black grey
+    for bg in black grey; do
+      [ -f "$V/report/${which}_$bg.json" ] || "$GPY" scripts/eval_views.py --pred-dir "$o/$bg" --dataset "$P/onpath/test" \
+        --tag "${NAME}_${which}_$bg" --json-out "$V/report/${which}_$bg.json" | tail -1
+    done
+  done
+  set +e
+  "$CPUPY" scripts/accept_gate.py --pair black "$V/report/base_black.json" "$V/report/after_black.json" \
+    --pair grey "$V/report/base_grey.json" "$V/report/after_grey.json" --out "$V/report/gate_vs_input.json"; echo "gate vs input exit $?"
+  [ -f "$BASE_JSON" ] && { "$CPUPY" scripts/accept_gate.py --pair onpath_live "$BASE_JSON" "$V/report/after_black.json" --out "$V/report/gate.json"; echo "gate vs BASE_JSON exit $?"; }
+  # CMP_REPORT: another TAG's report dir (e.g. the current deliverable's): compare per background
+  if [ -n "${CMP_REPORT:-}" ]; then
+    "$CPUPY" scripts/accept_gate.py --pair black "$CMP_REPORT/after_black.json" "$V/report/after_black.json" \
+      --pair grey "$CMP_REPORT/after_grey.json" "$V/report/after_grey.json" --out "$V/report/gate_vs_cmp.json"; echo "gate vs CMP exit $?"
+  fi
+  set -e
   "$VPY" scripts/clean_haze.py probe --ply "$OUTREF" --out-dir "$V/probe_ref_after"
   i=0; IFS=';' read -ra MV <<< "$MOVES"
   for m in "${MV[@]}"; do
@@ -95,7 +115,7 @@ for f in sorted(glob.glob(os.path.join(eb, "*.png"))):
         rows.append(np.hstack([lab(cv2.resize(cv2.imread(f), (640, 384)), n + " before"), lab(cv2.resize(cv2.imread(g), (640, 384)), "after")]))
 if rows: cv2.imwrite(os.path.join(V, "editor_before_after.jpg"), np.vstack(rows)); print("->", os.path.join(V, "editor_before_after.jpg"))
 summ = {}
-for d in sorted(glob.glob(os.path.join(V, "off*"))):
+for d in sorted(x for x in glob.glob(os.path.join(V, "off*")) if os.path.isdir(x)):
     rows = []
     for w in ("base", "after"):
         j = os.path.join(d, w, "_viewer.json")
@@ -106,7 +126,7 @@ for d in sorted(glob.glob(os.path.join(V, "off*"))):
         if os.path.exists(b):
             rows.append(np.hstack([lab(cv2.resize(cv2.imread(a), (480, 360)), "before"), lab(cv2.resize(cv2.imread(b), (480, 360)), "after")]))
     if rows: cv2.imwrite(d + "_before_after.jpg", np.vstack(rows)); print("->", d + "_before_after.jpg")
-j = os.path.join(V, "onpath", "_viewer.json")
+j = os.path.join(V, "onpath_bg", "_viewer.json")
 if os.path.exists(j): summ["onpath_alpha_hole"] = json.load(open(j)).get("alpha_hole_frac")
 json.dump(summ, open(os.path.join(V, "report", "alpha.json"), "w"), indent=1); print(json.dumps(summ))
 PY
