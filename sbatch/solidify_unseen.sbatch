@@ -14,13 +14,14 @@
 # Env: NAME (viewer_igs), IN (<E>/<NAME>_inpainted.ply), TAG (solid), MOVES ("0 -0.3 1.0;0 -0.6 1.5"), EVERY_OFF (40),
 #      BUILD_ARGS (extra build flags), HARM_ARGS (extra harm + shfit flags, e.g. "--gt-aware" with TAG=solid_gt: a
 #      training pixel may change only toward the real image), FORCE=1 (redo every stage). Stages reuse their outputs
-#      in $P/solidify/<NAME>; per-TAG: harm_<TAG>.ply, live_<TAG>/.
+#      in $P/solidify/<NAME>; per-TAG: harm_<TAG>.ply, live_<TAG>/. REFIT=1 (with e.g. TAG=solid2): constrained fine-tune
+#      (solidify_unseen.py refit, REFIT_ARGS) of the full build instead of harm's keep/revert; then shfit vs itself.
 #SBATCH -J solidify
 #SBATCH -p gpu,gpu-preempt
 #SBATCH --gres=gpu:a100:1
 #SBATCH -c 12
 #SBATCH --mem=96G
-#SBATCH -t 04:00:00
+#SBATCH -t 06:00:00
 
 set -euo pipefail
 CFG="$1"
@@ -64,11 +65,22 @@ need "$S/inpainted.ply" && "$IPY" scripts/fill_inpaint.py --splat-ply "$S/base_k
   --out-ply "$S/inpainted.ply" --debug-dir "$S/inpaint_debug" | tail -3
 need "$S/textured.ply" && "$CPUPY" "$SO" objtex --ply "$S/inpainted.ply" --meta "$S/meta.npz" --out "$S/textured.ply"
 
+if [ "${REFIT:-0}" = 1 ]; then
+echo "== 4. constrained fine-tune of the full build (refit: training views re-fitted, surface prior, orbit-view terms)"
+ORB=(); if [ -f "$S/objects.json" ]; then
+  need "$S/orbit/sparse/0/images.txt" && "$CPUPY" "$SO" orbit --objects "$S/objects" --sim3-json "$P/sim3.json" --dataset "$DATA" --cloud "$CLOUD" --out "$S/orbit"
+  ORB=(--orbit "$S/orbit")
+fi
+need "$S/refit_$TAG.ply" && "$SPY" "$SO" refit --ply "$S/textured.ply" --meta "$S/meta.npz" --dataset "$DATA" "$TEST" --sim3-json "$P/sim3.json" \
+  "${OBJ[@]}" --cloud "$CLOUD" "${ORB[@]}" --out "$S/refit_$TAG.ply" ${REFIT_ARGS:-}
+need "$OUTPLY" && "$SPY" "$SO" shfit --ply "$S/refit_$TAG.ply" --ref "$S/refit_$TAG.ply" --dataset "$DATA" "$TEST" --out "$OUTPLY"
+else
 echo "== 4. harmlessness at every training / held-out frame (viewer-exact)"
 need "$S/harm_$TAG.ply" && "$SPY" "$SO" harm --input "$IN" --cand "$S/textured.ply" --meta "$S/meta.npz" --dataset "$DATA" "$TEST" \
   --out "$S/harm_$TAG.ply" ${HARM_ARGS:-}
 # minimum-norm SH: colours at the training directions kept, no rainbow extrapolation elsewhere (measured, reverted where seen)
 need "$OUTPLY" && "$SPY" "$SO" shfit --ply "$S/harm_$TAG.ply" --ref "$IN" --dataset "$DATA" "$TEST" --out "$OUTPLY" ${HARM_ARGS:-}
+fi
 
 echo "== 5. exports"
 if [ -n "$FRAME" ]; then
