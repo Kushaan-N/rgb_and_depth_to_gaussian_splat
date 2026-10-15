@@ -6,7 +6,10 @@
 #   3. every LiDAR surface no camera supports, filled (scripts/fill_unseen_surfaces.py; visibility from this splat's
 #      own depth/opacity, scripts/render_ply_depth.py), checked in the viewer-exact rasteriser so no training view
 #      changes (scripts/fill_harm_ply.py), and LaMa-inpainted (scripts/fill_inpaint.py)
-#   4. exports in the viewer reference's axes: <out>/exports/<NAME>{,_refaxes}.ply
+#   4. haze cleanup (scripts/clean_haze.py): gaussians no training view supports that float off every LiDAR surface
+#      (and giant background splats) removed, restored wherever any training pixel would move > 2/255 in the
+#      viewer-exact rasteriser -> <NAME>_clean.ply (the haze SuperSplat's default / orbit views showed)
+#   5. exports in the viewer reference's axes: <out>/exports/<NAME>{,_inpainted,_clean}{,_refaxes}.ply
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o <log> sbatch/export_viewer.sbatch configs/<seq>.yaml
 # Env: NAME (viewer_igs), ARM_FLAGS (train_viewer_gsplat.py flags; default the best held-out arm igs4m_pc274),
 #      PROF (kernel build pc274|ss352), DSCALE (fine-tune display scales, 1.5:4), FT_ITERS (7000),
@@ -14,6 +17,8 @@
 #      TRAIN_PLY (reuse an already trained stage-1 splat instead of training),
 #      EDGS_DATA (stage-1 training set; e.g. densify_frames.sbatch DENSIFY_ARGS=--include-test -> <DF>/edgs_data
 #      = all frames + extra low-blur frames, with ARM_FLAGS "... --iters 120000").
+#      CLEAN (1; 0 skips stage 4), CLEAN_DATA (harm-check frames, default the fine-tune frames; several datasets =
+#      union by image name, e.g. "$DATA <DF>/data" for a densified run), CLEAN_ARGS (extra clean_haze.py flags).
 #SBATCH -J export-viewer
 #SBATCH -p gpu
 #SBATCH --gres=gpu:a100:1
@@ -65,8 +70,18 @@ CLOUD="$P/offpath/depth/lidar_static.ply"; [ -f "$CLOUD" ] || CLOUD="$P/depth_cl
 "$IPY" scripts/fill_inpaint.py --splat-ply "$E/$NAME.ply" --fill-ply "$E/${NAME}_complete.ply" --sim3-json "$P/sim3.json" \
   --method lama --lama-pt "${LAMA_PT:-$CEAR_WS/torch-hub/lama/big-lama.pt}" --out-ply "$E/${NAME}_inpainted.ply" | tail -3
 
-echo "== 4. exports in the viewer reference's axes"
-for v in "" _inpainted; do
+VARIANTS="_inpainted"
+if [ "${CLEAN:-1}" = 1 ]; then
+  echo "== 4. haze cleanup (unsupported free-space + giant splats; measured harm restore)"
+  rm -f "$F/clean_stats.npz"                                   # stage 3 rewrote the input: stats are per splat
+  # shellcheck disable=SC2086
+  "$SPY" scripts/clean_haze.py clean --ply "$E/${NAME}_inpainted.ply" --dataset ${CLEAN_DATA:-$DATA} --cloud "$CLOUD" \
+    --sim3-json "$P/sim3.json" --stats "$F/clean_stats.npz" --out "$E/${NAME}_clean.ply" ${CLEAN_ARGS:-} | tail -6
+  VARIANTS="_inpainted _clean"
+fi
+
+echo "== 5. exports in the viewer reference's axes"
+for v in "" $VARIANTS; do
   if [ -n "$FRAME" ]; then
     "$CPUPY" scripts/sim3_align_splat.py --colmap-model "$P/dataset/sparse/0" --gt-model "$FRAME" \
       --in-ply "$E/$NAME$v.ply" --out-ply "$E/$NAME${v}_refaxes.ply"
