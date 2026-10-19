@@ -29,3 +29,15 @@ rect:
 native:
   downsample: 2                # 1632 x 1632 fisheyes for 3DGUT
   max_deg: 90                  # loss mask: rays within 90 deg of the lens axis (180 deg of the 200 deg FOV)
+rect_variants:              # `fiord.py prepare --rig <name>` -> pipeline/rect_<name>/ (training rig variants)
+  v9:                       # 9 overlapping 90 deg views: centre, 4 tilted 35 deg, 4 diagonal (22, 22); all within 85.4 deg
+    views:
+      - {yaw: 0, pitch: 0, fov: 90, name: c}
+      - {yaw: 35, pitch: 0, fov: 90, name: r}
+      - {yaw: -35, pitch: 0, fov: 90, name: l}
+      - {yaw: 0, pitch: 35, fov: 90, name: u}
+      - {yaw: 0, pitch: -35, fov: 90, name: d}
+      - {yaw: 22, pitch: 22, fov: 90, name: ru}
+      - {yaw: -22, pitch: 22, fov: 90, name: lu}
+      - {yaw: 22, pitch: -22, fov: 90, name: rd}
+      - {yaw: -22, pitch: -22, fov: 90, name: ld}
