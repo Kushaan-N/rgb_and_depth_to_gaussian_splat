@@ -23,16 +23,18 @@ git -C "$ODGS_DIR" fetch -q origin && git -C "$ODGS_DIR" checkout -q "$ODGS_COMM
 git -C "$ODGS_DIR" submodule update --init --recursive -q
 echo "[odgs] ODGS @ $(git -C "$ODGS_DIR" rev-parse --short HEAD)"
 
+UV="$(command -v uv || echo /modules/opt/linux-ubuntu24.04-x86_64/uv/uv)"
+# ODGS builds images with Image.fromarray(int8 array, "RGB"): Pillow >= 11.1 rejects that dtype -> pin 10.4
+[ -x "$ODGS_VENV/bin/python" ] && "$UV" pip install --python "$ODGS_VENV/bin/python" -q "pillow==10.4.0"
 if [ -x "$ODGS_VENV/bin/python" ] && "$ODGS_VENV/bin/python" -c "import odgs_gaussian_rasterization, simple_knn" 2>/dev/null; then
   echo "[odgs] venv ready: $ODGS_VENV"; exit 0
 fi
 module load cuda/12.4.1 gcc/11.2.0 2>/dev/null || module load cuda/12.4.1 2>/dev/null || true
 export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")" TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0;8.6;8.9}"
-UV="$(command -v uv || echo /modules/opt/linux-ubuntu24.04-x86_64/uv/uv)"
 [ -x "$ODGS_VENV/bin/python" ] || "$UV" venv --python 3.10 "$ODGS_VENV"
 "$UV" pip install --python "$ODGS_VENV/bin/python" --index-strategy unsafe-best-match \
   --extra-index-url https://download.pytorch.org/whl/cu124 \
-  "torch==2.6.0+cu124" "torchvision==0.21.0+cu124" "numpy<2" plyfile==1.1 tqdm opencv-python-headless pillow \
+  "torch==2.6.0+cu124" "torchvision==0.21.0+cu124" "numpy<2" plyfile==1.1 tqdm opencv-python-headless "pillow==10.4.0" \
   scipy setuptools wheel ninja
 # 3DGS-era rasteriser sources miss <cstdint> (gcc >= 13 no longer pulls it in transitively): add it, idempotently
 for h in "$ODGS_DIR"/submodules/odgs-gaussian-rasterization/cuda_rasterizer/{rasterizer_impl.h,rasterizer.h,auxiliary.h}; do
