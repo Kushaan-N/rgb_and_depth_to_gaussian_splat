@@ -16,6 +16,8 @@
 #      training pixel may change only toward the real image), FORCE=1 (redo every stage). Stages reuse their outputs
 #      in $P/solidify/<NAME>; per-TAG: harm_<TAG>.ply, live_<TAG>/. REFIT=1: before harm, the added discs + snapped needles
 #      are fine-tuned (solidify_unseen.py refit, REFIT_ARGS; every input gaussian frozen) so fewer need reverting.
+#      JOINT=1 (after a TAG=$BASETAG run): joint refit incl. the input's gaussians (lr x0.1 + anchor, REFIT_ARGS e.g.
+#      "--lam-anchor 1e-3") and a per-view visibility budget (solidify_unseen.py budget, BUDGET_ARGS) instead of harm.
 #SBATCH -J solidify
 #SBATCH -p gpu,gpu-preempt
 #SBATCH --gres=gpu:a100:1
@@ -76,11 +78,22 @@ need "$S/refit_$TAG.ply" && "$SPY" "$SO" refit --ply "$S/textured.ply" --meta "$
   "${OBJ[@]}" --cloud "$CLOUD" "${ORB[@]}" --out "$S/refit_$TAG.ply" ${REFIT_ARGS:-}
 CAND="$S/refit_$TAG.ply"
 fi
+if [ "${JOINT:-0}" = 1 ]; then
+echo "== 4J. joint refit (input gaussians at lr x0.1 + anchor; removals harm restored put back) + per-view visibility budget"
+ORB=(); [ -f "$S/orbit/sparse/0/images.txt" ] && ORB=(--orbit "$S/orbit")
+RM="$S/harm_${BASETAG:-solid}_harm_masks.npz"; [ -f "$RM" ] || { echo "missing $RM (run TAG=${BASETAG:-solid} first)"; exit 1; }
+need "$S/refit_$TAG.ply" && "$SPY" "$SO" refit --ply "$S/textured.ply" --meta "$S/meta.npz" --dataset "$DATA" "$TEST" --sim3-json "$P/sim3.json" \
+  "${OBJ[@]}" --cloud "$CLOUD" "${ORB[@]}" --train-all --input "$IN" --restore-masks "$RM" --out "$S/refit_$TAG.ply" ${REFIT_ARGS:-}
+need "$S/budget_$TAG.ply" && "$SPY" "$SO" budget --input "$IN" --cand "$S/refit_$TAG.ply" --src "$S/refit_${TAG}_src.npz" \
+  --dataset "$DATA" "$TEST" --out "$S/budget_$TAG.ply" ${BUDGET_ARGS:-}
+need "$OUTPLY" && "$SPY" "$SO" shfit --ply "$S/budget_$TAG.ply" --ref "$S/budget_$TAG.ply" --dataset "$DATA" "$TEST" --out "$OUTPLY"
+else
 echo "== 4. harmlessness at every training / held-out frame (viewer-exact)"
 need "$S/harm_$TAG.ply" && "$SPY" "$SO" harm --input "$IN" --cand "$CAND" --meta "$S/meta.npz" --dataset "$DATA" "$TEST" \
   --out "$S/harm_$TAG.ply" ${HARM_ARGS:-}
 # minimum-norm SH: colours at the training directions kept, no rainbow extrapolation elsewhere (measured, reverted where seen)
 need "$OUTPLY" && "$SPY" "$SO" shfit --ply "$S/harm_$TAG.ply" --ref "$IN" --dataset "$DATA" "$TEST" --out "$OUTPLY" ${HARM_ARGS:-}
+fi
 
 echo "== 5. exports"
 if [ -n "$FRAME" ]; then
