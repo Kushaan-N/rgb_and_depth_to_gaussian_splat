@@ -3,6 +3,8 @@
 # (scripts/datasets/fiord.py align, venv-e57) then accuracy / completeness / F at 5 cm per PLY
 # (fiord.py geom) -> <out>/pipeline/supersplat/report/<name>_geom.json (overwrites omni_score's).
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o logs/fiord-geom-%j.out sbatch/fiord_geom.sbatch configs/fiord_meetingroom.yaml
+# Env: KEEP_ALIGN=1 (reuse sim3_tls.json), SRC_POINTS (model-frame points to register; default the rect arm's EDGS
+#      init), ALIGN_ARGS (e.g. "--scales 0.3:0.7:9 --coarse-voxel 0.1")
 #SBATCH -J fiord-geom
 #SBATCH -p cpu,cpu-preempt
 #SBATCH -c 8
@@ -16,7 +18,9 @@ source env/cear_env.sh >/dev/null
 EPY="${E57_VENV:-$CEAR_WS/venv-e57}/bin/python"; P="$("$CEAR_VENV/bin/python" scripts/cfg_get.py "$CFG" paths.out_root)/pipeline"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"; hostname; date
 [ -n "${KEEP_ALIGN:-}" ] || rm -f "$P/sim3_tls.json"
-[ -f "$P/sim3_tls.json" ] || "$EPY" scripts/datasets/fiord.py align "$CFG" 2>&1 | grep -v WARNING | tail -15
+SRC="${SRC_POINTS:-$P/rect_igs/edgs_data/sparse/0/points3D.txt}"; [ -f "$SRC" ] || SRC=""
+[ -f "$P/sim3_tls.json" ] || "$EPY" scripts/datasets/fiord.py align "$CFG" ${SRC:+--src-points "$SRC"} ${ALIGN_ARGS:-} 2>&1 \
+  | grep -v WARNING | tail -20
 for ply in "$P"/rect_igs*/train/splat.ply "$P"/rect_igs*/ft.ply "$P"/native_3dgut*/native.ply "$P"/native_3dgut*/native_ft.ply; do
   [ -f "$ply" ] || continue
   d="$(basename "$(dirname "$ply")")"; b="$(basename "$ply" .ply)"
