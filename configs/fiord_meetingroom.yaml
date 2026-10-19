@@ -1,0 +1,30 @@
+# FIORD MeetingRoom_In: Insta360 One RS 1-Inch dual 200 deg fisheye (2 lenses = 2-camera rig), 107 captures,
+# COLMAP model aligned to a Faro TLS scan (metric). Adapter: scripts/datasets/fiord.py; runs:
+# sbatch/omni_rect.sbatch (rectify -> CEAR pinhole recipe), sbatch/omni_native.sbatch (3DGUT on the fisheyes).
+# Set CEAR_DATA / CEAR_OUT to the multicam workspace before use (see docs/DATASETS.md).
+sequence:
+  name: fiord_meetingroom
+  adapter: fiord               # scripts/datasets/fiord.py
+  camera: fisheye              # native arm: 3DGUT (sbatch/omni_native.sbatch)
+  folder: meetingroom          # folder inside the zip
+  model: model                 # COLMAP model (binary, OPENCV_FISHEYE per lens, TLS frame)
+  images: fisheyeimages        # cam1/, cam2/
+  tls: meetingroom.e57         # Faro Focus ground truth
+paths:
+  data_root: "${CEAR_DATA}/fiord"
+  out_root: "${CEAR_OUT}/{seq}"
+download:
+  url: https://zenodo.org/api/records/15181976/files/MeetingRoom_In.zip/content
+  file: MeetingRoom_In.zip
+  md5: 9e0be45675ea632d2c653045ff8359a5
+  bytes: 4604401957
+  extract: [fisheyeimages/, model/, meetingroom.e57, meetingroom.ply]
+split:
+  every: 8                     # every 8th capture (both lenses) held out
+  capture_regex: "_(\\d+)_fisheye"
+rect:
+  scale: 0.5                   # virtual focal = 0.5 x fisheye focal (~500 px; centre view 998 px wide)
+  ext: .png
+native:
+  downsample: 2                # 1632 x 1632 fisheyes for 3DGUT
+  max_deg: 90                  # loss mask: rays within 90 deg of the lens axis (180 deg of the 200 deg FOV)
