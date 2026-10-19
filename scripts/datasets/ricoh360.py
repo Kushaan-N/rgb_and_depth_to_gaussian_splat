@@ -45,6 +45,8 @@ def prepare(cfg, args):
     model = os.path.join(sdir, "output_dir", "colmap")
     test = {f"{int(x)}.png" for x in open(os.path.join(sdir, "test.txt")).read().split()}
     r = cfg.get("rect", {})
+    if args.rig:                                       # rig variant: rect_variants.<name> overrides rect.* -> rect_<name>/
+        r = {**r, **cfg["rect_variants"][args.rig]}
     rigs = {"default": r.get("views", [{"yaw": a, "pitch": 0, "fov": 100, "name": f"h{a}"} for a in (0, 90, 180, 270)]
                        + [{"yaw": 0, "pitch": 90, "fov": 90, "name": "up"}, {"yaw": 0, "pitch": -90, "fov": 90, "name": "dn"}])}
     # the SfM model holds more frames than were released: keep the official train + test frames
@@ -53,7 +55,8 @@ def prepare(cfg, args):
     tr = [n for n, *_ in imgs if n in train]; te = [n for n, *_ in imgs if n in test]
     frames = tr[: args.frames] + te[: args.frames] if args.frames else tr + te
     meta = oc.prepare(P, model, lambda n: os.path.join(sdir, "imgs", n), test, rigs, rect_scale=r.get("scale", 1.0),
-                      rect_size=r.get("size"), ext=r.get("ext", ".png"), workers=args.workers, frames=frames)
+                      rect_size=r.get("size"), ext=r.get("ext", ".png"), workers=args.workers, frames=frames,
+                      native=not args.rig, rect_name=f"rect_{args.rig}" if args.rig else "rect", gravity=bool(r.get("gravity")))
     print(f"[ricoh360] {meta['n_frames']} frames, {len(meta['test'])} held out, median depth {meta.get('median_depth', 0):.3f}"
           f" (SfM units), valid fractions {meta['valid_fraction']}")
 
@@ -64,6 +67,7 @@ def main():
     ap.add_argument("config")
     ap.add_argument("--frames", type=int, default=0, help="smoke test: only the first N train + N test frames")
     ap.add_argument("--workers", type=int, default=None)
+    ap.add_argument("--rig", default=None, help="prepare: a rect_variants.<name> rig from the config -> <out>/pipeline/rect_<name>/")
     args = ap.parse_args()
     cfg = pu.load_config(args.config)
     {"fetch": fetch, "prepare": prepare}[args.cmd](cfg, args)
