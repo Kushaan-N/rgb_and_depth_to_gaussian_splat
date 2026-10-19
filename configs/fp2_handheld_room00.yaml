@@ -1,0 +1,13 @@
+# FusionPortable v2 handheld_room00 — handheld sensor suite in the HKUST(GZ) mocap room (dynamic).
+# 2023-05-20, ~145 s. GT: Leica MS60 positions (3-DoF).
+base: fp2_base.yaml
+sequence:
+  name: handheld_room00
+rig:
+  calib_release: 20230426_calib            # dataset page: handheld sequences -> 20230403_calib, linked to the
+                                           # 20230426 folder; 20230426 is the newest release before 2023-05-20
+download:
+  files:
+    handheld_room00.7z: 17KpBjb0d4qqO7y77JunZe2bkpFCZ_KEu    # rosbag, 4.9 GB compressed
+    gt_traj.txt: 16MLp0mE0AJ9W-HFJ1nhmPiaUtabOaXKy
+    fastlio2.txt: 1wsByceb0aBoKcjeBBAW0J_SZTIZ7UtBE
