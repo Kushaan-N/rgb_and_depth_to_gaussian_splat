@@ -1,0 +1,56 @@
+#!/bin/bash
+# Native fisheye training (no rectification): 3DGRUT/3DGUT on the adapter's OPENCV_FISHEYE COLMAP splits (unscented
+# transform through the real Kalibr equidistant model), scored natively on the held-out fisheye frames
+# (scripts/eval_views.py) and exported as a standard 3DGS PLY in the same metric world frame as the pinhole sets.
+#   CEAR_DATA=$MC/data/spires CEAR_OUT=$MC/outputs sbatch -A $CEAR_SLURM_ACCOUNT -o logs/%x-%j.out \
+#     sbatch/spires_fisheye.sbatch configs/spires_roq01.yaml
+# Arms (ARMS, default "gut_mcmc"):
+#   gut        apps/colmap_3dgut.yaml (3DGS densification)
+#   gut_mcmc   apps/colmap_3dgut_mcmc.yaml (MCMC, LiDAR init)
+#   gut_ppisp  gut_mcmc + post_processing.method=ppisp (per-camera / per-frame exposure, vignetting, CRF: the rig's
+#              auto-exposure; the exported PLY is the ISP-free radiance)
+#   gut_mcmc3m gut_mcmc with a 3M cap (default 1M; outdoor scenes are larger)
+# Env: ITERS (30000), EXTRA_OVR (extra hydra overrides for every arm).
+# Out: <adapter.root>/run_fisheye/<arm>/ (+ <arm>_{test_in,test_out}.json), exports/<arm>.ply
+#SBATCH -J spires-fisheye
+#SBATCH -p gpu,gpu-preempt
+#SBATCH --gres=gpu:a100:1
+#SBATCH -c 8
+#SBATCH --mem=64G
+#SBATCH -t 06:00:00
+set -euo pipefail
+CFG="$1"
+REPO="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+cd "$REPO"; source env/cear_env.sh >/dev/null
+CPUPY="$CEAR_VENV/bin/python"; GPY="$THREEDGRUT_DIR/.venv/bin/python"
+get() { "$CPUPY" scripts/cfg_get.py "$CFG" "$@"; }
+ROOT="$(get adapter.root)"; FD="$ROOT/fisheye"; R="$ROOT/run_fisheye"; E="$R/exports"; ITERS="${ITERS:-30000}"
+[ -f "$FD/train/sparse/0/images.txt" ] || { echo "missing $FD (run sbatch/spires_prepare.sbatch)"; exit 1; }
+hostname; date; nvidia-smi --query-gpu=name --format=csv,noheader || true; mkdir -p "$E"
+module load cuda/12.4.1 gcc/9.4.0 2>/dev/null || true
+export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"; export PATH="$THREEDGRUT_DIR/.venv/bin:$PATH"
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"; export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0}"
+for arm in ${ARMS:-gut_mcmc}; do
+  case "$arm" in
+    gut)       APP=apps/colmap_3dgut.yaml; OVR=() ;;
+    gut_mcmc)  APP=apps/colmap_3dgut_mcmc.yaml; OVR=() ;;
+    gut_ppisp) APP=apps/colmap_3dgut_mcmc.yaml; OVR=(post_processing.method=ppisp) ;;
+    gut_mcmc3m) APP=apps/colmap_3dgut_mcmc.yaml; OVR=(strategy.max_n_gaussians=3000000) ;;
+    *) echo "unknown arm $arm"; exit 1 ;;
+  esac
+  RUN="$R/$arm"; CK="$(ls -t "$RUN"/run/*/ckpt_last.pt 2>/dev/null | head -1 || true)"
+  if [ -z "$CK" ]; then
+    echo "== $arm: $APP ${OVR[*]} ${EXTRA_OVR:-}, $ITERS iters on $FD/train"
+    # shellcheck disable=SC2086
+    ( cd "$THREEDGRUT_DIR" && "$GPY" train.py --config-name "$APP" path="$FD/train" out_dir="$RUN" experiment_name=run \
+        dataset.downsample_factor=1 n_iterations="$ITERS" dataset.test_split_interval=100000 "${OVR[@]}" ${EXTRA_OVR:-} ) \
+        > "$RUN.log" 2>&1 || { tail -40 "$RUN.log"; exit 1; }
+    CK="$(ls -t "$RUN"/run/*/ckpt_last.pt | head -1)"
+  fi
+  for s in test_in test_out; do
+    [ -f "$R/${arm}_$s.json" ] || "$GPY" scripts/eval_views.py --checkpoint "$CK" --dataset "$FD/$s" --tag "${arm}_$s" \
+      --json-out "$R/${arm}_$s.json" --save-dir "$R/renders_${arm}_$s" | tail -1
+  done
+  [ -f "$E/$arm.ply" ] || "$GPY" scripts/export_gaussian_ply.py --checkpoint "$CK" --out "$E/$arm.ply"
+done
+ls -la "$E"; echo SPIRES_FISHEYE_DONE
