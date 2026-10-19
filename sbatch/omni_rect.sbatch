@@ -11,7 +11,8 @@
 # LiDAR stages (fill, clean_haze) need a LiDAR cloud + sim3 the omni adapters do not produce yet: skipped.
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o logs/omni-rect-%j.out sbatch/omni_rect.sbatch configs/<seq>.yaml
 # Env: NAME (rect_igs), ARM_FLAGS (train_viewer_gsplat.py flags, default "--strategy improved --budget 4000000"),
-#      PROF (pc274), DSCALE (1.5:4), FT_ITERS (7000), FT_ARGS, NO_EDGS=1 (init from the SfM points only), SCORE (1)
+#      PROF (pc274), DSCALE (1.5:4), FT_ITERS (7000), FT_ARGS, NO_EDGS=1 (init from the SfM points only), SCORE (1),
+#      EDGS_DATA (reuse an existing EDGS init dir, e.g. <out>/pipeline/rect_igs/edgs_data)
 #SBATCH -J omni-rect
 #SBATCH -p gpu
 #SBATCH --gres=gpu:a100:1
@@ -43,7 +44,7 @@ module load cuda/12.4.1 gcc/9.4.0 2>/dev/null || true
 export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"; export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0}"
 bash env/make_gsplat_viewer_venv.sh
 
-EDGS="$F/edgs_data"
+EDGS="${EDGS_DATA:-$F/edgs_data}"                                  # EDGS_DATA: reuse another arm's init
 if [ "${NO_EDGS:-0}" = 1 ]; then EDGS="$TRAIN"
 else
   echo "== 1. EDGS dense init on the training views"
