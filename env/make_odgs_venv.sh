@@ -34,6 +34,10 @@ UV="$(command -v uv || echo /modules/opt/linux-ubuntu24.04-x86_64/uv/uv)"
   --extra-index-url https://download.pytorch.org/whl/cu124 \
   "torch==2.6.0+cu124" "torchvision==0.21.0+cu124" "numpy<2" plyfile==1.1 tqdm opencv-python-headless pillow \
   scipy setuptools wheel ninja
+# 3DGS-era rasteriser sources miss <cstdint> (gcc >= 13 no longer pulls it in transitively): add it, idempotently
+for h in "$ODGS_DIR"/submodules/odgs-gaussian-rasterization/cuda_rasterizer/{rasterizer_impl.h,rasterizer.h,auxiliary.h}; do
+  grep -q '#include <cstdint>' "$h" || sed -i '1i #include <cstdint>' "$h"
+done
 # the CUDA extensions import torch at build time: no build isolation
 for s in simple-knn odgs-gaussian-rasterization; do
   "$UV" pip install --python "$ODGS_VENV/bin/python" --no-build-isolation "$ODGS_DIR/submodules/$s"
