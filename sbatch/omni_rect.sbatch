@@ -12,7 +12,10 @@
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o logs/omni-rect-%j.out sbatch/omni_rect.sbatch configs/<seq>.yaml
 # Env: NAME (rect_igs), ARM_FLAGS (train_viewer_gsplat.py flags, default "--strategy improved --budget 4000000"),
 #      PROF (pc274), DSCALE (1.5:4), FT_ITERS (7000), FT_ARGS, NO_EDGS=1 (init from the SfM points only), SCORE (1),
-#      EDGS_DATA (reuse an existing EDGS init dir, e.g. <out>/pipeline/rect_igs/edgs_data)
+#      EDGS_DATA (reuse an existing EDGS init dir, e.g. <out>/pipeline/rect_igs/edgs_data), TRAIN_PLY (reuse a trained
+#      stage-2 splat, e.g. to try fine-tune variants), RIG (train on the config's rect_variants.<RIG> views,
+#      pipeline/rect_<RIG>/train; scoring stays on the standard rect/test), CLEAN=1 (stage 3b, scripts/clean_haze.py,
+#      when <out>/pipeline/tls_cloud.ply + sim3_tls.json with fitness >= 0.3 exist), CLEAN_ARGS
 #SBATCH -J omni-rect
 #SBATCH -p gpu
 #SBATCH --gres=gpu:a100:1
@@ -37,8 +40,11 @@ echo "== 0. adapter $ADAPTER: fetch + prepare (rectified pinhole views + native 
 "$CPUPY" "scripts/datasets/$ADAPTER.py" fetch "$CFG"
 mkdir -p "$P"; (                                                   # rect + native jobs may start together
   flock 9; [ -f "$P/meta.json" ] && [ -f "$P/rect/test/sparse/0/images.txt" ] || \
-    "$CPUPY" "scripts/datasets/$ADAPTER.py" prepare "$CFG" --workers "${SLURM_CPUS_PER_TASK:-12}" ) 9>"$P/.prepare.lock"
-TRAIN="$P/rect/train"; TEST="$P/rect/test"
+    "$CPUPY" "scripts/datasets/$ADAPTER.py" prepare "$CFG" --workers "${SLURM_CPUS_PER_TASK:-12}"
+  if [ -n "${RIG:-}" ] && [ ! -f "$P/rect_$RIG/train/sparse/0/images.txt" ]; then
+    "$CPUPY" "scripts/datasets/$ADAPTER.py" prepare "$CFG" --rig "$RIG" --workers "${SLURM_CPUS_PER_TASK:-12}"
+  fi ) 9>"$P/.prepare.lock"
+TRAIN="$P/rect${RIG:+_$RIG}/train"; TEST="$P/rect/test"          # always scored on the standard held-out views
 
 module load cuda/12.4.1 gcc/9.4.0 2>/dev/null || true
 export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"; export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0}"
@@ -54,6 +60,7 @@ else
 fi
 
 echo "== 2. viewer-matched training ($PROF kernels): $ARM_FLAGS"
+if [ -n "${TRAIN_PLY:-}" ] && [ ! -f "$F/train/splat.ply" ]; then mkdir -p "$F/train"; cp "$TRAIN_PLY" "$F/train/splat.ply"; fi
 if [ ! -f "$F/train/splat.ply" ]; then
   mkdir -p "$F/train"
   # shellcheck disable=SC2086
@@ -70,8 +77,21 @@ echo "== 3. viewer-exact fine-tune (display scales ${DSCALE:-1.5:4})"
   --iters "${FT_ITERS:-7000}" --eval-dataset "$TEST" ${FT_ARGS:-} > "$F/ft.log" 2>&1 || { tail -40 "$F/ft.log"; exit 1; }
 grep -iE 'held-out|eval' "$F/ft.log" | tail -3 || true
 
+CANDS="${NAME}_train=$F/train/splat.ply ${NAME}_ft=$F/ft.ply"
+SIM="$P/sim3_tls.json"; CLOUD="$P/tls_cloud.ply"
+if [ "${CLEAN:-0}" = 1 ]; then
+  # floater cleanup needs a metric cloud + model->cloud Sim3 (e.g. fiord.py align / sbatch/fiord_geom.sbatch) that fits
+  FIT="$("$CPUPY" -c "import json,sys; print(json.load(open(sys.argv[1])).get('fitness', 0))" "$SIM" 2>/dev/null || echo 0)"
+  if [ -f "$CLOUD" ] && "$CPUPY" -c "import sys; sys.exit(0 if float(sys.argv[1]) >= 0.3 else 1)" "$FIT"; then
+    echo "== 3b. haze cleanup (scripts/clean_haze.py; cloud $CLOUD, alignment fitness $FIT)"
+    [ -f "$F/ft_clean.ply" ] || "$SPY" scripts/clean_haze.py clean --ply "$F/ft.ply" --dataset "$TRAIN" --cloud "$CLOUD" \
+      --sim3-json "$SIM" --stats "$F/clean_stats.npz" --out "$F/ft_clean.ply" ${CLEAN_ARGS:-} | tail -6
+    CANDS="$CANDS ${NAME}_ft_clean=$F/ft_clean.ply"
+  else echo "== 3b. haze cleanup skipped: no metric cloud with a valid alignment (fitness $FIT)"; fi
+fi
 if [ "${SCORE:-1}" = 1 ]; then
   echo "== 4. live SuperSplat scoring (held-out rectified views, off-path, editor)"
-  bash sbatch/omni_score.sbatch "$CFG" "${NAME}_train=$F/train/splat.ply" "${NAME}_ft=$F/ft.ply"
+  # shellcheck disable=SC2086
+  bash sbatch/omni_score.sbatch "$CFG" $CANDS
 fi
 echo OMNI_RECT_DONE
