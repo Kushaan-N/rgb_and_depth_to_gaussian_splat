@@ -10,7 +10,9 @@
 # training views (scripts/finetune_ply_viewer.py ss352: native geometry, viewer-matched appearance), both scored in
 # the live SuperSplat on the rectified held-out views (sbatch/omni_score.sbatch, same views as sbatch/omni_rect.sbatch).
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o logs/omni-native-%j.out sbatch/omni_native.sbatch configs/<seq>.yaml
-# Env: ITERS (30000), APP (3DGUT app config, apps/colmap_3dgut.yaml), DSCALE (1.5:4), FT_ITERS (7000), SCORE (1)
+# Env: ITERS (30000), APP (3DGUT app config, apps/colmap_3dgut.yaml), DSCALE (1.5:4), FT_ITERS (7000), SCORE (1),
+#      MAX_DEG (fisheye: loss-mask half-angle for this run, e.g. 80 = a 160 deg FOV cap; default = native.max_deg as
+#      prepared; writes its own masks into native/train_fov<deg> and names the arm native_3dgut_fov<deg>)
 #SBATCH -J omni-native
 #SBATCH -p gpu
 #SBATCH --gres=gpu:a100:1
@@ -41,10 +43,29 @@ export PATH="$THREEDGRUT_DIR/.venv/bin:$PATH"                      # slangc for 
 
 case "$CAM" in
 fisheye)
-  NAME=native_3dgut; F="$P/$NAME"; CK="$(ls -t "$F"/run/*/ckpt_last.pt 2>/dev/null | head -1 || true)"
+  NAME=native_3dgut; NTRAIN="$P/native/train"
+  if [ -n "${MAX_DEG:-}" ]; then                                    # FOV-capped variant: same frames, new masks
+    NAME="native_3dgut_fov$MAX_DEG"; NTRAIN="$P/native/train_fov$MAX_DEG"
+    [ -f "$NTRAIN/sparse/0/images.txt" ] || "$CPUPY" - "$P/native/train" "$NTRAIN" "$MAX_DEG" <<'PY'
+import os, sys, shutil, math, cv2, numpy as np
+sys.path.insert(0, "scripts/datasets"); import omni_common as oc
+src, dst, deg = sys.argv[1], sys.argv[2], float(sys.argv[3])
+os.makedirs(os.path.join(dst, "images"), exist_ok=True); shutil.copytree(os.path.join(src, "sparse"), os.path.join(dst, "sparse"))
+cams, imgs, _ = oc.read_model(os.path.join(src, "sparse", "0"))
+for name, _i, cid, _c in imgs:
+    m, w, h, p = cams[cid]; f = os.path.join(src, "images", name)
+    os.symlink(os.path.realpath(f), os.path.join(dst, "images", name))
+    u, v = np.meshgrid(np.arange(w) + 0.5, np.arange(h) + 0.5); k = list(p[4:8])
+    r = np.hypot((u - p[2]) / p[0], (v - p[3]) / p[1]); th = np.linspace(0, oc.fisheye_max_theta(p, w, h), 4001)
+    theta = np.interp(r, oc.fisheye_theta_d(th, k), th, right=np.inf)
+    cv2.imwrite(os.path.join(dst, "images", os.path.splitext(name)[0] + "_mask.png"), (theta <= math.radians(deg)).astype(np.uint8) * 255)
+print(f"[omni] {len(imgs)} frames, masks <= {deg} deg -> {dst}")
+PY
+  fi
+  F="$P/$NAME"; CK="$(ls -t "$F"/run/*/ckpt_last.pt 2>/dev/null | head -1 || true)"
   if [ -z "$CK" ]; then
     echo "== 3DGUT on the native fisheye frames ($ITERS iters)"
-    ( cd "$THREEDGRUT_DIR" && "$GPY" train.py --config-name "${APP:-apps/colmap_3dgut.yaml}" path="$P/native/train" out_dir="$F" \
+    ( cd "$THREEDGRUT_DIR" && "$GPY" train.py --config-name "${APP:-apps/colmap_3dgut.yaml}" path="$NTRAIN" out_dir="$F" \
         experiment_name=run dataset.downsample_factor=1 n_iterations="$ITERS" dataset.test_split_interval=100000 ) \
       > "$F.log" 2>&1 || { tail -40 "$F.log"; exit 1; }
     CK="$(ls -t "$F"/run/*/ckpt_last.pt | head -1)"
