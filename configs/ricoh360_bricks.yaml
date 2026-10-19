@@ -24,3 +24,6 @@ rect:                       # virtual pinhole views per panorama (degrees; yaw r
     - {yaw: 180, pitch: 0, fov: 100, name: h180}
     - {yaw: 270, pitch: 0, fov: 100, name: h270}
     - {yaw: 0, pitch: 90, fov: 90, name: up}
+rect_variants:              # `ricoh360.py prepare --rig <name>` -> pipeline/rect_<name>/
+  grav:                     # same 5 views, levelled: about the world up (mean camera up) and each frame's heading
+    gravity: true
