@@ -313,6 +313,26 @@ def _native_job(a):
         cv2.imwrite(os.path.splitext(dst)[0] + "_mask.png", mask)
 
 
+def write_openmvg(d, imgs, xyz, rgb):
+    """ODGS's input (it reads only OpenMVG exports): data_views.json, data_extrinsics.json (rotation = world->camera,
+    center = camera centre, OpenCV axes) and pcd.ply (the init points) next to images/."""
+    from plyfile import PlyData, PlyElement
+    views, ext = [], []
+    for k, (name, _iid, _cid, c2w) in enumerate(imgs):
+        views.append({"key": k, "value": {"ptr_wrapper": {"data": {"filename": name}}}})
+        ext.append({"key": k, "value": {"rotation": c2w[:3, :3].T.tolist(), "center": c2w[:3, 3].tolist()}})
+    json.dump({"views": views}, open(os.path.join(d, "data_views.json"), "w"))
+    json.dump({"extrinsics": ext}, open(os.path.join(d, "data_extrinsics.json"), "w"))
+    v = np.empty(len(xyz), dtype=[(c, "f4") for c in ("x", "y", "z", "nx", "ny", "nz")] + [(c, "u1") for c in ("red", "green", "blue")])
+    for i, c in enumerate("xyz"):
+        v[c] = xyz[:, i]
+    for c in ("nx", "ny", "nz"):
+        v[c] = 0
+    for i, c in enumerate(("red", "green", "blue")):
+        v[c] = rgb[:, i]
+    PlyData([PlyElement.describe(v, "vertex")]).write(os.path.join(d, "pcd.ply"))
+
+
 def prepare(out, model_dir, image_path, test_names, rigs, rect_scale=0.5, rect_size=None, native_ds=1,
             native_max_deg=None, extra_points=None, ext=".png", workers=None, frames=None, native=True):
     """Write the rectified + native datasets of one omnidirectional/fisheye COLMAP model.
@@ -321,7 +341,8 @@ def prepare(out, model_dir, image_path, test_names, rigs, rect_scale=0.5, rect_s
     (rig_views spec per source camera model, key 'default' as fallback); extra_points: (xyz, rgb) merged into the
     rectified training set's points3D (e.g. LiDAR seeds); frames: optional subset of names (smoke tests).
       <out>/rect/{train,test}/{images,sparse/0}   virtual pinhole views (<frame>_<view>.<ext>), PINHOLE cameras
-      <out>/native/all/{images,sparse/0}, train.txt, test.txt   the source frames (ODGS / any native method)
+      <out>/native/all/{images,sparse/0}, train.txt, test.txt   the source frames (any native method; equirect
+                                                  also data_views/data_extrinsics.json + pcd.ply = ODGS's OpenMVG input)
       <out>/native/{train,test}/{images,sparse/0} training / held-out frames only (3DGRUT/3DGUT, eval_views.py)
       <out>/meta.json                             split, views, equirect convention, valid fractions
     """
@@ -404,6 +425,8 @@ def prepare(out, model_dir, image_path, test_names, rigs, rect_scale=0.5, rect_s
                     if os.path.exists(os.path.join(na, "images", f)) and not os.path.lexists(os.path.join(dd, "images", f)):
                         os.symlink(os.path.join(na, "images", f), os.path.join(dd, "images", f))
             write_model(os.path.join(dd, "sparse", "0"), ncams, sel, *((xyz, rgb) if not keep else (None, None)))
+        if any(cams[c][0] in EQUI for c in cams):
+            write_openmvg(na, nimgs, xyz, rgb)
         tr = [x for x in nimgs if os.path.splitext(x[0])[0] not in test_flat]
         print(f"[omni] native: {len(nimgs)} frames ({len(tr)} train) -> {os.path.join(out, 'native')}")
     # off-path probe distance: a fraction of the median camera-to-point depth (scale-free; SfM units differ)
