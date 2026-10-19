@@ -33,7 +33,7 @@ hostname; date; mkdir -p "$REP"; nvidia-smi --query-gpu=name --format=csv,nohead
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-12}"; export TORCH_HOME="${TORCH_HOME:-$CEAR_WS/torch-cache}"
 "$CPUPY" "scripts/datasets/$ADAPTER.py" fetch "$CFG"
 mkdir -p "$P"; (                                                   # rect + native jobs may start together
-  flock 9; [ -f "$P/meta.json" ] && [ -f "$P/native/train/sparse/0/images.txt" ] || \
+  flock 9; [ -f "$P/meta.json" ] && [ -f "$P/native/train/sparse/0/images.txt" ] && { [ "$CAM" != equirect ] || [ -f "$P/native/all/pcd.ply" ]; } || \
     "$CPUPY" "scripts/datasets/$ADAPTER.py" prepare "$CFG" --workers "${SLURM_CPUS_PER_TASK:-12}" ) 9>"$P/.prepare.lock"
 module load cuda/12.4.1 gcc/9.4.0 2>/dev/null || true
 export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"; export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0}"
@@ -59,7 +59,7 @@ equirect)
   bash env/make_odgs_venv.sh
   if [ ! -f "$F/point_cloud/iteration_$ITERS/point_cloud.ply" ]; then
     echo "== ODGS on the native equirect frames ($ITERS iters)"
-    ( cd "$ODGS_DIR" && "$OPY" train.py -s "$P/native/all" -m "$F" --eval --iterations "$ITERS" ) > "$F.log" 2>&1 \
+    ( cd "$ODGS_DIR" && "$OPY" train.py -s "$P/native/all" -m "$F" --eval -r 1 --iterations "$ITERS" ) > "$F.log" 2>&1 \
       || { tail -40 "$F.log"; exit 1; }
   fi
   echo "== dataset-native benchmark: ODGS renders of the held-out panoramas (official test list)"
