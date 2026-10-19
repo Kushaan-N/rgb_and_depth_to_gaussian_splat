@@ -1,0 +1,12 @@
+# FusionPortable v2 legged_room00 — Unitree A1 quadruped carrying the sensor suite in the HKUST(GZ) mocap room
+# (dynamic: people walking). 2023-08-02, ~178 s. GT: Leica MS60 positions (3-DoF).
+base: fp2_base.yaml
+sequence:
+  name: legged_room00
+rig:
+  calib_release: 20230912_calib            # the legged-robot release (dataset page table)
+download:
+  files:
+    legged_room00.7z: 1DmBNOgKETClwOQaO9lMoypKhyDjJqc8b      # rosbag, 5.9 GB compressed
+    gt_traj.txt: 1HFjbVUohFKqA8euZqDiBkFOJkzITPndV           # groundtruth/traj/legged_room00.txt
+    fastlio2.txt: 1wG3Nd-okHc0DdcZx1BnvRm2zuZlCwLGf          # evaluation/algorithm_result/fastlio2
