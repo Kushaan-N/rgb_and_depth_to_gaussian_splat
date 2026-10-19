@@ -14,7 +14,8 @@ download:
   file: Ricoh360.zip
   bytes: 2713936566
 rect:                       # virtual pinhole views per panorama (degrees; yaw right, pitch up)
-  scale: 1.0                # focal = scale x W / 2pi (source pixel density)
+  scale: 1.0                # (used only without size) focal = scale x W / 2pi (source pixel density)
+  size: 728                 # every view 728x728 (viewer_shots needs one canvas size; 100 deg -> f=305 = source density)
   ext: .png
   # 4 horizontal 100 deg views + up; no straight-down view: the camera operator fills it in every panorama
   views:
