@@ -60,6 +60,8 @@ def prepare(cfg, args):
     data, sdir, P = cfg_paths(cfg)
     model = os.path.join(sdir, cfg["sequence"].get("model", "model"))
     sp, r, nat = cfg.get("split", {}), cfg.get("rect", {}), cfg.get("native", {})
+    if args.rig:                                       # rig variant: rect_variants.<name> overrides rect.* -> rect_<name>/
+        r = {**r, **cfg["rect_variants"][args.rig]}
     _, imgs, _ = oc.read_model(model)
     caps = sorted({capture_id(n, sp.get("capture_regex", r"_(\d+)_fisheye")) for n, *_ in imgs})
     every = int(sp.get("every", 8)); held = set(caps[::every])
@@ -74,7 +76,8 @@ def prepare(cfg, args):
     img_dir = os.path.join(sdir, cfg["sequence"].get("images", "fisheyeimages"))
     meta = oc.prepare(P, model, lambda n: os.path.join(img_dir, n), test, {"default": views},
                       rect_scale=r.get("scale", 0.5), rect_size=r.get("size"), native_ds=int(nat.get("downsample", 2)),
-                      native_max_deg=nat.get("max_deg", 90), ext=r.get("ext", ".png"), workers=args.workers, frames=frames)
+                      native_max_deg=nat.get("max_deg", 90), ext=r.get("ext", ".png"), workers=args.workers, frames=frames,
+                      native=not args.rig, rect_name=f"rect_{args.rig}" if args.rig else "rect", gravity=bool(r.get("gravity")))
     print(f"[fiord] {meta['n_frames']} frames ({len(caps)} captures, {len(held)} held out), median depth "
           f"{meta.get('median_depth', 0):.2f} m, valid fractions {meta['valid_fraction']}")
 
@@ -113,48 +116,58 @@ def umeyama(src, dst):
 
 
 def align(cfg, args):
-    """Sim3 TLS <- model frame: the released .e57 is in the scanner's frame, not the COLMAP model's. Global
-    registration (FPFH + RANSAC, open3d; venv-e57) of the SfM points to the scan at a few candidate scales (robust
-    extent ratio x 2^k/4), then point-to-point ICP alternated with Umeyama scale refits on the inlier pairs.
-    -> <out>/pipeline/sim3_tls.json {s, R, t, rmse, fitness}: x_tls = s R x_model + t."""
+    """Sim3 TLS <- model frame: the released .e57 is in the scanner's frame, not the COLMAP model's (and the model is
+    not metric). Global registration (FPFH + RANSAC, open3d; venv-e57) of the model-frame points (--src-points, e.g.
+    the rect arm's dense EDGS init, else the SfM points) to the scan over a log-spaced scale grid (--scales lo:hi:n)
+    at a coarse voxel (--coarse-voxel), then point-to-point ICP alternated with Umeyama scale refits at --voxel.
+    Best = highest share of source points within --voxel of the scan.
+    -> <out>/pipeline/sim3_tls.json {s/scale, R, t, fitness, median_m}: x_tls = s R x_model + t;
+       <out>/pipeline/tls_cloud.ply (scan, --voxel downsampled; the metric cloud for clean_haze.py --cloud)."""
     import open3d as o3d
     from scipy.spatial import cKDTree
     data, sdir, P = cfg_paths(cfg)
     os.makedirs(P, exist_ok=True)
-    _, _, (xyz, _rgb) = oc.read_model(os.path.join(sdir, cfg["sequence"].get("model", "model")))
+    if args.src_points:
+        xyz = np.loadtxt(args.src_points, comments="#", usecols=(1, 2, 3)) if args.src_points.endswith(".txt") else \
+            np.asarray(o3d.io.read_point_cloud(args.src_points).points)
+    else:
+        _, _, (xyz, _rgb) = oc.read_model(os.path.join(sdir, cfg["sequence"].get("model", "model")))
     gt_npy = os.path.join(P, "gt_tls.npy")
     if not os.path.exists(gt_npy):
         np.save(gt_npy, read_e57(os.path.join(sdir, cfg["sequence"]["tls"]), max_points=args.max_points).astype(np.float32))
     gt = np.load(gt_npy).astype(np.float64)
     c = np.median(xyz, 0); keep = np.linalg.norm(xyz - c, axis=1) < np.percentile(np.linalg.norm(xyz - c, axis=1), 95)
-    src0 = xyz[keep]
-    ext = lambda X: np.percentile(np.linalg.norm(X - np.median(X, 0), axis=1), 80)  # noqa: E731
-    s0 = ext(gt) / ext(src0); vox = args.voxel
-    def pcd(X):
-        p = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(X)); p = p.voxel_down_sample(vox)
-        p.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=vox * 3, max_nn=30))
-        f = o3d.pipelines.registration.compute_fpfh_feature(p, o3d.geometry.KDTreeSearchParamHybrid(radius=vox * 6, max_nn=100))
+    src0 = xyz[keep]; vox, cv = args.voxel, args.coarse_voxel
+    def pcd(X, v):
+        p = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(X)); p = p.voxel_down_sample(v)
+        p.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=v * 3, max_nn=30))
+        f = o3d.pipelines.registration.compute_fpfh_feature(p, o3d.geometry.KDTreeSearchParamHybrid(radius=v * 6, max_nn=100))
         return p, f
-    tp, tf = pcd(gt); tree = cKDTree(np.asarray(tp.points)); best = None
-    # candidate scales: around the robust-extent ratio AND around 1 (FIORD's model is already ~metric; the scan's
-    # extent ratio is biased by whatever the scanner saw through doors/windows)
-    for sc in sorted({round(b * 2 ** (k / 4), 4) for b in (s0, 1.0) for k in (-2, -1, 0, 1, 2)}):
-        sp, sf = pcd(src0 * sc)
+    tp, tf = pcd(gt, cv); fine = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(gt)).voxel_down_sample(vox)
+    F = np.asarray(fine.points); tree = cKDTree(F)
+    o3d.io.write_point_cloud(os.path.join(P, "tls_cloud.ply"), fine)
+    sub = src0[np.random.default_rng(0).choice(len(src0), min(len(src0), 300000), replace=False)]
+    lo, hi, n = (float(x) for x in args.scales.split(":")); best = None
+    for sc in np.geomspace(lo, hi, int(n)):
+        sp, sf = pcd(sub * sc, cv)
         r = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
-            sp, tp, sf, tf, True, vox * 1.5, o3d.pipelines.registration.TransformationEstimationPointToPoint(False), 3,
-            [o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(vox * 1.5)],
-            o3d.pipelines.registration.RANSACConvergenceCriteria(400000, 0.999))
+            sp, tp, sf, tf, True, cv * 1.5, o3d.pipelines.registration.TransformationEstimationPointToPoint(False), 3,
+            [o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
+             o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(cv * 1.5)],
+            o3d.pipelines.registration.RANSACConvergenceCriteria(2000000, 0.9999))
         T = r.transformation; s, R, t = sc, T[:3, :3], T[:3, 3]
-        for it in range(30):                                     # ICP with scale (Umeyama on nearest pairs)
-            X = s * src0 @ R.T + t; d, j = tree.query(X)
-            thr = max(vox * 2 * (0.85 ** it), vox * 0.5); m = d < thr
+        for it in range(40):                                     # ICP with scale (Umeyama on nearest pairs)
+            X = s * sub @ R.T + t; d, j = tree.query(X)
+            thr = max(cv * 2 * (0.85 ** it), vox); m = d < thr
             if m.sum() < 100:
                 break
-            s, R, t = umeyama(src0[m], np.asarray(tp.points)[j[m]])
-        d = tree.query(s * src0 @ R.T + t)[0]; fit = float((d < vox).mean())
-        print(f"[fiord] align scale {sc:.4f}: final s {s:.4f}, inliers<{vox} m {fit:.3f}, median {np.median(d):.3f} m")
+            s, R, t = umeyama(sub[m], F[j[m]])
+        d = tree.query(s * sub @ R.T + t)[0]; fit = float((d < vox).mean())
+        print(f"[fiord] align scale {sc:.4f}: ransac fitness {r.fitness:.3f} -> s {s:.4f}, within {vox} m {fit:.3f}, "
+              f"median {np.median(d):.3f} m", flush=True)
         if best is None or fit > best["fitness"]:
-            best = {"s": float(s), "R": R.tolist(), "t": t.tolist(), "fitness": fit, "median_m": float(np.median(d))}
+            best = {"s": float(s), "scale": float(s), "R": R.tolist(), "t": t.tolist(), "fitness": fit,
+                    "median_m": float(np.median(d)), "src": args.src_points or "sfm"}
     json.dump(best, open(os.path.join(P, "sim3_tls.json"), "w"), indent=1); print(json.dumps(best))
 
 
@@ -176,12 +189,14 @@ def geom(cfg, args):
     sj = os.path.join(P, "sim3_tls.json")                     # scan frame <- model frame (align); else identity
     if os.path.exists(sj):
         T = json.load(open(sj)); s, R, t = T["s"], np.array(T["R"]), np.array(T["t"])
+        if T.get("fitness", 0) < 0.3:
+            print(f"[fiord] WARNING: scan alignment fitness {T.get('fitness'):.3f} < 0.3: geometry numbers are not valid")
         xyz, C = s * xyz @ R.T + t, s * C @ R.T + t
     lo, hi = C.min(0) - args.margin, C.max(0) + args.margin
     inb = lambda X: np.all((X >= lo) & (X <= hi), 1)  # noqa: E731
     S = xyz[(op > args.min_opacity) & inb(xyz)]; G = gt[inb(gt)]
     dS = cKDTree(G).query(S, workers=-1)[0]; dG = cKDTree(S).query(G, workers=-1)[0]
-    res = {"ply": args.ply, "tol_m": args.tol, "n_splat": int(len(S)), "n_gt": int(len(G)),
+    res = {"ply": args.ply, "tol_m": args.tol, "align_fitness": json.load(open(sj)).get("fitness") if os.path.exists(sj) else None, "n_splat": int(len(S)), "n_gt": int(len(G)),
            "accuracy": float((dS < args.tol).mean()), "completeness": float((dG < args.tol).mean()),
            "acc_median_m": float(np.median(dS)), "comp_median_m": float(np.median(dG))}
     res["fscore"] = 2 * res["accuracy"] * res["completeness"] / max(res["accuracy"] + res["completeness"], 1e-9)
@@ -196,10 +211,14 @@ def main():
     ap.add_argument("config")
     ap.add_argument("--frames", type=int, default=0, help="prepare smoke test: only the first N train + N test frames")
     ap.add_argument("--workers", type=int, default=None)
+    ap.add_argument("--rig", default=None, help="prepare: a rect_variants.<name> rig from the config -> <out>/pipeline/rect_<name>/")
     ap.add_argument("--ply", default=None); ap.add_argument("--tol", type=float, default=0.05)
     ap.add_argument("--min-opacity", type=float, default=0.5); ap.add_argument("--margin", type=float, default=2.0)
     ap.add_argument("--max-points", type=int, default=5_000_000); ap.add_argument("--json-out", default=None)
-    ap.add_argument("--voxel", type=float, default=0.05, help="align: registration voxel (scan units, m)")
+    ap.add_argument("--voxel", type=float, default=0.05, help="align: fine (ICP / fitness) voxel, m")
+    ap.add_argument("--coarse-voxel", type=float, default=0.15, help="align: FPFH/RANSAC voxel, m")
+    ap.add_argument("--scales", default="0.25:1.6:15", help="align: model->scan scale grid lo:hi:n (log-spaced)")
+    ap.add_argument("--src-points", default=None, help="align: model-frame points (points3D.txt or .ply); default SfM")
     args = ap.parse_args()
     cfg = pu.load_config(args.config)
     {"fetch": fetch, "prepare": prepare, "align": align, "geom": geom}[args.cmd](cfg, args)
