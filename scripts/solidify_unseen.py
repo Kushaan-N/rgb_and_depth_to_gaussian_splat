@@ -39,6 +39,8 @@ views are unchanged (measured in the viewer-exact rasteriser, scripts/finetune_p
            1.5:4), surface prior on discs / snapped needles (thin, normal kept, centre within --pos-tol-m of the
            surface), anti-needle term (s_max/s_mid > --needle-ratio) in object zones, and from random orbit views an
            alpha-hole + colour-smoothness term on the objects' pixels (no RGB target there).
+  budget   (gsplat venv, GPU) after `refit --train-all` (JOINT=1): per-view visibility budget instead of harm's 2/255 rule -
+           reverts / drops / restores only what makes a visible cluster (> 8/255) or a view lose > 0.3 dB.
   orbit    (CPU) COLMAP text cameras orbiting each object (--n-az azimuths x --heights, --dist m) in the PLY's frame
            for viewer_shots.py; per view, the angle to the nearest training camera (how unseen the view is).
   eval     (gsplat venv, GPU) at the orbit cameras, per PLY: viewer-exact alpha + depth vs the LiDAR/closure depth in
@@ -665,9 +667,21 @@ def refit(args):
     from scipy.spatial import cKDTree
     torch.manual_seed(0); np.random.seed(0); dev = "cuda"
     s, R, t = sim3(args.sim3_json)
-    vtx, p0 = load_ply(args.ply, dev); N = len(p0["means"]); deg = sh_deg(p0)
-    M = np.load(args.meta); keep = M["keep"]; nk = int(keep.sum()); m = N - nk
+    vtx, p0 = load_ply(args.ply, dev); deg = sh_deg(p0)
+    M = np.load(args.meta); keep = M["keep"]; nk = int(keep.sum()); m = len(p0["means"]) - nk
     mod = M["mod"][keep] if "mod" in M.files else np.zeros(nk, bool)
+    src = np.concatenate([np.nonzero(keep)[0], np.full(m, -1)])           # input row of each candidate row (-1 = disc)
+    nres = 0
+    if args.input and args.restore_masks:                                  # put back the removals harm found visible
+        from plyfile import PlyData
+        rk = np.load(args.restore_masks)["keep"] & ~keep; ri = np.nonzero(rk)[0]; nres = len(ri)
+        vin, pin_ = load_ply(args.input, dev)
+        vd = vtx.data
+        vtx = np.concatenate([vd[:nk], vin.data[ri], vd[nk:]])
+        p0 = {k: torch.cat([p0[k][:nk], pin_[k][torch.tensor(ri, device=dev)], p0[k][nk:]]) for k in p0}
+        mod = np.concatenate([mod, np.zeros(nres, bool)]); src = np.concatenate([src[:nk], ri, src[nk:]])
+        del pin_
+    N = len(p0["means"])
     surf = torch.tensor(np.concatenate([mod, np.ones(m, bool)]), device=dev)
     si = torch.nonzero(surf)[:, 0]
     cell_d = float(M["cell"]) / s; tol_d = args.pos_tol_m / s
@@ -677,12 +691,14 @@ def refit(args):
         x0 = p0["means"][si].clone()
     # object zones and orbit masks
     ometa, opts = load_objects(args.objects)
-    zone = torch.zeros(N, dtype=torch.bool, device=dev); orb = []
+    zone = torch.zeros(N, dtype=torch.bool, device=dev); tzone = torch.zeros_like(zone); orb = []
     if ometa is not None and len(opts):
         n_f = np.array(ometa["floor"]["n"]); d_f = float(ometa["floor"]["d"])
         osurf = np.concatenate([object_surface(X, n_f, d_f, 0.02, 0.02)[0] for X in opts])
         Gm = s * (p0["means"].double().cpu().numpy() @ R.T) + t
-        zone = torch.tensor(np.isfinite(cKDTree(osurf).query(Gm, distance_upper_bound=args.zone_m)[0]), device=dev)
+        dz = cKDTree(osurf).query(Gm, distance_upper_bound=max(args.zone_m, args.train_zone_m))[0]
+        zone = torch.tensor(dz < args.zone_m, device=dev)
+        tzone = torch.tensor(dz < args.train_zone_m, device=dev)
         if args.orbit and args.lam_hole + args.lam_tv > 0:
             from plyfile import PlyData
             cv = PlyData.read(args.cloud)["vertex"].data; L = np.stack([cv["x"], cv["y"], cv["z"]], 1).astype(np.float64)
@@ -697,6 +713,9 @@ def refit(args):
                 mk = (Do > 0) & (Da > 0) & ((Do - Da).abs() < 0.03 / s)
                 if mk.sum() > 200:
                     orb.append((to_t(w2c, dev), (fx, fy, cx, cy, W, H), mk))
+    tm = (surf | (tzone if args.train_zone_m > 0 else torch.ones_like(surf))) if args.train_all else surf   # trainable rows
+    slow = tm & ~surf                                                      # input gaussians that may move (slowly, anchored)
+    print(f"[refit] trainable {int(tm.sum()):,}, of them input gaussians {int(slow.sum()):,}", flush=True)
     print(f"[refit] {N:,} gaussians ({nk:,} kept input incl. {int(mod.sum()):,} snapped needles, {m:,} discs); surface prior on "
           f"{len(si):,}; object zone {int(zone.sum()):,}; {len(orb)} orbit views", flush=True)
     tr = all_frames(args.dataset)
@@ -735,6 +754,13 @@ def refit(args):
         ss_ = torch.sort(params["scales"][zi], 1).values
         lneed = torch.relu(ss_[:, 2] - ss_[:, 1] - log3).mean() if len(zi) else torch.zeros((), device=dev)
         loss = lph + args.lam_flat * lflat + args.lam_normal * lnorm + args.lam_pos * lpos + args.lam_needle * lneed
+        la = torch.zeros((), device=dev)
+        if args.train_all and args.lam_anchor > 0:                         # input gaussians stay near their trained values
+            fz = slow
+            la = (((params["means"][fz] - p0["means"][fz]) / cell_d) ** 2).sum() + ((params["scales"][fz] - p0["scales"][fz]) ** 2).sum() \
+                + ((params["opacities"][fz] - p0["opacities"][fz]) ** 2).sum() + ((params["quats"][fz] - p0["quats"][fz]) ** 2).sum() \
+                + ((params["sh0"][fz] - p0["sh0"][fz]) ** 2).sum() + ((params["shN"][fz] - p0["shN"][fz]) ** 2).sum()
+            loss = loss + args.lam_anchor * la
         lh = lt = torch.zeros((), device=dev)
         if orb and step % args.orbit_every == 0:
             w2c_o, ca, mk = orb[np.random.randint(len(orb))]
@@ -748,28 +774,100 @@ def refit(args):
         for prm in params.values():
             if prm.grad is not None:
                 prm.grad[~torch.isfinite(prm.grad)] = 0
-                if not args.train_all:
-                    prm.grad[~surf] = 0                                    # input gaussians frozen (Adam: exactly still)
+                prm.grad[~tm] = 0                                          # frozen rows (Adam: exactly still)
+        if args.train_all and args.lr_input < 1:
+            old_ = {k: v.detach()[slow].clone() for k, v in params.items()}
         opt.step()
+        if args.train_all and args.lr_input < 1:                           # input gaussians move at lr_input x the rate
+            with torch.no_grad():
+                for k_, v_ in params.items():
+                    v_[slow] = old_[k_] + args.lr_input * (v_[slow] - old_[k_])
+            del old_
         if step % args.log_every == 0 or step == 1:
             e = {"step": step, "psnr": round(psnr(img.detach(), gt), 2), "flat": round(float(lflat), 4), "normal": round(float(lnorm), 4),
-                 "pos": round(float(lpos), 4), "needle": round(float(lneed), 4), "hole": round(float(lh), 4), "tv": round(float(lt), 4)}
+                 "pos": round(float(lpos), 4), "needle": round(float(lneed), 4), "hole": round(float(lh), 4), "tv": round(float(lt), 4), "anchor": round(float(la), 2)}
             log.append(e); print(f"[refit] {e} ({time.time() - t0:.0f}s, {torch.cuda.max_memory_allocated() / 2**30:.1f}G)", flush=True)
     with torch.no_grad():                                                  # held-out-free check: mean PSNR over the training views
         Rv.r = rs[0]; pv = [psnr(Rv.render(params, to_t(np.linalg.inv(c2w), dev), *cam_args(cam), sh_degree=deg)[0], rgb[k].float() / 255)
                             for k, (n, cam, c2w) in list(enumerate(tr))[::10]]
         p0v = [psnr(Rv.render(p0, to_t(np.linalg.inv(c2w), dev), *cam_args(cam), sh_degree=deg)[0], rgb[k].float() / 255)
                for k, (n, cam, c2w) in list(enumerate(tr))[::10]]
-    if not args.train_all:                                                 # exact copy-back of the frozen rows
-        with torch.no_grad():
-            for k_ in params:
-                params[k_][~surf] = p0[k_][~surf]
+    with torch.no_grad():                                                  # exact copy-back of the frozen rows
+        for k_ in params:
+            params[k_][~tm] = p0[k_][~tm]
     save_ply(args.out, vtx, params)
-    res = {"gaussians": N, "surface_prior": int(len(si)), "object_zone": int(zone.sum()), "orbit_views": len(orb), "iters": args.iters,
+    np.savez_compressed(os.path.splitext(args.out)[0] + "_src.npz", src=src)
+    res = {"gaussians": N, "restored_rows": nres, "surface_prior": int(len(si)), "object_zone": int(zone.sum()), "orbit_views": len(orb), "iters": args.iters,
            "train_psnr_every10_before": round(float(np.mean(p0v)), 3), "train_psnr_every10_after": round(float(np.mean(pv)), 3),
            "seconds": round(time.time() - t0), "curve": log, "args": {k: v for k, v in vars(args).items()}}
     json.dump(res, open(os.path.splitext(args.out)[0] + "_refit.json", "w"), indent=1)
     print("SOLID_REFIT", json.dumps({k: v for k, v in res.items() if k not in ("curve", "args")}), flush=True)
+
+
+# ---------------------------------------------------------------- budget (GPU)
+def budget(args):
+    """Per-view visibility budget for a joint refit (refit --train-all): a training pixel counts as changed if it moved
+    > --vis-thr from the input's render inside a cluster (3x3 opening), or > --thr anywhere in a view whose PSNR vs the
+    real image dropped by > --view-db. Gaussians blending > --min-w into changed pixels are reverted to the input's
+    parameters (input rows), dropped (discs), or restored (removed input rows the input's render shows there); repeated."""
+    import torch
+    import torch.nn.functional as F
+    from finetune_ply_viewer import ViewerRaster, cam_args, load_ply, sh_deg, to_t
+    from refine_poses_gsplat import psnr
+    dev = "cuda"
+    vi, pi = load_ply(args.input, dev); vc, pc = load_ply(args.cand, dev); N = len(pi["means"])
+    src = torch.tensor(np.load(args.src)["src"], device=dev); isin = src >= 0
+    ci = torch.full((N,), -1, dtype=torch.long, device=dev); ci[src[isin]] = torch.nonzero(isin)[:, 0]
+    present = ci >= 0; use_c = present.clone(); di = torch.nonzero(~isin)[:, 0]; dkeep = torch.ones(len(di), dtype=torch.bool, device=dev)
+    deg = sh_deg(pi); Rv = ViewerRaster("ss352", "exact", display_scale=args.display_scale)
+    cams = [(n, to_t(np.linalg.inv(c2w), dev), cam_args(cam)) for n, cam, c2w in all_frames(args.dataset)]
+
+    def build():
+        q = {}
+        for k in pi:
+            a = pi[k].clone(); u = present & use_c
+            a[u] = pc[k][ci[u]]
+            q[k] = torch.cat([a[present], pc[k][di[dkeep]]])
+        return q
+    with torch.no_grad():
+        ref = {n: Rv.render(pi, w2c, *ca, sh_degree=deg)[0].half() for n, w2c, ca in cams}
+        gts = {n: gt_image(args.dataset, n, dev) for n, _, _ in cams}
+        hist = []
+        for it in range(args.iters):
+            q = build(); pidx = torch.nonzero(present)[:, 0]; npres = len(pidx); dsel = di[dkeep]
+            rev = torch.zeros(N, dtype=torch.bool, device=dev); drop = torch.zeros(len(di), dtype=torch.bool, device=dev)
+            res_ = torch.zeros(N, dtype=torch.bool, device=dev); drops, nchg = [], 0
+            for n, w2c, ca in cams:
+                img = Rv.render(q, w2c, *ca, sh_degree=deg)[0]; d = (img - ref[n].float()).abs().amax(-1)
+                g = gts[n]; db = psnr(ref[n].float(), g.float()) - psnr(img, g.float()) if g is not None else 0.0
+                drops.append(db)
+                big = (d > args.vis_thr).float()[None, None]
+                op_ = F.max_pool2d(-F.max_pool2d(-big, 3, 1, 1), 3, 1, 1)[0, 0] > 0      # clusters only (3x3 opening)
+                chg = op_ | ((d > args.thr) if db > args.view_db else torch.zeros_like(op_))
+                if not chg.any():
+                    continue
+                nchg += int(chg.sum()); cf = chg.reshape(-1)
+                gid, pid, w = pair_weights(Rv, q, w2c, *ca); h = gid[cf[pid] & (w > args.min_w)]
+                hi = h[h < npres]; rev[pidx[hi]] = True
+                hd = h[h >= npres] - npres; full = torch.nonzero(dkeep)[:, 0]; drop[full[hd]] = True
+                gid, pid, w = pair_weights(Rv, pi, w2c, *ca); res_[gid[cf[pid] & (w > args.min_w)]] = True
+            rev |= res_ & present                                          # moved away from where the input drew them
+            res_ &= ~present; rev &= use_c
+            hist.append({"iter": it, "changed_px": nchg, "views_over_db": int(sum(x > args.view_db for x in drops)),
+                         "mean_view_drop_db": float(np.mean(drops)), "max_view_drop_db": float(np.max(drops)),
+                         "revert": int(rev.sum()), "drop_discs": int(drop.sum()), "restore": int(res_.sum())})
+            print(f"[budget] {hist[-1]}", flush=True)
+            if not (rev.any() or drop.any() or res_.any()):
+                break
+            use_c &= ~rev; dkeep &= ~drop; present |= res_
+    pr, uc = present.cpu().numpy(), use_c.cpu().numpy(); cin = ci.cpu().numpy()
+    rows = vi.data.copy(); u = pr & uc; rows[u] = vc.data[cin[u]]
+    out = np.concatenate([rows[pr], vc.data[di.cpu().numpy()][dkeep.cpu().numpy()]])
+    write_vertex(args.out, out)
+    r = {"input": N, "present": int(pr.sum()), "refit_rows_kept": int(u.sum()), "reverted_to_input": int((pr & ~uc).sum()),
+         "discs_in": int(len(di)), "discs_kept": int(dkeep.sum()), "out": int(len(out)), "iterations": hist}
+    json.dump(r, open(os.path.splitext(args.out)[0] + "_budget.json", "w"), indent=1)
+    print("SOLID_BUDGET", json.dumps({k: v for k, v in r.items() if k != "iterations"}), flush=True)
 
 
 # ---------------------------------------------------------------- orbit cameras (CPU)
@@ -952,6 +1050,31 @@ def montage(args):
     print(f"[montage] {len(groups)} montages -> {args.out_dir}", flush=True)
 
 
+def crops(args):
+    """On-path before | after | real | |diff| x4 crops around the most-changed region of the --n most-changed views."""
+    import cv2
+    names = sorted(f for f in os.listdir(args.after) if f.endswith(".png") and not f.startswith("_"))
+    sc = []
+    for n in names:
+        a = cv2.imread(os.path.join(args.before, n)).astype(np.float32); b = cv2.imread(os.path.join(args.after, n)).astype(np.float32)
+        d = np.abs(a - b).max(2); db = cv2.blur(d, (41, 41)); y, x = np.unravel_index(np.argmax(db), db.shape)
+        sc.append((float(db.max()), n, y, x))
+    rows = []
+    for _, n, y, x in sorted(sc, reverse=True)[:args.n]:
+        ims = [cv2.imread(os.path.join(d_, n)) for d_ in (args.before, args.after)]
+        g = cv2.imread(os.path.join(args.gt, n)) if args.gt else None
+        g = cv2.resize(g, ims[0].shape[1::-1]) if g is not None else np.zeros_like(ims[0])
+        H, W = ims[0].shape[:2]; h = args.size // 2; y0 = int(np.clip(y - h, 0, H - args.size)); x0 = int(np.clip(x - h, 0, W - args.size))
+        dif = np.clip(np.abs(ims[0].astype(int) - ims[1].astype(int)) * 4, 0, 255).astype(np.uint8)
+        tiles = [cv2.resize(im[y0:y0 + args.size, x0:x0 + args.size], (2 * args.size, 2 * args.size), interpolation=cv2.INTER_NEAREST)
+                 for im in (ims[0], ims[1], g, dif)]
+        for t_, l in zip(tiles, ("before", "after", "real", "|diff|x4")):
+            cv2.putText(t_, f"{l} {n[:-4][-14:]}", (4, 16), 0, 0.45, (0, 0, 255), 1)
+        rows.append(np.hstack(tiles))
+    cv2.imwrite(args.out, np.vstack(rows), [cv2.IMWRITE_JPEG_QUALITY, 90])
+    print(f"[crops] {len(rows)} most-changed on-path views -> {args.out}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1016,6 +1139,18 @@ def main():
     g.add_argument("--lam-hole", type=float, default=0.1); g.add_argument("--lam-tv", type=float, default=0.05)
     g.add_argument("--orbit-every", type=int, default=2); g.add_argument("--log-every", type=int, default=250)
     g.add_argument("--train-all", action="store_true", help="also fine-tune the input's gaussians (changes seen views)")
+    g.add_argument("--train-zone-m", type=float, default=0.0,
+                   help="--train-all: only input gaussians within this of an object's closed surface train (0 = all)")
+    g.add_argument("--lr-input", type=float, default=0.1, help="--train-all: input gaussians' learning-rate multiplier")
+    g.add_argument("--lam-anchor", type=float, default=1e-2, help="--train-all: squared deviation from the input's parameters (sum)")
+    g.add_argument("--input", default=None, help="the input splat (with --restore-masks)")
+    g.add_argument("--restore-masks", default=None, help="harm's _harm_masks.npz: removals it restored start restored")
+    bu = sub.add_parser("budget")
+    bu.add_argument("--input", required=True); bu.add_argument("--cand", required=True); bu.add_argument("--src", required=True)
+    bu.add_argument("--dataset", nargs="+", required=True); bu.add_argument("--out", required=True)
+    bu.add_argument("--vis-thr", type=float, default=8 / 255); bu.add_argument("--thr", type=float, default=2 / 255)
+    bu.add_argument("--view-db", type=float, default=0.3); bu.add_argument("--min-w", type=float, default=0.02)
+    bu.add_argument("--display-scale", type=float, default=1.8); bu.add_argument("--iters", type=int, default=6)
     r = sub.add_parser("orbit")
     r.add_argument("--objects", required=True); r.add_argument("--sim3-json", required=True)
     r.add_argument("--dataset", required=True, help="a dataset in the PLY's frame (intrinsics, training centres)")
@@ -1029,11 +1164,14 @@ def main():
     e.add_argument("--live", nargs="*", default=[], help="tag=<viewer_shots out dir> (its _alpha/)")
     e.add_argument("--cell", type=float, default=0.02); e.add_argument("--display-scale", type=float, default=1.8)
     e.add_argument("--unseen-deg", type=float, default=45.0); e.add_argument("--json-out", required=True)
+    c = sub.add_parser("crops")
+    c.add_argument("--before", required=True); c.add_argument("--after", required=True); c.add_argument("--gt", default=None)
+    c.add_argument("--out", required=True); c.add_argument("--n", type=int, default=8); c.add_argument("--size", type=int, default=160)
     mo = sub.add_parser("montage")
     mo.add_argument("--dirs", nargs="+", required=True, help="label=dir"); mo.add_argument("--out-dir", required=True)
     mo.add_argument("--w", type=int, default=400)
     args = ap.parse_args()
-    {"support": support, "build": build, "objtex": objtex, "harm": harm, "shfit": shfit, "refit": refit, "orbit": orbit, "eval": eval_, "montage": montage}[args.cmd](args)
+    {"support": support, "build": build, "objtex": objtex, "harm": harm, "shfit": shfit, "refit": refit, "budget": budget, "orbit": orbit, "eval": eval_, "montage": montage, "crops": crops}[args.cmd](args)
 
 
 if __name__ == "__main__":
