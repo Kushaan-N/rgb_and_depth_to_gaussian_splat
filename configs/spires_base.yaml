@@ -1,0 +1,35 @@
+# Oxford Spires dataset config — facts shared by EVERY Spires sequence (Alphasense 3-camera rig + Hesai QT64,
+# Leica RTC360 TLS ground truth). Sequence configs: `base: spires_base.yaml` + sequence.name + their file list.
+# Source: https://huggingface.co/datasets/ori-drs/oxford_spires_dataset (CC BY-NC-SA 4.0). See docs/DATASETS.md.
+sequence:
+  data_root: "${CEAR_DATA}/{seq}"     # CEAR_DATA=$MC/data/spires -> one dir per sequence
+download:
+  repo: ori-drs/oxford_spires_dataset
+  revision: main
+rig:
+  # Kalibr equidistant (= COLMAP OPENCV_FISHEYE: fx fy cx cy k1 k2 k3 k4), 1440x1080, ~160 deg FOV. The calibration
+  # files are fetched with the sequence (raw/calibration/cam{0,1,2}.yaml + cam-lidar-imu.yaml, T_cam_lidar =
+  # lidar -> cam); scripts read them, nothing is copied here.
+  calib_dir: "${CEAR_DATA}/{seq}/raw/calibration"
+  cameras: [cam0, cam1, cam2]          # front, left, right
+  # artificial base frame (bottom of the device, x fwd, y left, z up): T_base_lidar (t_xyz, q_xyzw), from
+  # calibration/README.md. gt-tum.txt and the VILENS clouds are in this base frame.
+  T_base_lidar_t_xyz_q_xyzw: [0.0, 0.0, 0.124, 0.0, 0.0, 1.0, 0.0]
+  pose_quat_order: xyzw                # TUM: t x y z qx qy qz qw
+  image_dir_pattern: "alphasense_driver_ros_{cam}_debayered_image_compressed"   # NVS / COLMAP image subfolders
+adapter:
+  # scripts/datasets/spires.py
+  root: "${CEAR_OUT}/spires/{seq}"     # dataset products (fisheye/, pinhole_*/, lidar.ply, tls.ply, benchmark/)
+  rect_variant: center                 # which rect_* variant the export_viewer layout trains on
+  max_pose_dt: 0.03                    # s: image must have a GT pose within this (cameras are 20 Hz hw-synced)
+  lidar_voxel: 0.05                    # m: merged LiDAR cloud voxel size
+  lidar_init_points: 600000            # points3D.txt init (LiDAR, random subset)
+  gt_voxel: 0.02                       # m: TLS cloud voxel for geometry scoring
+  crop_margin: 15.0                    # m: crop TLS/LiDAR to the trajectory bbox + margin
+  # pinhole-rectified variants (scripts/rectify_views.py; every view must stay inside the fisheye image: the pinhole
+  # trainers have no masks). center = one 100x83 deg view per image (~ the dataset's own rectified model, fx 537 vs
+  # the fisheye's 698 px/rad): the held-out frames are ALWAYS this view. cube = 3 yawed 60 deg views per training
+  # image at the fisheye's native resolution (fx 693): sharper training targets, a little more horizontal FOV.
+  rect_center: {fov: 100, width: 1280, height: 960}
+  rect_cube: {fov: 60, width: 800, height: 800, yaws: [-30, 0, 30], pitches: [0]}
+  rect_max_invalid: 0.0
