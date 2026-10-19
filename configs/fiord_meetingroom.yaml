@@ -23,7 +23,8 @@ split:
   every: 8                     # every 8th capture (both lenses) held out
   capture_regex: "_(\\d+)_fisheye"
 rect:
-  scale: 0.5                   # virtual focal = 0.5 x fisheye focal (~500 px; centre view 998 px wide)
+  scale: 0.5                   # (used only without size) virtual focal = 0.5 x fisheye focal
+  size: 1000                   # every view 1000x1000 (viewer_shots needs one canvas size): centre 90 deg f=500, sides f=714
   ext: .png
 native:
   downsample: 2                # 1632 x 1632 fisheyes for 3DGUT
