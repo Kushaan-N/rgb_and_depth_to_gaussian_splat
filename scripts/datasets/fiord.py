@@ -136,8 +136,10 @@ def align(cfg, args):
         f = o3d.pipelines.registration.compute_fpfh_feature(p, o3d.geometry.KDTreeSearchParamHybrid(radius=vox * 6, max_nn=100))
         return p, f
     tp, tf = pcd(gt); tree = cKDTree(np.asarray(tp.points)); best = None
-    for k in (-2, -1, 0, 1, 2):
-        sc = s0 * 2 ** (k / 4); sp, sf = pcd(src0 * sc)
+    # candidate scales: around the robust-extent ratio AND around 1 (FIORD's model is already ~metric; the scan's
+    # extent ratio is biased by whatever the scanner saw through doors/windows)
+    for sc in sorted({round(b * 2 ** (k / 4), 4) for b in (s0, 1.0) for k in (-2, -1, 0, 1, 2)}):
+        sp, sf = pcd(src0 * sc)
         r = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
             sp, tp, sf, tf, True, vox * 1.5, o3d.pipelines.registration.TransformationEstimationPointToPoint(False), 3,
             [o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(vox * 1.5)],
