@@ -12,7 +12,9 @@
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o logs/omni-native-%j.out sbatch/omni_native.sbatch configs/<seq>.yaml
 # Env: ITERS (30000), APP (3DGUT app config, apps/colmap_3dgut.yaml), DSCALE (1.5:4), FT_ITERS (7000), SCORE (1),
 #      MAX_DEG (fisheye: loss-mask half-angle for this run, e.g. 80 = a 160 deg FOV cap; default = native.max_deg as
-#      prepared; writes its own masks into native/train_fov<deg> and names the arm native_3dgut_fov<deg>)
+#      prepared; writes its own masks into native/train_fov<deg> and names the arm native_3dgut_fov<deg>),
+#      INIT_POINTS (fisheye: a points3D.txt in the same frame to initialise 3DGUT from, e.g. the rect arm's EDGS
+#      init <out>/pipeline/rect_igs/edgs_data/sparse/0/points3D.txt; arm suffix _<INIT_TAG>, default edgs)
 #SBATCH -J omni-native
 #SBATCH -p gpu
 #SBATCH --gres=gpu:a100:1
@@ -61,6 +63,14 @@ for name, _i, cid, _c in imgs:
     cv2.imwrite(os.path.join(dst, "images", os.path.splitext(name)[0] + "_mask.png"), (theta <= math.radians(deg)).astype(np.uint8) * 255)
 print(f"[omni] {len(imgs)} frames, masks <= {deg} deg -> {dst}")
 PY
+  fi
+  if [ -n "${INIT_POINTS:-}" ]; then                                # e.g. the rect arm's EDGS points3D.txt (dense init)
+    I="${NTRAIN}_init${INIT_TAG:-edgs}"; NAME="${NAME}_${INIT_TAG:-edgs}"
+    if [ ! -f "$I/sparse/0/points3D.txt" ]; then
+      mkdir -p "$I/sparse/0"; ln -sfn "$NTRAIN/images" "$I/images"
+      cp "$NTRAIN"/sparse/0/{cameras,images}.txt "$I/sparse/0/"; cp "$INIT_POINTS" "$I/sparse/0/points3D.txt"
+    fi
+    NTRAIN="$I"
   fi
   F="$P/$NAME"; CK="$(ls -t "$F"/run/*/ckpt_last.pt 2>/dev/null | head -1 || true)"
   if [ -z "$CK" ]; then
