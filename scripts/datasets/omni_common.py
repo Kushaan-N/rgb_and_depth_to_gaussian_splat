@@ -334,7 +334,8 @@ def write_openmvg(d, imgs, xyz, rgb):
 
 
 def prepare(out, model_dir, image_path, test_names, rigs, rect_scale=0.5, rect_size=None, native_ds=1,
-            native_max_deg=None, extra_points=None, ext=".png", workers=None, frames=None, native=True):
+            native_max_deg=None, extra_points=None, ext=".png", workers=None, frames=None, native=True, rect_name="rect",
+            gravity=False):
     """Write the rectified + native datasets of one omnidirectional/fisheye COLMAP model.
 
     image_path(name) -> source image file; test_names: set of COLMAP image names held out; rigs: {model: spec}
@@ -345,9 +346,13 @@ def prepare(out, model_dir, image_path, test_names, rigs, rect_scale=0.5, rect_s
                                                   also data_views/data_extrinsics.json + pcd.ply = ODGS's OpenMVG input)
       <out>/native/{train,test}/{images,sparse/0} training / held-out frames only (3DGRUT/3DGUT, eval_views.py)
       <out>/meta.json                             split, views, equirect convention, valid fractions
+    rect_name: write the pinhole sets to <out>/<rect_name>/ (rig variants; meta -> <out>/meta_<rect_name>.json);
+    gravity: (equirect) level every frame's rig: views are defined about the world up (mean camera up over all
+    frames) and the frame's own heading, so horizontal views have level horizons.
     """
     from multiprocessing import Pool
     cams, imgs, (xyz, rgb), (obs, pid) = read_model(model_dir, tracks=True)
+    all_c2w = [c2w for *_, c2w in imgs]
     if frames:
         imgs = [x for x in imgs if x[0] in set(frames)]
     conv = {}
@@ -359,6 +364,14 @@ def prepare(out, model_dir, image_path, test_names, rigs, rect_scale=0.5, rect_s
             "conventions": {str(k): v for k, v in conv.items()}, "views": {}, "rect_scale": rect_scale}
     jobs = {"train": [], "test": []}
     rimgs = {"train": [], "test": []}; rcams = {}; vid = {}
+    up = None
+    if gravity:
+        # world up: normal of the camera-centre plane (handheld/walking captures keep a near-constant height) when
+        # the trajectory is planar, oriented by the mean camera up (-y); else the mean camera up itself
+        u = np.mean([c[:3, :3] @ np.array([0, -1.0, 0]) for c in all_c2w], 0); u /= np.linalg.norm(u)
+        C = np.array([c[:3, 3] for c in all_c2w]); w, v = np.linalg.eigh(np.cov((C - C.mean(0)).T))
+        up = v[:, 0] * np.sign(v[:, 0] @ u) if len(C) > 10 and w[0] < 0.05 * w[1] else u
+        meta["gravity_up"], meta["gravity_up_vs_mean_cam_up_deg"] = up.tolist(), float(np.degrees(np.arccos(np.clip(up @ u, -1, 1))))
     for name, iid, cid, c2w in imgs:
         cam = cams[cid]; spec = rigs.get(cam[0], rigs.get("default"))
         views = rig_views(spec, src_pixel_density(cam), rect_scale, rect_size)
@@ -370,14 +383,19 @@ def prepare(out, model_dir, image_path, test_names, rigs, rect_scale=0.5, rect_s
                 vid[key] = len(vid) + 1; rcams[vid[key]] = ("PINHOLE", W, H, [K[0, 0], K[1, 1], K[0, 2], K[1, 2]])
                 meta["views"][f"{cid}:{vname}"] = {"W": W, "H": H, "f": float(K[0, 0]), "R_src_from_virt": R.tolist()}
             dst = f"{_flat(name)}_{vname}{ext}"
+            if up is not None:                                 # R_cam_from_level: level frame y = -up, z = heading
+                Rwc = c2w[:3, :3]; yl = -up; zf = Rwc[:, 2] - (Rwc[:, 2] @ yl) * yl
+                zf = zf / np.linalg.norm(zf) if np.linalg.norm(zf) > 1e-6 else np.cross(Rwc[:, 0], yl)
+                L = np.stack([np.cross(yl, zf), yl, zf], 1)       # world <- level
+                R = Rwc.T @ L @ R
             T = np.eye(4); T[:3, :3] = R
             rimgs[split].append((dst, len(rimgs[split]) + 1, vid[key], c2w @ T))
             vlist.append((vname, R, K, W, H, dst))
-        jobs[split].append((image_path(name), cam, vlist, conv.get(cid), None, os.path.join(out, "rect", split, "images"), ext))
+        jobs[split].append((image_path(name), cam, vlist, conv.get(cid), None, os.path.join(out, rect_name, split, "images"), ext))
     workers = workers or int(os.environ.get("SLURM_CPUS_PER_TASK", "4"))
     fracs = {}
     for split in ("train", "test"):
-        d = os.path.join(out, "rect", split)
+        d = os.path.join(out, rect_name, split)
         os.makedirs(os.path.join(d, "images"), exist_ok=True)
         pts = (xyz, rgb)
         if split == "train" and extra_points is not None and len(extra_points[0]):
@@ -433,5 +451,5 @@ def prepare(out, model_dir, image_path, test_names, rigs, rect_scale=0.5, rect_s
     if len(xyz):
         c = np.array([x[3][:3, 3] for x in imgs])[:: max(1, len(imgs) // 100)]; sub = xyz[:: max(1, len(xyz) // 5000)]
         meta["median_depth"] = float(np.median(np.median(np.linalg.norm(sub[None] - c[:, None], axis=2), axis=1)))
-    json.dump(meta, open(os.path.join(out, "meta.json"), "w"), indent=1)
+    json.dump(meta, open(os.path.join(out, "meta.json" if rect_name == "rect" else f"meta_{rect_name}.json"), "w"), indent=1)
     return meta
