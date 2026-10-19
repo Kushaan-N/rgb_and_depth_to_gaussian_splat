@@ -1,0 +1,27 @@
+# Oxford Spires — Radcliffe Observatory Quarter 01 (smallest site with the NVS benchmark split + TLS ground truth;
+# also one of the four reconstruction-benchmark sequences). Run with CEAR_DATA=$MC/data/spires CEAR_OUT=$MC/outputs.
+base: spires_base.yaml
+sequence:
+  name: 2024-03-13-observatory-quarter-01
+  site: observatory-quarter
+download:
+  files:
+    - calibration/cam0.yaml
+    - calibration/cam1.yaml
+    - calibration/cam2.yaml
+    - calibration/cam-lidar-imu.yaml
+    - calibration/README.md
+    - LICENSE.md
+    - novel_view_synthesis_benchmark/README.md
+    - novel_view_synthesis_benchmark/training_data/nvs_roq_01.zip            # images (train_/eval_ prefix) + COLMAP + json
+    - sequences/{seq}/processed/trajectory/gt-tum.txt                       # TLS-registered GT, base frame, ~20 Hz
+    - sequences/{seq}/processed/trajectory/vilens-slam-tum.txt
+    - sequences/{seq}/processed/trajectory/colmap-tum.txt
+    - sequences/{seq}/processed/vilens-slam/slam-poses.csv
+    - sequences/{seq}/processed/vilens-slam/undist-clouds.zip                # motion-undistorted LiDAR keyframes (base)
+    - sequences/{seq}/processed/colmap/evo_align_results.json
+    - reconstruction_benchmark/{seq}/input.zip                               # 1 Hz images + VILENS clouds + T_gt_lidar
+    - reconstruction_benchmark/{seq}/gt_cloud_merged.pcd                     # TLS cloud used by their benchmark
+    - reconstruction_benchmark/{seq}/gt_cloud.bt                             # TLS occupancy (filters unknown space)
+paths:
+  out_root: "${CEAR_OUT}/spires/{seq}/run_center"    # export_viewer.sbatch OUT (pipeline/ + exports/)
