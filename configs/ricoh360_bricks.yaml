@@ -1,0 +1,25 @@
+# Ricoh360 (EgoNeRF) scene `bricks`: 360 equirect 1920x960, 100 frames, SfM poses (arbitrary units), official
+# 50/50 split. Adapter: scripts/datasets/ricoh360.py; runs: sbatch/omni_rect.sbatch, sbatch/omni_native.sbatch.
+# Set CEAR_DATA / CEAR_OUT to the multicam workspace before use (see docs/DATASETS.md).
+sequence:
+  name: ricoh360_bricks
+  adapter: ricoh360             # scripts/datasets/ricoh360.py
+  camera: equirect              # native arm: ODGS (sbatch/omni_native.sbatch)
+  scene: bricks
+paths:
+  data_root: "${CEAR_DATA}/ricoh360"
+  out_root: "${CEAR_OUT}/{seq}"
+download:
+  drive_id: 1qytZCyonAwroz7r6hEJ9LDBDh0rr_xuh     # EgoNeRF Drive folder 1kqLAATjSSDwfLHI5O7RTfM9NOUi7PvcK
+  file: Ricoh360.zip
+  bytes: 2713936566
+rect:                       # virtual pinhole views per panorama (degrees; yaw right, pitch up)
+  scale: 1.0                # focal = scale x W / 2pi (source pixel density)
+  ext: .png
+  # 4 horizontal 100 deg views + up; no straight-down view: the camera operator fills it in every panorama
+  views:
+    - {yaw: 0, pitch: 0, fov: 100, name: h0}
+    - {yaw: 90, pitch: 0, fov: 100, name: h90}
+    - {yaw: 180, pitch: 0, fov: 100, name: h180}
+    - {yaw: 270, pitch: 0, fov: 100, name: h270}
+    - {yaw: 0, pitch: 90, fov: 90, name: up}
