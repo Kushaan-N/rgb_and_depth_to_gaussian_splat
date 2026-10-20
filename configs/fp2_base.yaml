@@ -42,6 +42,8 @@ select:
   max_frames: 1200
 undistort:
   alpha: 0.0                               # cv2.getOptimalNewCameraMatrix alpha: 0 = all-valid pinhole crop
+  center_pp: true                          # principal point at the image centre (viewer cameras are centred)
+  shared_K: true                           # one pinhole K for every rig camera
 split:
   test_every: 8                            # every 8th keyframe (both cameras) held out, like CEAR on-path
 poses:
