@@ -56,7 +56,7 @@ else
   echo "== 1. EDGS dense init on the training views"
   [ -f "$EDGS/edgs_init.json" ] || "$EPY" scripts/edgs_init.py --dataset "$TRAIN" --out "$EDGS" --test-split-interval 0 \
     > "$F/edgs_init.log" 2>&1 || { tail -40 "$F/edgs_init.log"; exit 1; }
-  tail -2 "$F/edgs_init.log"
+  tail -2 "$F/edgs_init.log" 2>/dev/null || echo "[omni] EDGS init reused: $EDGS"
 fi
 
 echo "== 2. viewer-matched training ($PROF kernels): $ARM_FLAGS"
