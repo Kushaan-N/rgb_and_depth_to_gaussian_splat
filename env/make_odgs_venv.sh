@@ -26,6 +26,12 @@ echo "[odgs] ODGS @ $(git -C "$ODGS_DIR" rev-parse --short HEAD)"
 UV="$(command -v uv || echo /modules/opt/linux-ubuntu24.04-x86_64/uv/uv)"
 # ODGS builds images with Image.fromarray(int8 array, "RGB"): Pillow >= 11.1 rejects that dtype -> pin 10.4
 [ -x "$ODGS_VENV/bin/python" ] && "$UV" pip install --python "$ODGS_VENV/bin/python" -q "pillow==10.4.0"
+# ODGS declares --random_background but its train.py never uses it: render on a random background when set
+# (the panoramas are fully covered, so with a fixed black background semi-transparent splats cost nothing in
+# training and show as see-through holes in SuperSplat). Idempotent.
+grep -q "random_background else background" "$ODGS_DIR/train.py" || sed -i \
+  's|render_pkg = render(viewpoint_cam, gaussians, pipe, background)|render_pkg = render(viewpoint_cam, gaussians, pipe, torch.rand(3, device="cuda") if opt.random_background else background)|' \
+  "$ODGS_DIR/train.py"
 if [ -x "$ODGS_VENV/bin/python" ] && "$ODGS_VENV/bin/python" -c "import odgs_gaussian_rasterization, simple_knn" 2>/dev/null; then
   echo "[odgs] venv ready: $ODGS_VENV"; exit 0
 fi
