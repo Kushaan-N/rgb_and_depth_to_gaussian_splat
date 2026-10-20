@@ -21,6 +21,8 @@ adapter:
   # scripts/datasets/spires.py
   root: "${CEAR_OUT}/spires/{seq}"     # dataset products (fisheye/, pinhole_*/, lidar.ply, tls.ply, benchmark/)
   rect_variant: center                 # which rect_* variant the export_viewer layout trains on
+  pose_source: gt                      # gt (gt-tum.txt, 20 Hz; TLS moved onto its datum, tls_align.json) | slam_tls
+                                       #   (VILENS keyframes . T_gt_lidar: the TLS datum itself; keyframe stamps only)
   max_pose_dt: 0.03                    # s: image must have a GT pose within this (cameras are 20 Hz hw-synced)
   lidar_voxel: 0.05                    # m: merged LiDAR cloud voxel size
   lidar_init_points: 600000            # points3D.txt init (LiDAR, random subset)
