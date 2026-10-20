@@ -11,6 +11,7 @@
 # the live SuperSplat on the rectified held-out views (sbatch/omni_score.sbatch, same views as sbatch/omni_rect.sbatch).
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o logs/omni-native-%j.out sbatch/omni_native.sbatch configs/<seq>.yaml
 # Env: ITERS (30000), APP (3DGUT app config, apps/colmap_3dgut.yaml), DSCALE (1.5:4), FT_ITERS (7000), SCORE (1),
+#      ODGS_ARGS / ODGS_TAG (equirect: extra ODGS train.py flags, e.g. --random_background, and the arm suffix),
 #      MAX_DEG (fisheye: loss-mask half-angle for this run, e.g. 80 = a 160 deg FOV cap; default = native.max_deg as
 #      prepared; writes its own masks into native/train_fov<deg> and names the arm native_3dgut_fov<deg>),
 #      INIT_POINTS (fisheye: a points3D.txt in the same frame to initialise 3DGUT from, e.g. the rect arm's EDGS
@@ -86,11 +87,11 @@ PY
   [ -f "$F/native.ply" ] || "$GPY" scripts/export_gaussian_ply.py --checkpoint "$CK" --out "$F/native.ply"
   ;;
 equirect)
-  NAME=native_odgs; F="$P/$NAME"
+  NAME="native_odgs${ODGS_TAG:+_$ODGS_TAG}"; F="$P/$NAME"
   bash env/make_odgs_venv.sh
   if [ ! -f "$F/point_cloud/iteration_$ITERS/point_cloud.ply" ]; then
     echo "== ODGS on the native equirect frames ($ITERS iters)"
-    ( cd "$ODGS_DIR" && "$OPY" train.py -s "$P/native/all" -m "$F" --eval -r 1 --iterations "$ITERS" ) > "$F.log" 2>&1 \
+    ( cd "$ODGS_DIR" && "$OPY" train.py -s "$P/native/all" -m "$F" --eval -r 1 --iterations "$ITERS" ${ODGS_ARGS:-} ) > "$F.log" 2>&1 \
       || { tail -40 "$F.log"; exit 1; }
   fi
   echo "== dataset-native benchmark: ODGS renders of the held-out panoramas (official test list)"
