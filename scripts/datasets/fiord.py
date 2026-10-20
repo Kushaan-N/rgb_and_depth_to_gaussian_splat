@@ -130,8 +130,8 @@ def align(cfg, args):
     the horizontal shift by FFT cross-correlation of 2D wall-occupancy maps (points between floor + 0.3 and floor + 2 m
     in scan units, --cell m grid); (3) point-to-point ICP alternated with Umeyama scale refits on the best few
     candidates. Source points: --src-points (e.g. the rect arm's dense EDGS init) else the SfM points.
-    Best = highest share of source points within 2 x --voxel of the scan (`fitness`; SfM/EDGS points are noisy: on
-    FIORD MeetingRoom a correct alignment of the SfM points has 16% within 5 cm, 24% within 10 cm, walls coincide).
+    Best = highest `fitness` = F-score at 2 x --voxel between the source points and the scan inside the transformed
+    camera box + --margin m (accuracy alone rewards shrinking the model onto one dense surface).
     -> <out>/pipeline/sim3_tls.json {s/scale, R, t, fitness, median_m}: x_tls = s R x_model + t;
        <out>/pipeline/tls_cloud.ply (scan at --voxel; the metric cloud for clean_haze.py --cloud)."""
     import open3d as o3d
@@ -153,6 +153,7 @@ def align(cfg, args):
     o3d.io.write_point_cloud(os.path.join(P, "tls_cloud.ply"), fine); F = np.asarray(fine.points); tree = cKDTree(F)
     rng = np.random.default_rng(0)
     src = xyz[rng.choice(len(xyz), min(len(xyz), 300000), replace=False)]
+    cams_m = np.array([c[:3, 3] for *_, c in imgs])
     up = np.mean([c[:3, :3] @ np.array([0, -1.0, 0]) for *_, c in imgs], 0)
     R0 = _rot_a_to_b(up, np.array([0, 0, 1.0])); L = src @ R0.T            # levelled model, z up
     fl_m, fl_s = np.percentile(L[:, 2], 2), np.percentile(F[:, 2], 2)
@@ -190,14 +191,21 @@ def align(cfg, args):
             if m.sum() < 100:
                 break
             s, R, t = umeyama(src[m], F[j[m]])
-        d = tree.query(s * src @ R.T + t)[0]; fit = float((d < 2 * vox).mean())
+        Y = s * src @ R.T + t; d = tree.query(Y)[0]; acc = float((d < 2 * vox).mean())
         if args.trim:                                   # score on the best-fitting share (glass, clutter)
-            fit = float(np.mean(np.sort(d)[: int(len(d) * args.trim)] < 2 * vox))
-        print(f"[fiord] align cand corr {score:.3f} scale {sc:.3f} yaw {np.degrees(yaw):.0f}: -> s {s:.4f}, within "
-              f"{vox}/{2 * vox} m {(d < vox).mean():.3f}/{fit:.3f}, median {np.median(d):.3f} m", flush=True)
+            acc = float(np.mean(np.sort(d)[: int(len(d) * args.trim)] < 2 * vox))
+        # completeness over the scan inside the transformed camera box + a METRIC margin: a shrunken model can sit on
+        # one dense surface with high accuracy, but then covers little of the room (FIORD: s 0.20 had acc 0.45)
+        Cm = s * cams_m @ R.T + t; lo_b, hi_b = Cm.min(0) - args.margin, Cm.max(0) + args.margin
+        Fb = F[np.all((F >= lo_b) & (F <= hi_b), 1)]; Fb = Fb[rng.choice(len(Fb), min(len(Fb), 200000), replace=False)]
+        comp = float((cKDTree(Y).query(Fb)[0] < 2 * vox).mean()) if len(Fb) else 0.0
+        fit = 2 * acc * comp / max(acc + comp, 1e-9)
+        print(f"[fiord] align cand corr {score:.3f} scale {sc:.3f} yaw {np.degrees(yaw):.0f}: -> s {s:.4f}, acc/comp/F "
+              f"@{2 * vox} m {acc:.3f}/{comp:.3f}/{fit:.3f}, median {np.median(d):.3f} m", flush=True)
         if best is None or fit > best["fitness"]:
             best = {"s": float(s), "scale": float(s), "R": R.tolist(), "t": t.tolist(), "fitness": fit,
-                    "fitness_def": f"share of source points within {2 * vox} m of the scan",
+                    "fitness_def": f"F-score @{2 * vox} m: source->scan accuracy x completeness of the scan within "
+                                   f"the camera box + {args.margin} m", "accuracy": acc, "completeness": comp,
                     "within_voxel": float((d < vox).mean()), "median_m": float(np.median(d)), "src": args.src_points or "sfm"}
     json.dump(best, open(os.path.join(P, "sim3_tls.json"), "w"), indent=1); print(json.dumps(best))
 
