@@ -18,7 +18,7 @@ Writes under adapter.root (default $CEAR_OUT/spires/<seq>):
                                       images/cam<k>_<stamp>.jpg (symlinks), points3D.txt = coloured LiDAR init
   pinhole_<variant>/{train,test_in,test_out}/   rectified virtual pinhole views (scripts/rectify_views.py; variant
                                       from adapter.rect_variant: rect_center = one view per image, rect_cube = several)
-  benchmark/{test_in,test_out}/       their own undistorted 1000x5xx eval images + their COLMAP poses, Sim3-aligned
+  benchmark/{test_in,test_out}_cam<k>/  their own undistorted 1000x5xx eval images + their COLMAP poses, Sim3-aligned
                                       to our world on all frames (the published protocol's images, exactly)
   lidar.ply (VILENS motion-undistorted keyframe clouds placed with the GT poses, cropped, voxelised),
   tls.ply (TLS ground truth, cropped to the cameras' bbox + margin, voxelised), world.json, adapter_report.json
@@ -27,7 +27,7 @@ Writes under adapter.root (default $CEAR_OUT/spires/<seq>):
 and the export_viewer.sbatch layout at paths.out_root: pipeline/onpath/{data_orig,test} -> pinhole train/test_in,
 pipeline/sim3.json (identity: the datasets are metric), pipeline/depth_cloud.ply -> lidar.ply.
 
-    python scripts/datasets/spires.py configs/spires_roq01.yaml [--stages fisheye,lidar,tls,rect,bench,layout]
+    python scripts/datasets/spires.py configs/spires_roq01.yaml [--stages fisheye,lidar,tls,rect,bench,layout[,fdepth]]
 """
 from __future__ import annotations
 import argparse, glob, json, os, re, sys, time
@@ -107,7 +107,7 @@ def write_ply(path, P, rgb=None):
 def interp_pose(g, t, max_dt):
     """gt-tum rows (t x y z qx qy qz qw) -> 4x4 at time t (lerp + slerp), None if no sample within max_dt."""
     from scipy.spatial.transform import Rotation, Slerp
-    j = np.searchsorted(g[:, 0], t)
+    j = max(int(np.searchsorted(g[:, 0], t)), 1) if len(g) > 1 and abs(g[0, 0] - t) < 1e-6 else int(np.searchsorted(g[:, 0], t))
     if j <= 0 or j >= len(g) or min(abs(g[j, 0] - t), abs(g[j - 1, 0] - t)) > max_dt:
         return None
     a, b = g[j - 1], g[j]; w = (t - a[0]) / max(b[0] - a[0], 1e-9)
@@ -190,7 +190,26 @@ class Spires:
             if f["split"] == "eval":
                 f["set"] = "test_out"
         self.frames = frames
-        g = np.loadtxt(os.path.join(self.raw, "sequences", self.seq, "processed", "trajectory", "gt-tum.txt"))
+        self.pose_source = self.ad.get("pose_source", "gt")
+        self.slam_tls = None
+        if self.pose_source == "gt":
+            g = np.loadtxt(os.path.join(self.raw, "sequences", self.seq, "processed", "trajectory", "gt-tum.txt"))
+        if self.pose_source == "slam_tls" or os.path.isdir(os.path.join(self.raw, "reconstruction_benchmark", self.seq, "input")):
+            # VILENS pose-graph keyframes (the NVS images ARE these keyframes) mapped into the TLS frame by the
+            # benchmark's global T_gt_lidar: measured on ROQ-01, the keyframe clouds placed this way sit 2.5 cm (median)
+            # from the TLS, vs 10-16 cm with gt-tum.txt (its xy wanders +-15 cm and z is offset 0.15 m vs the clouds)
+            I = os.path.join(self.raw, "reconstruction_benchmark", self.seq, "input")
+            T_gl = np.loadtxt(os.path.join(I, "T_gt_lidar.txt")); sp = np.loadtxt(os.path.join(I, "vilens_slam", "slam_poses.csv"), delimiter=",")
+            from scipy.spatial.transform import Rotation
+            rows = []
+            for r in sp:
+                T = T_gl @ T_from_txyz_qxyzw(r[3:10])
+                rows.append([r[1] + r[2] * 1e-9, *T[:3, 3], *Rotation.from_matrix(T[:3, :3]).as_quat()])
+            self.slam_tls = np.array(rows); self.slam_tls = self.slam_tls[np.argsort(self.slam_tls[:, 0])]
+            if self.pose_source == "slam_tls":
+                g = self.slam_tls
+        if self.pose_source not in ("gt", "slam_tls"):
+            raise SystemExit(f"adapter.pose_source {self.pose_source}: gt | slam_tls")
         self.gt = g[np.argsort(g[:, 0])]
 
     def T_tls_cam(self, f):
@@ -339,13 +358,65 @@ class Spires:
         self.report["init_points"] = {"n": int(len(X)), "coloured_fraction": float((cnt > 0).mean())}
         print(f"[spires] init points: {len(X)} ({100 * (cnt > 0).mean():.0f}% coloured)", flush=True)
 
+    # --- stage: LiDAR depth targets for the fisheye training frames -----------
+    def stage_fdepth(self):
+        """<stem>_depth.npy (float16 ray distance, 0 = none) next to every fisheye TRAINING image, for 3DGUT's LiDAR depth
+        loss ($CEAR_WS/3dgrut-depth, loss.use_depth; pred_dist is a ray distance for any camera model): lidar.ply
+        z-buffered through the real fisheye model at 1/2 resolution, background leaking through a sparse foreground
+        dropped (value > 1.05 x the 5x5 minimum), up-sampled nearest. build_depth_targets.py is pinhole-only."""
+        import cv2
+        from rectify_views import read_cameras, read_images
+        from spires_geom import read_ply_xyz_opacity
+        X = read_ply_xyz_opacity(os.path.join(self.root, "lidar.ply"))[0]; rmax = float(self.ad.get("depth_max_range", 40.0))
+        d = os.path.join(self.root, "fisheye", "train"); sp = os.path.join(d, "sparse", "0")
+        cams = read_cameras(os.path.join(sp, "cameras.txt")); cover = []
+        for _, q, t, cid, name in read_images(os.path.join(sp, "images.txt")):
+            cam = cams[cid]; Pc = X @ qvec2rot(q).T + t; r = np.linalg.norm(Pc, axis=1); m = (r > 0.3) & (r < rmax)
+            uv, ok = cam.project(Pc[m]); r = r[m][ok]; uv = uv[ok]
+            W2, H2 = cam.width // 2, cam.height // 2
+            u = np.clip(((uv[:, 0] + 0.5) / 2).astype(int), 0, W2 - 1); v = np.clip(((uv[:, 1] + 0.5) / 2).astype(int), 0, H2 - 1)
+            zb = np.full((H2, W2), np.inf, np.float32); np.minimum.at(zb, (v, u), r.astype(np.float32))
+            mn = cv2.erode(np.where(np.isfinite(zb), zb, 1e9).astype(np.float32), np.ones((5, 5), np.uint8))
+            zb[~np.isfinite(zb) | (zb > 1.05 * mn)] = 0
+            D = cv2.resize(zb, (cam.width, cam.height), interpolation=cv2.INTER_NEAREST)
+            np.save(os.path.join(d, "images", os.path.splitext(name)[0] + "_depth.npy"), D.astype(np.float16))
+            cover.append((D > 0).mean())
+        self.report["fisheye_depth_targets"] = {"frames": len(cover), "coverage_median": float(np.median(cover))}
+        print(f"[spires] fisheye LiDAR depth targets: {len(cover)} frames, median coverage {np.median(cover):.2f}", flush=True)
+
     # --- stage: TLS ----------------------------------------------------------
+    def tls_align(self):
+        """Rigid x_world = R (x_tls - offset) + t. With pose_source gt, the gt-tum.txt datum is not the TLS datum: on
+        ROQ-01 the GT trajectory sits ~0.19 m (-0.04, 0.14, -0.13; std 3 cm) from the TLS-consistent SLAM keyframes
+        (T_gt_lidar . slam pose; their clouds lie 2.5 cm from the TLS vs 13 cm with GT poses). The TLS is therefore
+        moved INTO the dataset world (rigid fit of the two trajectories at the keyframes) so that geometry scores
+        measure the splat, not the datum; identity for slam_tls. -> tls_align.json."""
+        p = os.path.join(self.root, "tls_align.json")
+        if os.path.exists(p):
+            d = json.load(open(p)); return np.array(d["R"]), np.array(d["t"])
+        R, t, info = np.eye(3), np.zeros(3), {"pose_source": self.pose_source}
+        if self.pose_source != "slam_tls" and self.slam_tls is not None:
+            A, Bp = [], []
+            for r in self.slam_tls:
+                Tg = interp_pose(self.gt, r[0], 0.06)
+                if Tg is not None:
+                    A.append(r[1:4]); Bp.append(Tg[:3, 3])
+            A, Bp = np.array(A), np.array(Bp); off = self.world()
+            _, R, t = umeyama(A - off, Bp - off, scale=False)
+            res = np.linalg.norm((A - off) @ R.T + t - (Bp - off), axis=1)
+            info.update(n=len(A), shift_m=float(np.linalg.norm(((A - off) @ R.T + t - (A - off)).mean(0))),
+                        rot_deg=rot_deg(R), residual_median_m=float(np.median(res)), residual_p95_m=float(np.percentile(res, 95)))
+        json.dump({"R": R.tolist(), "t": t.tolist(), **info}, open(p, "w"), indent=1)
+        self.report["tls_align"] = info
+        print(f"[spires] TLS -> world alignment: {info}", flush=True)
+        return R, t
+
     def stage_tls(self):
-        off = self.world(); lo, hi = self._bbox(float(self.ad.get("crop_margin", 15.0)))
+        off = self.world(); lo, hi = self._bbox(float(self.ad.get("crop_margin", 15.0))); Ra, ta = self.tls_align()
         fp = os.path.join(self.raw, "reconstruction_benchmark", self.seq, "gt_cloud_merged.pcd")
         m = read_pcd(fp); n = len(m); keep = []; ch = 10_000_000
         for i in range(0, n, ch):
-            b = m[i:i + ch]; P = np.stack([b["x"], b["y"], b["z"]], 1).astype(np.float64) - off
+            b = m[i:i + ch]; P = (np.stack([b["x"], b["y"], b["z"]], 1).astype(np.float64) - off) @ Ra.T + ta
             keep.append(P[np.all((P >= lo) & (P <= hi), axis=1)])
         P = np.concatenate(keep); vox = float(self.ad.get("gt_voxel", 0.02)); n_crop = len(P)
         P = voxel_down(P, vox)
@@ -387,24 +458,29 @@ class Spires:
 
     # --- stage: their benchmark images ---------------------------------------
     def stage_bench(self):
-        """Their undistorted eval images at their COLMAP poses mapped into our world (Sim3 from _pose_check)."""
+        """Their undistorted eval images at their COLMAP poses mapped into our world (Sim3 from _pose_check); one dir
+        per camera (benchmark/<set>_<cam>/: their per-camera undistorted sizes differ, the viewer renders one size)."""
         import shutil
         S = json.load(open(os.path.join(self.root, "sim3_theirs_to_world.json")))
         s, R, t = S["scale"], np.array(S["R"]), np.array(S["t"])
         for st in ("test_in", "test_out"):
-            fs = sorted([f for f in self.frames if f["set"] == st], key=lambda f: f["name"])
-            out = os.path.join(self.root, "benchmark", st); os.makedirs(os.path.join(out, "images"), exist_ok=True)
-            cams, imgs = {}, []
-            for f in fs:
-                fr = f["nvs"]; k = (int(fr["w"]), int(fr["h"]), fr["fl_x"], fr["fl_y"], fr["cx"], fr["cy"])
-                cid = next((c for c, kk in cams.items() if kk == k), len(cams) + 1); cams[cid] = k
-                M = np.array(fr["transform_matrix"], float); Rwc = R @ M[:3, :3] @ np.diag([1, -1, -1]); C = s * R @ M[:3, 3] + t
-                Rcw = Rwc.T; imgs.append((len(imgs) + 1, rot2qvec(Rcw), -Rcw @ C, cid, f["name"]))
-                dst = os.path.join(out, "images", f["name"])
-                if not os.path.exists(dst):
-                    shutil.copyfile(os.path.join(self.nvs, fr["file_path"]), dst)
-            write_model(os.path.join(out, "sparse", "0"), cams, imgs, None)
-            self.report.setdefault("benchmark", {})[st] = len(imgs)
+            for cam in self.cams:
+                fs = sorted([f for f in self.frames if f["set"] == st and f["cam"] == cam], key=lambda f: f["name"])
+                if not fs:
+                    continue
+                out = os.path.join(self.root, "benchmark", f"{st}_{cam}"); os.makedirs(os.path.join(out, "images"), exist_ok=True)
+                cams, imgs = {}, []
+                for f in fs:
+                    fr = f["nvs"]; k = (int(fr["w"]), int(fr["h"]), fr["fl_x"], fr["fl_y"], fr["cx"], fr["cy"])
+                    cid = next((c for c, kk in cams.items() if kk == k), len(cams) + 1); cams[cid] = k
+                    M = np.array(fr["transform_matrix"], float); Rwc = R @ M[:3, :3] @ np.diag([1, -1, -1])
+                    C = s * R @ M[:3, 3] + t; Rcw = Rwc.T
+                    imgs.append((len(imgs) + 1, rot2qvec(Rcw), -Rcw @ C, cid, f["name"]))
+                    dst = os.path.join(out, "images", f["name"])
+                    if not os.path.exists(dst):
+                        shutil.copyfile(os.path.join(self.nvs, fr["file_path"]), dst)
+                write_model(os.path.join(out, "sparse", "0"), cams, imgs, None)
+                self.report.setdefault("benchmark", {})[f"{st}_{cam}"] = len(imgs)
         print(f"[spires] benchmark sets: {self.report['benchmark']}", flush=True)
 
     # --- stage: export_viewer layout -----------------------------------------
@@ -429,7 +505,7 @@ class Spires:
         print(f"[spires] export_viewer layout at {P}", flush=True)
 
 
-STAGES = ("fisheye", "lidar", "tls", "rect", "bench", "layout")
+STAGES = ("fisheye", "lidar", "tls", "rect", "bench", "layout")   # + fdepth (opt-in: fisheye LiDAR depth targets)
 
 
 def main():
