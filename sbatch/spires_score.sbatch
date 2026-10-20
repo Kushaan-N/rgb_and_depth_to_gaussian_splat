@@ -2,10 +2,11 @@
 # Score exported splats (standard 3DGS PLY, adapter world frame) the CEAR way on an adapter-built rig dataset:
 #   1. LIVE SuperSplat (scripts/viewer_shots.py --engine current, black + grey) at the held-out rectified-pinhole
 #      frames (pinhole_center/test_in = in-sequence, test_out = out-of-sequence) -> eval_views.py --pred-dir
-#   2. the dataset's own benchmark images (benchmark/test_{in,out}: their undistorted frames at their poses)
+#   2. the dataset's own benchmark images (benchmark/test_{in,out}_cam<k>: their undistorted frames at their poses;
+#      frame-weighted mean over cameras -> bench_test_{in,out}.json)
 #   3. off-path views (--move, every EVERY_OFF-th test_out frame) + the SuperSplat editor's default view
-#   4. geometry vs TLS: rendered depth at the test_out cameras (render_ply_depth.py vs build_depth_targets.py on
-#      tls.ply) and splat-centre precision / recall / F at 5 / 10 cm (scripts/datasets/spires_geom.py)
+#   4. geometry vs TLS: surface depth at the test_out cameras (datasets/spires_render_depth.py vs build_depth_targets.py on
+#      tls.ply) and rendered-surface (training-view depth back-projected) + splat-centre precision / recall / F at 5 / 10 cm (scripts/datasets/spires_geom.py)
 #   CEAR_DATA=$MC/data/spires CEAR_OUT=$MC/outputs PLYS="center=/path/a.ply fish=/path/b.ply" \
 #     sbatch -A $CEAR_SLURM_ACCOUNT -o logs/%x-%j.out sbatch/spires_score.sbatch configs/spires_roq01.yaml
 # Env: PLYS (name=ply ...), MOVE ("0 -0.3 1.0"), EVERY_OFF (10), SKIP ("" | e.g. "bench geom")
@@ -53,19 +54,28 @@ for spec in ${PLYS:?set PLYS="name=ply ..."}; do
       done
       cp "$O/live_${s}_black.json" "$O/live_$s.json"; }
     if [[ "$SKIP" != *" bench "* ]] && [ ! -f "$O/bench_$s.json" ]; then
-      "$VPY" scripts/viewer_shots.py --engine current --bg black --ply "$ply" --dataset "$B/$s" --out-dir "$O/bench_$s" \
-        > "$O/bench_$s.log" 2>&1 || { tail -20 "$O/bench_$s.log"; exit 1; }
-      "$GPY" scripts/eval_views.py --pred-dir "$O/bench_$s" --dataset "$B/$s" --tag "${n}_bench_$s" --json-out "$O/bench_$s.json" | tail -1
+      for bd in "$B/${s}"_cam*; do                          # one dir per camera (their undistorted sizes differ)
+        c="$(basename "$bd")"
+        "$VPY" scripts/viewer_shots.py --engine current --bg black --ply "$ply" --dataset "$bd" --out-dir "$O/bench_$c" \
+          > "$O/bench_$c.log" 2>&1 || { tail -20 "$O/bench_$c.log"; exit 1; }
+        "$GPY" scripts/eval_views.py --pred-dir "$O/bench_$c" --dataset "$bd" --tag "${n}_bench_$c" --json-out "$O/bench_$c.json" | tail -1
+      done
+      "$CPUPY" -c "import json,sys,glob; r=[json.load(open(f)) for f in sorted(glob.glob(sys.argv[1]))]; n=sum(x['n'] for x in r)
+json.dump({'n': n, **{k: round(sum(x[k]*x['n'] for x in r)/n, 4) for k in ('psnr','ssim','lpips')}, 'per_camera': r}, open(sys.argv[2],'w'), indent=1)" \
+        "$O/bench_${s}_cam*.json" "$O/bench_$s.json"
     fi
   done
   [ -d "$O/offpath" ] || "$VPY" scripts/viewer_shots.py --engine current --bg grey --ply "$ply" --dataset "$PC/test_out" \
     --every "$EVERY_OFF" --move $MOVE --out-dir "$O/offpath" > "$O/offpath.log" 2>&1 || tail -5 "$O/offpath.log"
   if [[ "$SKIP" != *" geom "* ]]; then
-    [ -d "$O/depth_test_out" ] || "$SPY" scripts/render_ply_depth.py --ply "$ply" --dataset "$PC/test_out" --out-dir "$O/depth_test_out"
-    [ -f "$O/geom_depth.json" ] || "$CPUPY" scripts/datasets/spires_geom.py depth --pred-dir "$O/depth_test_out" \
+    # surface depth without the >1 m sky gaussians (scripts/datasets/spires_render_depth.py explains why)
+    [ -d "$O/sdepth_test_out" ] || "$SPY" scripts/datasets/spires_render_depth.py --ply "$ply" --dataset "$PC/test_out" --out-dir "$O/sdepth_test_out"
+    [ -f "$O/geom_depth.json" ] || "$CPUPY" scripts/datasets/spires_geom.py depth --pred-dir "$O/sdepth_test_out" \
       --dataset "$PC/test_out" --json-out "$O/geom_depth.json"
+    [ -d "$O/sdepth_train" ] || "$SPY" scripts/datasets/spires_render_depth.py --ply "$ply" --dataset "$PC/train" --out-dir "$O/sdepth_train"
     [ -f "$O/geom_points.json" ] || "$CPUPY" scripts/datasets/spires_geom.py points --ply "$ply" --tls "$ROOT/tls.ply" \
-      --cams "$ROOT/fisheye/train" --ref-cloud "$ROOT/lidar.ply" --json-out "$O/geom_points.json"
+      --depth-dir "$O/sdepth_train" --depth-dataset "$PC/train" --cams "$ROOT/fisheye/train" --ref-cloud "$ROOT/lidar.ply" \
+      --json-out "$O/geom_points.json"
   fi
 done
 
