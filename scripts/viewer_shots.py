@@ -187,10 +187,17 @@ def main():
         keep = {i[0] for i in read_text_model(os.path.join(args.names_from, "sparse", "0"))[1]}
         imgs = [i for i in imgs if i[0] in keep]
     imgs = imgs[args.offset::args.every]
-    W, H, (fx0, fy0, cx0, cy0) = cams[imgs[0][1]]
-    # the engine's projection is centred: render a canvas centred on the principal point, then crop W x H
-    CW = int(np.ceil(2 * max(cx0, W - cx0))); CH = int(np.ceil(2 * max(cy0, H - cy0)))
-    x0 = int(round(CW / 2 - cx0)); y0 = int(round(CH / 2 - cy0))
+    # the engine's projection is centred: render a canvas centred on the principal point, then crop W x H.
+    # Per camera, so rigs whose cameras have different sizes / principal points are cropped correctly
+    # (--engine current renders each shot at its own canvas size; pc274's page has one fixed viewport).
+    def canvas(cid):
+        W, H, (_, _, cx, cy) = cams[cid]
+        CW = int(np.ceil(2 * max(cx, W - cx))); CH = int(np.ceil(2 * max(cy, H - cy)))
+        return W, H, CW, CH, int(round(CW / 2 - cx)), int(round(CH / 2 - cy))
+    geo = {cid: canvas(cid) for cid in {i[1] for i in imgs}}
+    W, H, CW, CH, x0, y0 = geo[imgs[0][1]]
+    if args.engine == "pc274" and len(set(geo.values())) > 1:
+        raise SystemExit("[viewer] pc274 engine: cameras differ in size/principal point; use --engine current")
     root = tempfile.mkdtemp(prefix="viewer_")
     os.symlink(os.path.abspath(args.ply), os.path.join(root, "scene.ply"))
     open(os.path.join(root, "index.html"), "w").write(PAGE % {"W": CW * K, "H": CH * K, "PC": PC_URL})
@@ -200,9 +207,10 @@ def main():
         os.makedirs(d, exist_ok=True)
     adir = os.path.join(args.out_dir, "_alpha")
 
-    def finish(arr):  # K x canvas (h, w, c) -> crop -> area-downsample -> W x H
-        a = arr[y0 * K:(y0 + H) * K, x0 * K:(x0 + W) * K].astype(np.float64)
-        return a.reshape(H, K, W, K, -1).mean((1, 3)) if K > 1 else a
+    def finish(arr, g=None):  # K x canvas (h, w, c) -> crop -> area-downsample -> W x H
+        W_, H_, _, _, x0_, y0_ = g or (W, H, CW, CH, x0, y0)
+        a = arr[y0_ * K:(y0_ + H_) * K, x0_ * K:(x0_ + W_) * K].astype(np.float64)
+        return a.reshape(H_, K, W_, K, -1).mean((1, 3)) if K > 1 else a
 
     holes, meta = [], {}
     with sync_playwright() as pw:
@@ -257,9 +265,10 @@ def main():
                 Cw = M[:3, :3] @ C + M[:3, 3]; Rw = RM @ Rpc               # into the editor's world (its import rotation)
                 qq = Rotation.from_matrix(Rw).as_quat()
                 # SuperSplat's camera: horizontal fov when the target is wider than tall (camera.ts horizontalFov)
-                fov = float(np.degrees(2 * np.arctan(CW / (2 * fx)) if CW > CH else 2 * np.arctan(CH / (2 * fy))))
-                b64 = frame.evaluate(SS_SHOT, [Cw.tolist(), qq.tolist(), fov, CW * K, CH * K])
-                rgba = finish(np.frombuffer(base64.b64decode(b64), np.uint8).reshape(CH * K, CW * K, 4))
+                g = geo[cid]; cw, ch = g[2], g[3]
+                fov = float(np.degrees(2 * np.arctan(cw / (2 * fx)) if cw > ch else 2 * np.arctan(ch / (2 * fy))))
+                b64 = frame.evaluate(SS_SHOT, [Cw.tolist(), qq.tolist(), fov, cw * K, ch * K])
+                rgba = finish(np.frombuffer(base64.b64decode(b64), np.uint8).reshape(ch * K, cw * K, 4), g)
                 a = rgba[..., 3:] / 255.0
                 outs = {n: rgba[..., :3] + (1.0 - a) * 255.0 * np.asarray(c) for n, c in bgs}   # premultiplied over bg
                 holes.append(float((a[..., 0] < HOLE_ALPHA).mean())); os.makedirs(adir, exist_ok=True)
