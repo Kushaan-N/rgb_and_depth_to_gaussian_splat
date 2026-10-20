@@ -10,7 +10,9 @@ calibration yaml (K + plumb_bob distortion + extrinsic to the reference camera),
             from the per-point ns offset and the end-of-scan stamp), range-gated.
   prepare   keyframes: one rig frame per 1/select.fps s slot, the one whose WORST camera is sharpest (legged gait /
             handheld motion blur); cameras paired by nearest stamp (|dt| < 5 ms). Undistorted to pinhole per camera
-            (cv2.getOptimalNewCameraMatrix, undistort.alpha) -> <P>/colmap/images/<cam>/<ts>.png + cameras.json.
+            to one shared, CENTRED pinhole K (undistort.center_pp/shared_K: SuperSplat and viewer_shots.py render a
+            centred principal point; an off-centre one shifts the render, -7 dB on the 2nd camera in the first run)
+            -> <P>/colmap/images/<cam>/<ts>.png + cameras.json.
   sfm       rig-constrained COLMAP (pycolmap 4.x): calibrated pinhole cameras, the calibrated camera-to-camera extrinsics
             as a fixed rig (rig.refine to let BA refine them), pairs = sequential (poses.overlap keyframes) UNION
             spatial (keyframes whose GT positions are within poses.spatial_m — loop closures); then a similarity to the
@@ -18,6 +20,7 @@ calibration yaml (K + plumb_bob distortion + extrinsic to the reference camera),
             all solved), so the reconstruction is METRIC in the GT frame (sim3.json = identity). GT that is position
             only (room sequences: Leica MS60 prism) fixes scale/gauge; orientation comes from SfM. Writes
             <P>/dataset (sparse/0 text, images/ symlinks named <cam>_<ts>.png) + <P>/sfm_align.json.
+  dataset   rewrite <P>/dataset from the metric model with the current cameras.json K (after re-running prepare).
   lidar     static LiDAR cloud in the same metric frame: each scan placed by the rig pose interpolated at every
             point's own time (deskew) composed with the LiDAR->camera extrinsic (direction measured: the one whose
             cloud the SfM points lie on), refined per scan by point-to-plane ICP against the first-pass map, then
@@ -262,12 +265,23 @@ def cmd_prepare(cx, args):
           f"{100 * np.mean(rel[sel] > np.quantile(rel, 0.1)):.0f}%", flush=True)
     alpha = float(cx.get("undistort.alpha", 0.0)); camj = {}
     img_root = os.path.join(cx.P, "colmap", "images")
+    # Target pinhole: principal point at the image CENTRE (a viewer camera - SuperSplat, viewer_shots.py - is centred;
+    # an off-centre principal point renders shifted) and, with undistort.shared_K, ONE focal for every rig camera
+    # (the largest all-valid one, so no camera shows invalid border pixels).
+    centre = bool(cx.get("undistort.center_pp", True)); Kt = {}
     for c in cx.cams:
         K, D, W, H, model = cx.intr(c)
         if model not in ("plumb_bob", "radtan", "radial-tangential"):
             raise SystemExit(f"[fp2] {c}: distortion model {model} needs the fisheye path (scripts/rectify_views.py)")
-        Kn, _ = cv2.getOptimalNewCameraMatrix(K, D, (W, H), alpha, (W, H))
-        Kn[0, 0] = Kn[1, 1] = 0.5 * (Kn[0, 0] + Kn[1, 1])          # square pixels
+        Kn, _ = cv2.getOptimalNewCameraMatrix(K, D, (W, H), alpha, (W, H), centerPrincipalPoint=centre)
+        Kn[0, 0] = Kn[1, 1] = max(Kn[0, 0], Kn[1, 1])                 # square pixels (the tighter crop)
+        Kt[c] = Kn
+    if bool(cx.get("undistort.shared_K", True)):
+        f = max(k[0, 0] for k in Kt.values())
+        for k in Kt.values():
+            k[0, 0] = k[1, 1] = f
+    for c in cx.cams:
+        K, D, W, H, model = cx.intr(c); Kn = Kt[c]
         m1, m2 = cv2.initUndistortRectifyMap(K, D, None, Kn, (W, H), cv2.CV_32FC1)
         camj[c] = {"K": Kn.tolist(), "W": W, "H": H, "K_raw": K.tolist(), "D": D.tolist(),
                    "T_cam_ref": cx.T_cam_ref(c).tolist()}
@@ -404,6 +418,17 @@ def cmd_sfm(cx, args):
               open(os.path.join(cx.P, "sfm_align.json"), "w"), indent=1)
     json.dump({"scale": 1.0, "R": np.eye(3).tolist(), "t": [0.0, 0.0, 0.0],
                "note": "FP2 datasets are written in the metric GT frame"}, open(os.path.join(cx.P, "sim3.json"), "w"), indent=1)
+
+
+def cmd_dataset(cx, args):
+    """Rewrite <P>/dataset from the metric SfM model with the CURRENT cameras.json intrinsics (after a re-undistortion
+    with a different target K: poses are unchanged, the images are the same rays)."""
+    import pycolmap
+    camj = json.load(open(os.path.join(cx.P, "cameras.json"))); kfs = camj["keyframes"]
+    names = {c: [f"{c}/{k['ref_ns']}.png" for k in kfs] for c in cx.cams}
+    out_ds = os.path.join(cx.P, "dataset"); shutil.rmtree(out_ds, ignore_errors=True)
+    write_dataset(cx, pycolmap.Reconstruction(os.path.join(cx.P, "colmap", "metric")), names, kfs, camj["cameras"], out_ds,
+                  os.path.join(cx.P, "colmap", "images"))
 
 
 def write_dataset(cx, rec, names, kfs, cams, out_ds, img_root):
@@ -627,7 +652,7 @@ def write_lidar_points3d(cx, pts, color_ds, out, max_points=None):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["extract", "prepare", "sfm", "lidar", "split", "all"])
+    ap.add_argument("cmd", choices=["extract", "prepare", "sfm", "dataset", "lidar", "split", "all"])
     ap.add_argument("config"); ap.add_argument("--force", action="store_true")
     ap.add_argument("--depth", action="store_true", help="split: also write LiDAR <stem>_depth.npy targets")
     args = ap.parse_args(); cx = Ctx(args.config)
