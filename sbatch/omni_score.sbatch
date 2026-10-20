@@ -8,7 +8,9 @@
 # splat centres are also scored against the scan. Summary (all candidates scored so far, so rect and native runs land
 # in one table) -> <out>/pipeline/supersplat/report/summary.json + on-path / off-path / editor montages.
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o <log> sbatch/omni_score.sbatch configs/<seq>.yaml name=/path/a.ply [name2=b.ply]
-# (also run inline by sbatch/omni_rect.sbatch and sbatch/omni_native.sbatch). Env: MOVE, EVERY_OFF (offpath stride, 7)
+# (also run inline by sbatch/omni_rect.sbatch and sbatch/omni_native.sbatch). Env: MOVE, EVERY_OFF (offpath stride, 7),
+# TEST_SET (score on <out>/pipeline/<TEST_SET>/test instead of rect/test, e.g. a levelled rig rect_grav; results ->
+# <out>/pipeline/supersplat_<TEST_SET>/)
 #SBATCH -J omni-score
 #SBATCH -p gpu
 #SBATCH --gres=gpu:a100:1
@@ -26,7 +28,8 @@ source env/cear_env.sh >/dev/null
 CPUPY="$CEAR_VENV/bin/python"; GPY="$THREEDGRUT_DIR/.venv/bin/python"; VPY="${VIEWER_VENV:-$CEAR_WS/venv-viewer}/bin/python"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$CEAR_WS/playwright-browsers}"
 get() { "$CPUPY" scripts/cfg_get.py "$CFG" "$@"; }
-OUT="$(get paths.out_root)"; P="$OUT/pipeline"; TEST="$P/rect/test"; S="$P/supersplat"; REP="$S/report"
+OUT="$(get paths.out_root)"; P="$OUT/pipeline"; TS="${TEST_SET:-rect}"; TEST="$P/$TS/test"
+S="$P/supersplat${TEST_SET:+_$TEST_SET}"; REP="$S/report"
 ADAPTER="$(get sequence.adapter)"
 [ -f "$TEST/sparse/0/images.txt" ] || { echo "missing $TEST (run the adapter's prepare)"; exit 1; }
 MD="$("$CPUPY" -c "import json,sys; print(json.load(open(sys.argv[1])).get('median_depth', 3.0))" "$P/meta.json")"
