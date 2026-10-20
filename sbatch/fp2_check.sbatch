@@ -6,7 +6,7 @@
 # SuperSplat editor default view, as montages to LOOK at; (3) geometry: splat gaussian centres (opacity > 0.5) vs the
 # static LiDAR cloud (no GT laser map exists for the room sequences).
 #   PLYS="a=<x.ply> b=<y.ply>" sbatch -A $CEAR_SLURM_ACCOUNT -o logs/%x-%j.out sbatch/fp2_check.sbatch configs/fp2_<seq>.yaml
-# Env: PLYS (required), MOVE ("0 -0.3 1.0"), EVERY_OFF (24), TAGDIR (supersplat_check), FP2_WS
+# Env: PLYS (required), MASKS (1: person masks + *_static scores), MOVE ("0 -0.3 1.0"), EVERY_OFF (24), TAGDIR (supersplat_check), FP2_WS
 #SBATCH -J fp2-check
 #SBATCH -p gpu,gpu-preempt
 #SBATCH --gres=gpu:a100:1
@@ -29,6 +29,9 @@ hostname; date; mkdir -p "$REP"; nvidia-smi --query-gpu=name --format=csv,nohead
 module load cuda/12.4.1 gcc/9.4.0 2>/dev/null || true
 export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"; export PATH="$THREEDGRUT_DIR/.venv/bin:$PATH"
 bash env/make_viewer_venv.sh
+# transient people (operator / office workers) in the held-out frames: Mask R-CNN masks -> also score the static scene
+MPY="${MASK_PY:-$CEAR_WS/venv-edgs/bin/python}"; export TORCH_HOME="${TORCH_HOME:-$CEAR_WS/torch-cache}"
+[ "${MASKS:-1}" = 1 ] && "$MPY" scripts/datasets/fusionportable_masks.py mask --dataset "$TEST"
 NAMES=""
 for spec in ${PLYS:?set PLYS=\"name=path ...\"}; do
   n="${spec%%=*}"; ply="${spec#*=}"; [ -f "$ply" ] || { echo "no $ply"; continue; }; NAMES="$NAMES $n"
@@ -36,6 +39,11 @@ for spec in ${PLYS:?set PLYS=\"name=path ...\"}; do
     --bg black grey --out-dir "$S/onpath/$n" --editor
   for bg in black grey; do
     "$GPY" scripts/eval_views.py --pred-dir "$S/onpath/$n/$bg" --dataset "$TEST" --tag "${n}_$bg" --json-out "$REP/${n}_$bg.json" | tail -1
+    if ls "$TEST"/images/*_mask.png >/dev/null 2>&1; then
+      "$CPUPY" scripts/datasets/fusionportable_masks.py composite --dataset "$TEST" --pred-dir "$S/onpath/$n/$bg" --out-dir "$S/onpath/$n/${bg}_static"
+      "$GPY" scripts/eval_views.py --pred-dir "$S/onpath/$n/${bg}_static" --dataset "$TEST" --tag "${n}_${bg}_static" \
+        --json-out "$REP/${n}_${bg}_static.json" | tail -1
+    fi
   done
   [ -d "$S/offpath/$n" ] || "$VPY" scripts/viewer_shots.py --engine current --ply "$ply" --dataset "$P/dataset" --every "$EVERY_OFF" \
     --move $MOVE --out-dir "$S/offpath/$n"
@@ -54,10 +62,10 @@ done
 "$CPUPY" - "$S" "$REP" "$TEST/images" $NAMES <<'PY'
 import json, os, sys, cv2, numpy as np
 S, rep, gt, tags = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
-print(f"{'splat':28s}{'bg':>6s}{'PSNR':>8s}{'SSIM':>8s}{'LPIPS':>8s}{'hole%':>7s}   per-camera PSNR")
+print(f"{'splat':28s}{'bg':>13s}{'PSNR':>8s}{'SSIM':>8s}{'LPIPS':>8s}{'hole%':>7s}   per-camera PSNR")
 res = {}
 for t in tags:
-    for bg in ("black", "grey"):
+    for bg in ("black", "grey", "black_static", "grey_static"):
         f = os.path.join(rep, f"{t}_{bg}.json")
         if not os.path.exists(f):
             continue
@@ -66,14 +74,14 @@ for t in tags:
         per = {}                                       # per rig camera (image names <cam>_<ns>.png)
         for nm in sorted(os.listdir(gt)):
             pr = os.path.join(S, "onpath", t, bg, os.path.splitext(nm)[0] + ".png")
-            if nm.endswith(".png") and os.path.exists(pr):
+            if nm.endswith(".png") and not nm.endswith("_mask.png") and os.path.exists(pr):
                 a = cv2.imread(pr).astype(np.float64); b = cv2.imread(os.path.join(gt, nm)).astype(np.float64)
                 per.setdefault(nm.rsplit("_", 1)[0], []).append(10 * np.log10(255 ** 2 / max(((a - b) ** 2).mean(), 1e-9)))
         r["psnr_per_camera"] = {c: float(np.mean(v)) for c, v in per.items()}
         pc = " ".join(f"{c}:{np.mean(v):.2f}" for c, v in sorted(per.items()))
         g = os.path.join(rep, f"{t}_geom.json"); r["geom"] = json.load(open(g)) if os.path.exists(g) else None
         r["alpha_hole_frac"] = hole; res[f"{t}_{bg}"] = r
-        print(f"{t:28s}{bg:>6s}{r['psnr']:8.2f}{r['ssim']:8.4f}{r['lpips']:8.4f}{100 * hole if hole == hole else float('nan'):7.2f}   {pc}")
+        print(f"{t:28s}{bg:>13s}{r['psnr']:8.2f}{r['ssim']:8.4f}{r['lpips']:8.4f}{100 * hole if hole == hole else float('nan'):7.2f}   {pc}")
 json.dump(res, open(os.path.join(rep, "summary.json"), "w"), indent=1)
 def montage(sub, names, first_gt, out):
     rows = []
