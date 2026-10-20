@@ -139,7 +139,12 @@ def align(cfg, args):
     data, sdir, P = cfg_paths(cfg)
     os.makedirs(P, exist_ok=True)
     _, imgs, (sfm, _rgb) = oc.read_model(os.path.join(sdir, cfg["sequence"].get("model", "model")))
-    xyz = np.loadtxt(args.src_points, comments="#", usecols=(1, 2, 3)) if args.src_points else sfm
+    if args.src_points and args.src_points.endswith(".ply"):          # a trained splat: its opaque centres
+        from plyfile import PlyData
+        v = PlyData.read(args.src_points)["vertex"]; op = 1 / (1 + np.exp(-np.asarray(v["opacity"], np.float64)))
+        xyz = np.stack([v["x"], v["y"], v["z"]], 1).astype(np.float64)[op > 0.5]
+    else:
+        xyz = np.loadtxt(args.src_points, comments="#", usecols=(1, 2, 3)) if args.src_points else sfm
     gt_npy = os.path.join(P, "gt_tls.npy")
     if not os.path.exists(gt_npy):
         np.save(gt_npy, read_e57(os.path.join(sdir, cfg["sequence"]["tls"]), max_points=args.max_points).astype(np.float32))
@@ -170,8 +175,13 @@ def align(cfg, args):
             score = corr[k] / max(M.sum(), 1)
             t2 = -c0 + (hi - lo) / 2 + lo - sh * cell
             cands.append((score, sc, yaw, t2))
-    cands.sort(key=lambda x: -x[0]); best = None
-    for score, sc, yaw, t2 in cands[: args.top]:
+    cands.sort(key=lambda x: -x[0]); best = None; pick = []
+    for c in cands:                                   # distinct hypotheses (rooms are often 180-deg symmetric)
+        if all(abs(np.log(c[1] / q[1])) > 0.05 or abs((np.degrees(c[2] - q[2]) + 180) % 360 - 180) > 20 for q in pick):
+            pick.append(c)
+        if len(pick) >= args.top:
+            break
+    for score, sc, yaw, t2 in pick:
         Rz = np.array([[np.cos(yaw), -np.sin(yaw), 0], [np.sin(yaw), np.cos(yaw), 0], [0, 0, 1]])
         s, R = sc, Rz @ R0; t = np.array([t2[0], t2[1], fl_s - sc * fl_m])
         for it in range(40):                                     # ICP with scale (Umeyama on nearest pairs)
@@ -181,6 +191,8 @@ def align(cfg, args):
                 break
             s, R, t = umeyama(src[m], F[j[m]])
         d = tree.query(s * src @ R.T + t)[0]; fit = float((d < 2 * vox).mean())
+        if args.trim:                                   # score on the best-fitting share (glass, clutter)
+            fit = float(np.mean(np.sort(d)[: int(len(d) * args.trim)] < 2 * vox))
         print(f"[fiord] align cand corr {score:.3f} scale {sc:.3f} yaw {np.degrees(yaw):.0f}: -> s {s:.4f}, within "
               f"{vox}/{2 * vox} m {(d < vox).mean():.3f}/{fit:.3f}, median {np.median(d):.3f} m", flush=True)
         if best is None or fit > best["fitness"]:
@@ -236,9 +248,11 @@ def main():
     ap.add_argument("--max-points", type=int, default=5_000_000); ap.add_argument("--json-out", default=None)
     ap.add_argument("--voxel", type=float, default=0.05, help="align: fine (ICP / fitness) voxel, m")
     ap.add_argument("--cell", type=float, default=0.05, help="align: 2D occupancy cell, m")
-    ap.add_argument("--top", type=int, default=6, help="align: candidates refined by ICP")
+    ap.add_argument("--top", type=int, default=8, help="align: distinct (scale, yaw) candidates refined by ICP")
+    ap.add_argument("--trim", type=float, default=0.0, help="align: score candidates on this best-fitting share of points (0 = all)")
     ap.add_argument("--scales", default="0.2:1.2:40", help="align: model->scan scale grid lo:hi:n (log-spaced)")
-    ap.add_argument("--src-points", default=None, help="align: model-frame points (points3D.txt or .ply); default SfM")
+    ap.add_argument("--src-points", default=None, help="align: model-frame points: points3D.txt, or a splat .ply (its "
+                    "opaque centres; cleaner surfaces than SfM/EDGS points); default the SfM points")
     args = ap.parse_args()
     cfg = pu.load_config(args.config)
     {"fetch": fetch, "prepare": prepare, "align": align, "geom": geom}[args.cmd](cfg, args)
