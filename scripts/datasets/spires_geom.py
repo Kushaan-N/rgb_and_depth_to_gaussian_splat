@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Geometry of an exported splat vs a ground-truth laser scan (TLS), metric frame (CPU venv).
 
-points  Spires reconstruction-benchmark style (Tao et al. 2025, Sec. 6.2): splat centres with opacity >= --min-opacity
-        (the surface the splat draws) vs the TLS cloud: precision / recall / F-score at 5 and 10 cm (a point is a
+points  Spires reconstruction-benchmark style (Tao et al. 2025, Sec. 6.2): the surface the splat draws -- its rendered
+        depth at the training views back-projected and 2 cm-voxelised (--depth-dir/--depth-dataset; as their Nerfacto
+        export) and, secondary, its centres with opacity >= --min-opacity -- vs the TLS cloud: precision / recall / F-score at 5 and 10 cm (a point is a
         true positive if its nearest neighbour in the other cloud is within the threshold), accuracy (mean
         splat->TLS distance) and completeness (mean TLS->splat distance). Both clouds are restricted to the region
         the rig observed: within --max-cam-dist of a training camera centre and inside the TLS crop (their protocol
@@ -13,7 +14,8 @@ depth   rendered depth at held-out cameras vs the TLS z-buffered into the same c
         the dataset's images/): AbsRel, median |err|, share within 5 / 10 cm, coverage (pixels with a target where the
         splat is opaque).
 
-    python scripts/datasets/spires_geom.py points --ply S.ply --tls tls.ply --cams <fisheye/train> [--ref-cloud lidar.ply]
+    python scripts/datasets/spires_geom.py points --ply S.ply --depth-dir D --depth-dataset <pinhole train> --tls tls.ply \
+        --cams <fisheye/train> [--ref-cloud lidar.ply]
     python scripts/datasets/spires_geom.py depth --pred-dir D --dataset <pinhole test set> --json-out J
 """
 from __future__ import annotations
@@ -48,6 +50,24 @@ def pr_scores(rec, gt, ths=(0.05, 0.10)):
     return out
 
 
+def depth_cloud(depth_dir, ds, stride=4, vox=0.02):
+    """Back-project <stem>_splatdepth.npy (ray distance, 0 = not opaque) at the PINHOLE cameras of `ds` -> (N,3): the
+    surface the splat draws, as Spires' Nerfacto export does (their reconstruction benchmark)."""
+    from rectify_views import read_cameras, read_images, qvec2rot
+    sp = os.path.join(ds, "sparse", "0"); cams = read_cameras(os.path.join(sp, "cameras.txt")); out = []
+    for _, q, t, cid, name in read_images(os.path.join(sp, "images.txt")):
+        f = os.path.join(depth_dir, os.path.splitext(name)[0] + "_splatdepth.npy")
+        if not os.path.exists(f):
+            continue
+        d = np.load(f).astype(np.float32)[::stride, ::stride]; fx, fy, cx, cy = cams[cid].params[:4]
+        v, u = np.nonzero(d > 0); r = d[v, u]; u = u * stride + 0.5; v = v * stride + 0.5
+        ray = np.stack([(u - cx) / fx, (v - cy) / fy, np.ones_like(r)], 1); ray /= np.linalg.norm(ray, axis=1, keepdims=True)
+        R = qvec2rot(q); out.append((ray * r[:, None] - t) @ R)               # cam -> world: R^T (x - t)
+    P = np.concatenate(out)
+    k = np.floor(P / vox).astype(np.int64); _, i = np.unique(k, axis=0, return_index=True)
+    return P[i]
+
+
 def cmd_points(a):
     from scipy.spatial import cKDTree
     gt = read_ply_xyz_opacity(a.tls)[0]; C = cam_centres(a.cams)
@@ -58,11 +78,14 @@ def cmd_points(a):
     res = {"region": {"max_cam_dist_m": a.max_cam_dist, "n_cams": int(len(C))}}
     if a.ply:
         P, o = read_ply_xyz_opacity(a.ply); P = P[o >= a.min_opacity]; P = P[keep(P)]
-        res["splat"] = {"ply": a.ply, "min_opacity": a.min_opacity, **pr_scores(P, gt)}
+        res["splat_centres"] = {"ply": a.ply, "min_opacity": a.min_opacity, **pr_scores(P, gt)}
+    if a.depth_dir:
+        P = depth_cloud(a.depth_dir, a.depth_dataset); P = P[keep(P)]
+        res["splat"] = {"depth_dir": a.depth_dir, "dataset": a.depth_dataset, **pr_scores(P, gt)}
     if a.ref_cloud:
         R = read_ply_xyz_opacity(a.ref_cloud)[0]; R = R[keep(R)]
         res["ref_cloud"] = {"ply": a.ref_cloud, **pr_scores(R, gt)}
-    for k in ("splat", "ref_cloud"):
+    for k in ("splat", "splat_centres", "ref_cloud"):
         if k in res:
             r = res[k]
             print(f"[geom] {k:9s} acc {r['accuracy_m']:.3f} m  comp {r['completeness_m']:.3f} m  "
@@ -98,6 +121,8 @@ def main():
     s = ap.add_subparsers(dest="cmd", required=True)
     p = s.add_parser("points"); p.add_argument("--ply"); p.add_argument("--tls", required=True); p.add_argument("--cams", required=True)
     p.add_argument("--ref-cloud"); p.add_argument("--min-opacity", type=float, default=0.5)
+    p.add_argument("--depth-dir", help="<stem>_splatdepth.npy renders (render_ply_depth.py) -> the scored surface")
+    p.add_argument("--depth-dataset", help="pinhole dataset those depths were rendered at (e.g. the training views)")
     p.add_argument("--max-cam-dist", type=float, default=20.0); p.add_argument("--max-gt-points", type=int, default=8_000_000)
     p.add_argument("--json-out")
     d = s.add_parser("depth"); d.add_argument("--pred-dir", required=True); d.add_argument("--dataset", required=True)
