@@ -30,6 +30,9 @@ re-centred to the mean identity after every step (the splat keeps the average ex
 toward identity (--app-reg). The exported PLY is a standard splat; transforms -> <out>/appearance.json. Held-out
 scores are also reported with a per-frame least-squares colour affine fitted on the frame itself (heldout_*_fit;
 leaks 12 numbers per frame; sbatch/viewer_train_bench.sbatch does the same on the viewer's renders).
+--mask-dir DIR: <DIR>/<image stem>_mask.png (255 = transient, e.g. people from scripts/datasets/fusionportable_masks.py)
+per training frame: masked pixels of the render are replaced by the real image before every loss term, so they give no
+photometric gradient (hence no densification signal) and their edges are dropped from the EAS edge map.
 Opacity clean-up (semi-transparent splats draw differently across viewers / scales: haze, floaters, see-through
 patches off-path): --opa-reg entropy|binary adds --opa-lambda x mean over the step's drawn gaussians of the binary
 entropy (or o(1-o)), ramped in linearly from --opa-start to --opa-start + --opa-ramp (fractions of --iters); after the
@@ -449,6 +452,7 @@ def main():
     ap.add_argument("--sh-band2", choices=("zero", "pcbug", "std"), default=None, help="default: zero (pc274), std (ss352)")
     ap.add_argument("--sh-degree", type=int, default=3)
     ap.add_argument("--depth-lambda", type=float, default=0.0)
+    ap.add_argument("--mask-dir", default=None, help="<stem>_mask.png per training frame (255 = ignore in the loss)")
     ap.add_argument("--depth-trim", type=float, default=0.95)
     ap.add_argument("--ssim-lambda", type=float, default=0.2)
     ap.add_argument("--appearance", choices=("none", "gain", "affine"), default="none",
@@ -504,6 +508,17 @@ def main():
     tr = load_views(args.dataset, args.test_split_interval, "train", dev, depth=args.depth_lambda > 0)
     ev = load_views(args.eval_dataset, 0, "all", dev) if args.eval_dataset else []
     nd = sum(v[6] is not None for v in tr)
+    masks = {}
+    if args.mask_dir:                                       # transient pixels (people): excluded from every loss term
+        from PIL import Image
+        for k, v in enumerate(tr):
+            f = os.path.join(args.mask_dir, os.path.splitext(os.path.basename(v[0]))[0] + "_mask.png")
+            if os.path.exists(f):
+                m = torch.from_numpy(np.asarray(Image.open(f).convert("L")) > 127).to(dev)
+                if bool(m.any()):
+                    masks[k] = m[..., None].float()
+        print(f"[vgs] masks: {len(masks)}/{len(tr)} training frames have masked pixels "
+              f"(mean {np.mean([float(m.mean()) for m in masks.values()]) if masks else 0:.4f} of those frames)", flush=True)
     print(f"[vgs] {len(tr)} training views ({args.dataset}, test_split_interval {args.test_split_interval}), {len(ev)} eval views; "
           f"viewer {args.viewer}: eps2d {rast.eps2d} px^2, cull l1 < {rast.cull_l1} px^2, aa {args.aa}, ss {args.ss}, "
           f"min_px {args.min_px}, sh band-2 {args.sh_band2}; depth targets {nd} (lambda {args.depth_lambda})", flush=True)
@@ -539,7 +554,10 @@ def main():
     def edge_fn(i):
         v = tr[i]
         if i not in edges:
-            edges[i] = edge_map(v[5]).half()
+            e = edge_map(v[5])
+            if i in masks:
+                e = e * (1 - masks[i][..., 0]).reshape(e.shape)
+            edges[i] = e.half()
         return rast.edge_weights(params, v, edges[i].float())
 
     app = Appearance(args.appearance, len(tr), args.app_lr, dev) if args.appearance != "none" else None
@@ -589,6 +607,8 @@ def main():
         if app is not None and step >= app_start:          # the camera's exposure / WB for this frame, render side only
             img, w = app(img, k)
             lapp = (w * w).sum()
+        if k in masks:                                      # transient pixels: the render copies the real image there
+            img = img * (1 - masks[k]) + gt * masks[k]
         loss = (1 - args.ssim_lambda) * (img - gt).abs().mean() + \
             args.ssim_lambda * (1 - ssim(img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None]))
         ld = torch.zeros((), device=dev)
