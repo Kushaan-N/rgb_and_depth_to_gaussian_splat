@@ -8,7 +8,9 @@
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o logs/%x-%j.out sbatch/fp2_export.sbatch configs/fp2_legged_room00.yaml
 # Env: NAME (viewer_igs), ARM_FLAGS (default "--strategy improved --budget 4000000 --iters 60000"), PROF (pc274),
 #      DSCALE (1.5:4), FT_ITERS (7000), FT_ARGS ("--lambda-wd 0.025 --wd-log2-sigma 4" = the WD fine-tune),
-#      TRAIN_DATA (default <P>/onpath/train), EDGS_ARGS, CLEAN (1), CHECK (1), FP2_WS
+#      TRAIN_DATA (default <P>/onpath/train), TEST_DATA (default <P>/onpath/test), EDGS_ARGS, CLEAN (1), CHECK (1),
+#      MASK=1 (person masks on the train frames, scripts/datasets/fusionportable_masks.py, excluded from the training and
+#      fine-tune losses via --mask-dir), VIEW (1: also <NAME>*_view.ply, scripts/view_frame.py), FP2_WS
 #SBATCH -J fp2-export
 #SBATCH -p gpu,gpu-preempt
 #SBATCH --gres=gpu:a100:1
@@ -26,7 +28,7 @@ source env/cear_env.sh >/dev/null
 CPUPY="$CEAR_VENV/bin/python"; SPY="$CEAR_WS/venv-gsplat/bin/python"; IPY="${INPAINT_VENV:-$CEAR_WS/venv-inpaint}/bin/python"
 get() { "$CPUPY" scripts/cfg_get.py "$CFG" "$@"; }
 OUT="$(get paths.out_root)"; P="$OUT/pipeline"; E="$OUT/exports"; NAME="${NAME:-viewer_igs}"; F="$P/$NAME"
-DATA="${TRAIN_DATA:-$P/onpath/train}"; TEST="$P/onpath/test"; EDGS="$F/edgs_data"; SIM3="$P/sim3.json"
+DATA="${TRAIN_DATA:-$P/onpath/train}"; TEST="${TEST_DATA:-$P/onpath/test}"; EDGS="$F/edgs_data"; SIM3="$P/sim3.json"
 CLOUD="$P/lidar_static.ply"
 PROF="${PROF:-pc274}"; ARM_FLAGS="${ARM_FLAGS:---strategy improved --budget 4000000 --iters 60000}"
 FT_ARGS="${FT_ARGS:---lambda-wd 0.025 --wd-log2-sigma 4}"
@@ -37,6 +39,12 @@ export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"; export TORCH_CU
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-12}"; export TORCH_HOME="${TORCH_HOME:-$CEAR_WS/torch-cache}"
 bash env/make_gsplat_viewer_venv.sh
 
+MASK_FLAGS=""
+if [ "${MASK:-0}" = 1 ]; then
+  echo "== 0a. transient (person) masks on the training frames"
+  TORCH_HOME="$TORCH_HOME" "${MASK_PY:-$CEAR_WS/venv-edgs/bin/python}" scripts/datasets/fusionportable_masks.py mask --dataset "$DATA"
+  MASK_FLAGS="--mask-dir $DATA/images"
+fi
 echo "== 0. EDGS dense-correspondence init (train frames)"
 # shellcheck disable=SC2086
 [ -f "$EDGS/edgs_init.json" ] || "${EDGS_VENV:-$CEAR_WS/venv-edgs}/bin/python" scripts/edgs_init.py \
@@ -50,7 +58,7 @@ if [ ! -f "$F/train/splat.ply" ]; then
   # shellcheck disable=SC2086
   PATH="$(dirname "$SPY"):$PATH" PYTHONPATH="$CEAR_WS/gsplat-viewer-$PROF" TORCH_EXTENSIONS_DIR="$CEAR_WS/torch-ext-gsplat-viewer-$PROF" \
     "$SPY" scripts/train_viewer_gsplat.py --dataset "$EDGS" --out "$F/train" --test-split-interval 0 \
-    --eval-dataset "$TEST" --viewer "$PROF" $ARM_FLAGS > "$F/train.log" 2>&1 || { tail -40 "$F/train.log"; exit 1; }
+    --eval-dataset "$TEST" --viewer "$PROF" $ARM_FLAGS $MASK_FLAGS > "$F/train.log" 2>&1 || { tail -40 "$F/train.log"; exit 1; }
 fi
 grep -E '^\[vgs\] (held-out|[0-9]+ gaussians)' "$F/train.log" 2>/dev/null || true
 
@@ -58,7 +66,7 @@ echo "== 2. viewer-exact fine-tune (display scales ${DSCALE:-1.5:4}) $FT_ARGS"
 # shellcheck disable=SC2086
 [ -f "$F/ft.ply" ] || "$SPY" scripts/finetune_ply_viewer.py finetune --ply "$F/train/splat.ply" --out "$F/ft.ply" \
   --dataset "$DATA" --test-split-interval 0 --viewer ss352 --display-scale "${DSCALE:-1.5:4}" \
-  --iters "${FT_ITERS:-7000}" --eval-dataset "$TEST" $FT_ARGS > "$F/ft.log" 2>&1 || { tail -40 "$F/ft.log"; exit 1; }
+  --iters "${FT_ITERS:-7000}" --eval-dataset "$TEST" $FT_ARGS $MASK_FLAGS > "$F/ft.log" 2>&1 || { tail -40 "$F/ft.log"; exit 1; }
 grep -E 'held-out' "$F/ft.log" | tail -2 || true
 cp "$F/ft.ply" "$E/$NAME.ply"
 
@@ -88,5 +96,5 @@ echo FP2_EXPORT_DONE
 if [ "${CHECK:-1}" = 1 ]; then
   PLYS=""; for v in "" $VARIANTS; do PLYS="$PLYS $NAME$v=$E/$NAME$v.ply"; done
   # shellcheck disable=SC2086
-  PLYS="$PLYS" bash sbatch/fp2_check.sbatch "$CFG"
+  PLYS="$PLYS" TEST_DATA="$TEST" bash sbatch/fp2_check.sbatch "$CFG"
 fi
