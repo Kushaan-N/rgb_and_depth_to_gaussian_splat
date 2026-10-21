@@ -458,6 +458,16 @@ def finetune(args):
             if os.path.exists(f):
                 dep[k] = torch.from_numpy(np.load(f).astype(np.float32)).to(dev)
         print(f"[ftv] depth targets for {sum(d is not None for d in dep)}/{len(tr)} frames, lambda {args.depth_lambda}", flush=True)
+    masks = {}
+    if args.mask_dir:                                 # transient pixels: the render copies the real image there
+        from PIL import Image
+        for k, (n, _, _) in enumerate(tr):
+            f = os.path.join(args.mask_dir, os.path.splitext(os.path.basename(n))[0] + "_mask.png")
+            if os.path.exists(f):
+                mk = torch.from_numpy(np.asarray(Image.open(f).convert("L")) > 127).to(dev)
+                if bool(mk.any()):
+                    masks[k] = mk[..., None].float()
+        print(f"[ftv] masks for {len(masks)}/{len(tr)} training frames", flush=True)
     centres = np.stack([c[:3, 3] for _, _, c in tr])
     scene_scale = float(np.linalg.norm(centres - centres.mean(0), axis=1).max()) * 1.1
     params = torch.nn.ParameterDict({k: torch.nn.Parameter(v.clone()) for k, v in p0.items()})
@@ -514,6 +524,8 @@ def finetune(args):
         img, alpha, d = raster.render(params, to_t(np.linalg.inv(c2w), dev), fx, fy, cx, cy, W, H, sh_degree=deg,
                                       depth=dep[k] is not None)
         gt = rgb[k].float() / 255
+        if k in masks:
+            img = img * (1 - masks[k]) + gt * masks[k]
         loss = args.rgb_scale * ((1 - args.ssim_lambda) * (img - gt).abs().mean() +
                                  args.ssim_lambda * (1 - ssim(img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None])))
         if wdnet is not None:                           # Wasserstein Distortion: local VGG-16 feature statistics
@@ -614,6 +626,7 @@ def main():
     f.add_argument("--wd-num-scales", type=int, default=3)
     f.add_argument("--rgb-scale", type=float, default=1.0, help="weight of the L1/SSIM terms")
     f.add_argument("--depth-lambda", type=float, default=0.0, help="LiDAR ray-distance L1 where <image>_depth.npy exists; 0 = off")
+    f.add_argument("--mask-dir", default=None, help="<stem>_mask.png per training frame (255 = transient: no loss there)")
     f.add_argument("--depth-trim", type=float, default=0.95)
     f.add_argument("--anchor", type=float, default=0.0, help="penalty on centre drift (scene-scale units^2)")
     f.add_argument("--eval-dataset", default=None, help="held-out set monitored during training (never trained on)")
