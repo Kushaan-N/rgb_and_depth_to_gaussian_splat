@@ -29,6 +29,8 @@ calibration yaml (K + plumb_bob distortion + extrinsic to the reference camera),
   split     <P>/onpath/{train,test}: every split.test_every-th keyframe (all its cameras) held out, like CEAR's on-path
             benchmark; points3D.txt = split.init_points LiDAR points coloured from the nearest keyframe that sees
             them; <stem>_depth.npy LiDAR ray-distance targets via scripts/build_depth_targets.py if --depth.
+  union     <P>/onpath/all = train + test in one model (for tools holding out by 3DGRUT's k % N rule; checked).
+  resplit   --src <full dataset> -> <src>_train / <src>_test with the on-path membership (e.g. after pose refinement).
   all       extract + prepare + sfm + lidar + split.
 
     python scripts/datasets/fusionportable.py all configs/fp2_legged_room00.yaml
@@ -650,9 +652,60 @@ def write_lidar_points3d(cx, pts, color_ds, out, max_points=None):
             f.write(f"{i + 1} {p[0]:.5f} {p[1]:.5f} {p[2]:.5f} {c[0]} {c[1]} {c[2]} 0\n")
 
 
+def _model_lines(ds):
+    return [ln.rstrip("\n") for ln in open(os.path.join(ds, "sparse", "0", "images.txt")) if ln.strip() and not ln.startswith("#")]
+
+
+def _link_files(src_ds, dst_ds, names):
+    """Symlink every per-image file (<stem>.png, _depth.npy, _mask.png, ...) of `names` from src_ds into dst_ds."""
+    si, di = os.path.join(src_ds, "images"), os.path.join(dst_ds, "images"); os.makedirs(di, exist_ok=True)
+    stems = {os.path.splitext(n)[0] for n in names}
+    for f in os.listdir(si):
+        st = f.split(".")[0]                       # <stem> or <stem>_<suffix> (_depth, _mask, ...)
+        if st in stems or st.rsplit("_", 1)[0] in stems:
+            dst = os.path.join(di, f)
+            if not os.path.lexists(dst):
+                os.symlink(os.path.realpath(os.path.join(si, f)), dst)
+
+
+def cmd_union(cx, args):
+    """<P>/onpath/{train,test} -> <P>/onpath/all (one model, name order) for joint tools that hold out frames by
+    3DGRUT's k % N rule (scripts/refine_poses_gsplat.py); checks that the rule reproduces the on-path split."""
+    tr, te = os.path.join(cx.P, "onpath", "train"), os.path.join(cx.P, "onpath", "test"); out = os.path.join(cx.P, "onpath", "all")
+    shutil.rmtree(out, ignore_errors=True); os.makedirs(os.path.join(out, "sparse", "0"))
+    L = {ln.split()[9]: ("test", ln) for ln in _model_lines(te)}; L.update({ln.split()[9]: ("train", ln) for ln in _model_lines(tr)})
+    names = sorted(L); every = int(cx.get("split.test_every", 8))
+    bad = [n for k, n in enumerate(names) if (k % every == 0) != (L[n][0] == "test")]
+    if bad:
+        raise SystemExit(f"[fp2] union: k % {every} rule disagrees with the on-path split for {len(bad)} frames, e.g. {bad[:3]}")
+    with open(os.path.join(out, "sparse", "0", "images.txt"), "w") as f:
+        for i, n in enumerate(names):
+            p = L[n][1].split(); f.write(" ".join([str(i + 1)] + p[1:]) + "\n\n")
+    for x in ("cameras.txt", "points3D.txt"):
+        shutil.copy(os.path.join(tr, "sparse", "0", x), os.path.join(out, "sparse", "0", x))
+    _link_files(tr, out, [n for n in names if L[n][0] == "train"]); _link_files(te, out, [n for n in names if L[n][0] == "test"])
+    print(f"[fp2] union: {len(names)} frames -> {out} (k % {every} == 0 = the {sum(v[0] == 'test' for v in L.values())} test frames)")
+
+
+def cmd_resplit(cx, args):
+    """A full dataset with corrected poses (--src, e.g. refine_poses_gsplat.py output) -> <src>_train / <src>_test with the
+    on-path membership; per-image files (depth targets, masks) are linked from src."""
+    src = args.src; te_names = {ln.split()[9] for ln in _model_lines(os.path.join(cx.P, "onpath", "test"))}
+    lines = _model_lines(src)
+    for sub, want in (("train", False), ("test", True)):
+        d = f"{src}_{sub}"; shutil.rmtree(d, ignore_errors=True); os.makedirs(os.path.join(d, "sparse", "0"))
+        sel = [ln for ln in lines if (ln.split()[9] in te_names) == want]
+        open(os.path.join(d, "sparse", "0", "images.txt"), "w").write("".join(ln + "\n\n" for ln in sel))
+        for x in ("cameras.txt", "points3D.txt"):
+            shutil.copy(os.path.join(cx.P, "onpath", sub, "sparse", "0", x), os.path.join(d, "sparse", "0", x))
+        _link_files(src, d, [ln.split()[9] for ln in sel])      # src's own copies (refine copies per-image files)
+        print(f"[fp2] resplit: {sub} {len(sel)} frames -> {d}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["extract", "prepare", "sfm", "dataset", "lidar", "split", "all"])
+    ap.add_argument("cmd", choices=["extract", "prepare", "sfm", "dataset", "lidar", "split", "union", "resplit", "all"])
+    ap.add_argument("--src", help="resplit: full dataset with corrected poses")
     ap.add_argument("config"); ap.add_argument("--force", action="store_true")
     ap.add_argument("--depth", action="store_true", help="split: also write LiDAR <stem>_depth.npy targets")
     args = ap.parse_args(); cx = Ctx(args.config)
