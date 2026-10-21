@@ -25,3 +25,4 @@ venv*/
 .DS_Store
 *.swp
 *.out
+logs/
