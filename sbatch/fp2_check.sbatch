@@ -23,7 +23,7 @@ source env/cear_env.sh >/dev/null
 CPUPY="$CEAR_VENV/bin/python"; GPY="$THREEDGRUT_DIR/.venv/bin/python"; VPY="${VIEWER_VENV:-$CEAR_WS/venv-viewer}/bin/python"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$CEAR_WS/playwright-browsers}"
 get() { "$CPUPY" scripts/cfg_get.py "$CFG" "$@"; }
-OUT="$(get paths.out_root)"; P="$OUT/pipeline"; TEST="$P/onpath/test"; S="$P/${TAGDIR:-supersplat_check}"; REP="$S/report"
+OUT="$(get paths.out_root)"; P="$OUT/pipeline"; TEST="${TEST_DATA:-$P/onpath/test}"; S="$P/${TAGDIR:-supersplat_check}"; REP="$S/report"
 MOVE="${MOVE:-0 -0.3 1.0}"; EVERY_OFF="${EVERY_OFF:-24}"
 hostname; date; mkdir -p "$REP"; nvidia-smi --query-gpu=name --format=csv,noheader || true
 module load cuda/12.4.1 gcc/9.4.0 2>/dev/null || true
