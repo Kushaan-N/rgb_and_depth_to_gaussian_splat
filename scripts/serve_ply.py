@@ -53,10 +53,10 @@ def main():
         os.symlink(p, os.path.join(root, n)); names.append(n)
     srv = Server(("127.0.0.1", args.port), functools.partial(Handler, directory=root))
     print(f"[serve_ply] serving {len(names)} file(s) on 127.0.0.1:{args.port} (host {os.uname().nodename}); "
-          f"needs: ssh -L {args.port}:127.0.0.1:{args.port} to THIS host")
+          f"needs: ssh -L {args.port}:127.0.0.1:{args.port} to THIS host", flush=True)
     for n in names:
         size = os.path.getsize(os.path.join(root, n)) / 1e6
-        print(f"  {size:8.0f} MB  {args.editor}?load=" + urllib.parse.quote(f"http://localhost:{args.port}/{n}", safe=":/"))
+        print(f"  {size:8.0f} MB  {args.editor}?load=" + urllib.parse.quote(f"http://localhost:{args.port}/{n}", safe=":/"), flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
