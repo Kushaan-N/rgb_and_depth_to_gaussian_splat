@@ -279,16 +279,33 @@ def refine(args):
     strategy = DefaultStrategy(absgrad=args.absgrad, grow_grad2d=0.0008 if args.absgrad else 0.0002,
                                refine_stop_iter=int(args.iters * 0.5), reset_every=3000)
     strategy.check_sanity(params, opts); state = strategy.initialize_state(scene_scale=scene_scale)
-    delta = torch.nn.Parameter(torch.zeros(n, 6, device=dev))
+    # --rig-group REGEX: frames whose names give the same group (first capture group, e.g. the shared timestamp of a
+    # stereo pair) share ONE correction, applied to the group's reference frame (first in name order) and carried
+    # rigidly to the others: c2w_k <- c2w_ref @ D_g @ c2w_ref^-1 @ c2w_k (the rig keeps its calibrated extrinsics)
+    if args.rig_group:
+        keys = [re.search(args.rig_group, os.path.basename(nm)) for nm in names]
+        if not all(keys):
+            raise SystemExit(f"[posefix] --rig-group {args.rig_group!r} does not match every frame name")
+        keys = [m.group(1) for m in keys]; uk = sorted(set(keys), key=keys.index); gidx = {k_: i for i, k_ in enumerate(uk)}
+        gi = np.array([gidx[k_] for k_ in keys]); ref = np.array([keys.index(k_) for k_ in keys])
+        print(f"[posefix] rig groups: {len(uk)} groups for {n} frames (shared correction per group)")
+    else:
+        gi = np.arange(n); ref = np.arange(n)
+    gi_t, ref_t = torch.tensor(gi, device=dev), torch.tensor(ref, device=dev)
+    rel = torch.linalg.inv(c2w_in[ref_t]) @ c2w_in                      # frame in its group's reference frame
+    delta = torch.nn.Parameter(torch.zeros(int(gi.max()) + 1, 6, device=dev))
     popt = torch.optim.Adam([delta], lr=args.pose_lr, weight_decay=args.pose_reg)
-    trw = torch.tensor(train, device=dev, dtype=torch.float32)[:, None]
+    trw = torch.zeros(len(delta), 1, device=dev); trw[torch.tensor(gi[train], device=dev)] = 1.0   # groups with training frames
+
+    def pose(k):
+        return c2w_in[ref[k]] @ delta_mat(delta[gi[k]]) @ rel[k]
     order, t0 = [], time.time()
     for step in range(args.iters):
         if not order:
             order = list(np.random.permutation(tr_idx))
         k = int(order.pop()); cid = imgs[k][2]; K, w, h, rn = Ks[cid]
         pose_on = step >= args.pose_start
-        c2w = c2w_in[k] @ delta_mat(delta[k]) if pose_on else c2w_in[k]
+        c2w = pose(k) if pose_on else c2w_in[k]
         sh = min(step // 1000, 3)
         out, alpha, info = splat.render(c2w, K, w, h, sh, depth=args.depth_lambda > 0, absgrad=args.absgrad)
         strategy.step_pre_backward(params, opts, state, step, info)
@@ -314,14 +331,14 @@ def refine(args):
         sched.step()
         strategy.step_post_backward(params, opts, state, step, info, packed=False)
         if step % 1000 == 0 or step == args.iters - 1:
-            dn = delta.detach()[train]
+            dn = delta.detach()[trw[:, 0] > 0]
             print(f"[posefix] step {step:6d} loss {loss.item():.4f} psnr {psnr(pred.detach(), gt):.2f} depth {ld.item():.4f} "
                   f"N {len(params['means'])} |dt| med {dn[:, :3].norm(dim=1).median().item():.2e} "
                   f"|dw| med {dn[:, 3:].norm(dim=1).median().item():.2e} ({time.time() - t0:.0f}s)", flush=True)
 
     # ---- refined poses, gauge removal, corrections
     with torch.no_grad():
-        c2w_ref = (c2w_in @ delta_mat(delta)).double().cpu().numpy()
+        c2w_ref = (c2w_in[ref_t] @ delta_mat(delta[gi_t]) @ rel).double().cpu().numpy()
     Cin = np.stack([x[3] for x in imgs]).astype(np.float64)
     G = np.eye(4)
     if not args.keep_gauge:
@@ -483,6 +500,7 @@ def main():
     r.add_argument("--iters", type=int, default=15000)
     r.add_argument("--pose-lr", type=float, default=1e-5)
     r.add_argument("--pose-reg", type=float, default=1e-6, help="Adam weight decay on the corrections")
+    r.add_argument("--rig-group", default=None, help="regex; frames with the same first group share one correction (rig)")
     r.add_argument("--pose-start", type=int, default=500)
     r.add_argument("--gauge-weight", type=float, default=1e3, help="penalty on the mean correction")
     r.add_argument("--keep-gauge", action="store_true", help="do not remove the global rigid drift afterwards")
