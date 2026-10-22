@@ -1,44 +1,47 @@
 # Leaderboard
 
-Generated 2026-10-20 17:10 by scripts/leaderboard.py from /scratch4/workspace/knaskar_umass_edu-cear/outputs, /scratch4/workspace/knaskar_umass_edu-multicam/outputs.
+Generated 2026-10-22 18:02 by scripts/leaderboard.py from /scratch4/workspace/knaskar_umass_edu-cear/outputs, /scratch4/workspace/knaskar_umass_edu-multicam/outputs.
 Rows within one table share sequence, scored-view count and evaluation set; PSNR/SSIM higher, LPIPS lower.
 
 ## fiord_meetingroom — n=135 supersplat [black]
 
 | # | arm | PSNR | SSIM | LPIPS | source | date |
 |---|---|---|---|---|---|---|
-| 1 | rect_v9_train | 28.13 | 0.8959 | 0.2678 | fiord_meetingroom/pipeline/supersplat/report/rect_v9_train_black.json | 10-19 |
-| 2 | rect_igs_train | 28.06 | 0.8957 | 0.2680 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_train_black.json | 10-19 |
-| 3 | rect_igs_wd_train | 28.05 | 0.8953 | 0.2677 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_wd_train_black.json | 10-19 |
-| 4 | rect_v9_ft | 27.99 | 0.8934 | 0.2716 | fiord_meetingroom/pipeline/supersplat/report/rect_v9_ft_black.json | 10-19 |
-| 5 | rect_igs_ft | 27.98 | 0.8940 | 0.2721 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_ft_black.json | 10-19 |
-| 6 | native_3dgut_fov80_edgs_ft | 27.96 | 0.8910 | 0.2838 | fiord_meetingroom/pipeline/supersplat/report/native_3dgut_fov80_edgs_ft_black.json | 10-19 |
-| 7 | rect_igs_wd_ft_clean | 27.95 | 0.8935 | 0.2718 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_wd_ft_clean_black.json | 10-19 |
-| 8 | rect_igs_wd_ft | 27.95 | 0.8935 | 0.2718 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_wd_ft_black.json | 10-19 |
-| 9 | rect_igs_app_ft | 27.85 | 0.8934 | 0.2723 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_app_ft_black.json | 10-19 |
-| 10 | native_3dgut_fov80_ft | 27.18 | 0.8695 | 0.3362 | fiord_meetingroom/pipeline/supersplat/report/native_3dgut_fov80_ft_black.json | 10-19 |
-| 11 | native_3dgut_ft | 27.06 | 0.8686 | 0.3394 | fiord_meetingroom/pipeline/supersplat/report/native_3dgut_ft_black.json | 10-19 |
-| 12 | native_3dgut_fov80_edgs | 26.65 | 0.8723 | 0.3041 | fiord_meetingroom/pipeline/supersplat/report/native_3dgut_fov80_edgs_black.json | 10-19 |
-| 13 | rect_igs_app_train | 25.60 | 0.8891 | 0.2653 * | fiord_meetingroom/pipeline/supersplat/report/rect_igs_app_train_black.json | 10-19 |
-| 14 | native_3dgut | 25.38 | 0.8527 | 0.3551 | fiord_meetingroom/pipeline/supersplat/report/native_3dgut_black.json | 10-19 |
+| 1 | rect_igs_long_train | 28.48 | 0.8980 | 0.2583 * | fiord_meetingroom/pipeline/supersplat/report/rect_igs_long_train_black.json | 10-20 |
+| 2 | rect_igs_long_ft | 28.25 | 0.8951 | 0.2656 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_long_ft_black.json | 10-20 |
+| 3 | rect_v9_train | 28.13 | 0.8959 | 0.2678 | fiord_meetingroom/pipeline/supersplat/report/rect_v9_train_black.json | 10-19 |
+| 4 | rect_igs_ds1_ft | 28.12 | 0.8964 | 0.2701 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_ds1_ft_black.json | 10-20 |
+| 5 | rect_igs_ds1_train | 28.06 | 0.8957 | 0.2680 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_ds1_train_black.json | 10-20 |
+| 6 | rect_igs_train | 28.06 | 0.8957 | 0.2680 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_train_black.json | 10-19 |
+| 7 | rect_igs_wd_train | 28.05 | 0.8953 | 0.2677 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_wd_train_black.json | 10-19 |
+| 8 | rect_v9_ft | 27.99 | 0.8934 | 0.2716 | fiord_meetingroom/pipeline/supersplat/report/rect_v9_ft_black.json | 10-19 |
+| 9 | rect_igs_ft | 27.98 | 0.8940 | 0.2721 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_ft_black.json | 10-19 |
+| 10 | native_3dgut_fov80_edgs_ft | 27.96 | 0.8910 | 0.2838 | fiord_meetingroom/pipeline/supersplat/report/native_3dgut_fov80_edgs_ft_black.json | 10-19 |
+| 11 | rect_igs_wd_ft_clean | 27.95 | 0.8935 | 0.2718 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_wd_ft_clean_black.json | 10-19 |
+| 12 | rect_igs_wd_ft | 27.95 | 0.8935 | 0.2718 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_wd_ft_black.json | 10-19 |
+| 13 | rect_igs_app_ft | 27.85 | 0.8934 | 0.2723 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_app_ft_black.json | 10-19 |
+| 14 | native_3dgut_fov80_ft | 27.18 | 0.8695 | 0.3362 | fiord_meetingroom/pipeline/supersplat/report/native_3dgut_fov80_ft_black.json | 10-19 |
+| 15 | native_3dgut_ft | 27.06 | 0.8686 | 0.3394 | fiord_meetingroom/pipeline/supersplat/report/native_3dgut_ft_black.json | 10-19 |
 
 ## fiord_meetingroom — n=135 supersplat [grey]
 
 | # | arm | PSNR | SSIM | LPIPS | source | date |
 |---|---|---|---|---|---|---|
-| 1 | rect_igs_train | 28.05 | 0.8956 | 0.2677 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_train_grey.json | 10-19 |
-| 2 | rect_igs_wd_train | 28.05 | 0.8952 | 0.2674 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_wd_train_grey.json | 10-19 |
-| 3 | rect_v9_ft | 28.00 | 0.8934 | 0.2716 | fiord_meetingroom/pipeline/supersplat/report/rect_v9_ft_grey.json | 10-19 |
-| 4 | rect_igs_ft | 27.98 | 0.8940 | 0.2721 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_ft_grey.json | 10-19 |
-| 5 | native_3dgut_fov80_edgs_ft | 27.96 | 0.8910 | 0.2838 | fiord_meetingroom/pipeline/supersplat/report/native_3dgut_fov80_edgs_ft_grey.json | 10-19 |
-| 6 | rect_igs_wd_ft | 27.95 | 0.8935 | 0.2718 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_wd_ft_grey.json | 10-19 |
-| 7 | rect_igs_app_ft | 27.85 | 0.8934 | 0.2723 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_app_ft_grey.json | 10-19 |
-| 8 | native_3dgut_fov80_ft | 27.18 | 0.8695 | 0.3362 | fiord_meetingroom/pipeline/supersplat/report/native_3dgut_fov80_ft_grey.json | 10-19 |
-| 9 | native_3dgut_ft | 27.06 | 0.8686 | 0.3394 | fiord_meetingroom/pipeline/supersplat/report/native_3dgut_ft_grey.json | 10-19 |
-| 10 | native_3dgut_fov80_edgs | 26.65 | 0.8723 | 0.3037 | fiord_meetingroom/pipeline/supersplat/report/native_3dgut_fov80_edgs_grey.json | 10-19 |
-| 11 | native_3dgut_fov80 | 25.84 | 0.8565 | 0.3462 | fiord_meetingroom/pipeline/supersplat/report/native_3dgut_fov80_grey.json | 10-19 |
-| 12 | rect_igs_app_train | 25.60 | 0.8891 | 0.2650 * | fiord_meetingroom/pipeline/supersplat/report/rect_igs_app_train_grey.json | 10-19 |
-| 13 | native_3dgut | 25.38 | 0.8527 | 0.3550 | fiord_meetingroom/pipeline/supersplat/report/native_3dgut_grey.json | 10-19 |
+| 1 | rect_igs_long_train | 28.48 | 0.8980 | 0.2582 * | fiord_meetingroom/pipeline/supersplat/report/rect_igs_long_train_grey.json | 10-20 |
+| 2 | rect_igs_long_ft | 28.25 | 0.8951 | 0.2656 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_long_ft_grey.json | 10-20 |
+| 3 | rect_igs_ds1_ft | 28.12 | 0.8964 | 0.2701 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_ds1_ft_grey.json | 10-20 |
+| 4 | rect_igs_ds1_train | 28.05 | 0.8956 | 0.2677 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_ds1_train_grey.json | 10-20 |
+| 5 | rect_igs_train | 28.05 | 0.8956 | 0.2677 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_train_grey.json | 10-19 |
+| 6 | rect_igs_wd_train | 28.05 | 0.8952 | 0.2674 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_wd_train_grey.json | 10-19 |
+| 7 | rect_v9_ft | 28.00 | 0.8934 | 0.2716 | fiord_meetingroom/pipeline/supersplat/report/rect_v9_ft_grey.json | 10-19 |
+| 8 | rect_igs_ft | 27.98 | 0.8940 | 0.2721 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_ft_grey.json | 10-19 |
+| 9 | native_3dgut_fov80_edgs_ft | 27.96 | 0.8910 | 0.2838 | fiord_meetingroom/pipeline/supersplat/report/native_3dgut_fov80_edgs_ft_grey.json | 10-19 |
+| 10 | rect_igs_wd_ft | 27.95 | 0.8935 | 0.2718 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_wd_ft_grey.json | 10-19 |
+| 11 | rect_igs_app_ft | 27.85 | 0.8934 | 0.2723 | fiord_meetingroom/pipeline/supersplat/report/rect_igs_app_ft_grey.json | 10-19 |
+| 12 | native_3dgut_fov80_ft | 27.18 | 0.8695 | 0.3362 | fiord_meetingroom/pipeline/supersplat/report/native_3dgut_fov80_ft_grey.json | 10-19 |
+| 13 | native_3dgut_ft | 27.06 | 0.8686 | 0.3394 | fiord_meetingroom/pipeline/supersplat/report/native_3dgut_ft_grey.json | 10-19 |
+| 14 | native_3dgut_fov80_edgs | 26.65 | 0.8723 | 0.3037 | fiord_meetingroom/pipeline/supersplat/report/native_3dgut_fov80_edgs_grey.json | 10-19 |
+| 15 | native_3dgut_fov80 | 25.84 | 0.8565 | 0.3462 | fiord_meetingroom/pipeline/supersplat/report/native_3dgut_fov80_grey.json | 10-19 |
 
 ## fiord_meetingroom — n=27 pipeline [bg?]
 
@@ -52,8 +55,74 @@ Rows within one table share sequence, scored-view count and evaluation set; PSNR
 
 | # | arm | PSNR | SSIM | LPIPS | source | date |
 |---|---|---|---|---|---|---|
-| 1 | rect_v9_train | 28.14 | 0.8958 | 0.2670 * | fiord_meetingroom/pipeline/supersplat/report/summary.json | 10-19 |
-| 2 | rect_igs_wd_ft_clean | 27.95 | 0.8935 | 0.2718 | fiord_meetingroom/pipeline/supersplat/report/summary.json | 10-19 |
+| 1 | rect_v9_train | 28.14 | 0.8958 | 0.2670 * | fiord_meetingroom/pipeline/supersplat/report/summary.json | 10-20 |
+| 2 | rect_igs_wd_ft_clean | 27.95 | 0.8935 | 0.2718 | fiord_meetingroom/pipeline/supersplat/report/summary.json | 10-20 |
+
+## fp2_handheld_room00 — n=138 supersplat_check_mask [black]
+
+| # | arm | PSNR | SSIM | LPIPS | source | date |
+|---|---|---|---|---|---|---|
+| 1 | viewer_igs_mask_clean_static | 26.87 | 0.9301 | 0.2015 * | fp2_handheld_room00/pipeline/supersplat_check_mask/report/summary.json | 10-20 |
+| 2 | viewer_igs_mask_static | 26.87 | 0.9301 | 0.2015 * | fp2_handheld_room00/pipeline/supersplat_check_mask/report/viewer_igs_mask_black_static.json | 10-20 |
+| 3 | viewer_igs_mask_inpainted_static | 26.87 | 0.9301 | 0.2015 * | fp2_handheld_room00/pipeline/supersplat_check_mask/report/viewer_igs_mask_inpainted_black_static.json | 10-20 |
+| 4 | viewer_igs_mask_clean | 24.76 | 0.9148 | 0.2198 | fp2_handheld_room00/pipeline/supersplat_check_mask/report/viewer_igs_mask_clean_black.json | 10-20 |
+| 5 | viewer_igs_mask | 24.75 | 0.9148 | 0.2197 | fp2_handheld_room00/pipeline/supersplat_check_mask/report/viewer_igs_mask_black.json | 10-20 |
+| 6 | viewer_igs_mask_inpainted | 24.75 | 0.9148 | 0.2197 | fp2_handheld_room00/pipeline/supersplat_check_mask/report/summary.json | 10-20 |
+
+## fp2_handheld_room00 — n=138 supersplat_check_mask [grey]
+
+| # | arm | PSNR | SSIM | LPIPS | source | date |
+|---|---|---|---|---|---|---|
+| 1 | viewer_igs_mask_clean_static | 26.87 | 0.9301 | 0.2015 * | fp2_handheld_room00/pipeline/supersplat_check_mask/report/viewer_igs_mask_clean_grey_static.json | 10-20 |
+| 2 | viewer_igs_mask_static | 26.87 | 0.9301 | 0.2015 * | fp2_handheld_room00/pipeline/supersplat_check_mask/report/viewer_igs_mask_grey_static.json | 10-20 |
+| 3 | viewer_igs_mask_inpainted_static | 26.87 | 0.9301 | 0.2015 * | fp2_handheld_room00/pipeline/supersplat_check_mask/report/viewer_igs_mask_inpainted_grey_static.json | 10-20 |
+| 4 | viewer_igs_mask_clean | 24.76 | 0.9148 | 0.2198 | fp2_handheld_room00/pipeline/supersplat_check_mask/report/viewer_igs_mask_clean_grey.json | 10-20 |
+| 5 | viewer_igs_mask | 24.75 | 0.9148 | 0.2197 | fp2_handheld_room00/pipeline/supersplat_check_mask/report/viewer_igs_mask_grey.json | 10-20 |
+| 6 | viewer_igs_mask_inpainted | 24.75 | 0.9148 | 0.2197 | fp2_handheld_room00/pipeline/supersplat_check_mask/report/viewer_igs_mask_inpainted_grey.json | 10-20 |
+
+## fp2_handheld_room00 — n=138 supersplat_check_posefix_mask [black]
+
+| # | arm | PSNR | SSIM | LPIPS | source | date |
+|---|---|---|---|---|---|---|
+| 1 | viewer_igs_posefix_mask_clean_static | 26.86 | 0.9311 | 0.2003 | fp2_handheld_room00/pipeline/supersplat_check_posefix_mask/report/summary.json | 10-21 |
+| 2 | viewer_igs_posefix_mask_static | 26.86 | 0.9311 | 0.2002 * | fp2_handheld_room00/pipeline/supersplat_check_posefix_mask/report/viewer_igs_posefix_mask_black_static.json | 10-21 |
+| 3 | viewer_igs_posefix_mask_inpainted_static | 26.86 | 0.9311 | 0.2002 * | fp2_handheld_room00/pipeline/supersplat_check_posefix_mask/report/summary.json | 10-21 |
+| 4 | viewer_igs_posefix_mask_clean | 24.81 | 0.9159 | 0.2185 | fp2_handheld_room00/pipeline/supersplat_check_posefix_mask/report/viewer_igs_posefix_mask_clean_black.json | 10-21 |
+| 5 | viewer_igs_posefix_mask | 24.81 | 0.9159 | 0.2185 | fp2_handheld_room00/pipeline/supersplat_check_posefix_mask/report/viewer_igs_posefix_mask_black.json | 10-21 |
+| 6 | viewer_igs_posefix_mask_inpainted | 24.81 | 0.9159 | 0.2185 | fp2_handheld_room00/pipeline/supersplat_check_posefix_mask/report/summary.json | 10-21 |
+
+## fp2_handheld_room00 — n=138 supersplat_check_posefix_mask [grey]
+
+| # | arm | PSNR | SSIM | LPIPS | source | date |
+|---|---|---|---|---|---|---|
+| 1 | viewer_igs_posefix_mask_clean_static | 26.86 | 0.9311 | 0.2003 | fp2_handheld_room00/pipeline/supersplat_check_posefix_mask/report/viewer_igs_posefix_mask_clean_grey_static.json | 10-21 |
+| 2 | viewer_igs_posefix_mask_static | 26.86 | 0.9311 | 0.2002 * | fp2_handheld_room00/pipeline/supersplat_check_posefix_mask/report/viewer_igs_posefix_mask_grey_static.json | 10-21 |
+| 3 | viewer_igs_posefix_mask_inpainted_static | 26.86 | 0.9311 | 0.2002 * | fp2_handheld_room00/pipeline/supersplat_check_posefix_mask/report/summary.json | 10-21 |
+| 4 | viewer_igs_posefix_mask_clean | 24.81 | 0.9159 | 0.2185 | fp2_handheld_room00/pipeline/supersplat_check_posefix_mask/report/viewer_igs_posefix_mask_clean_grey.json | 10-21 |
+| 5 | viewer_igs_posefix_mask | 24.81 | 0.9159 | 0.2185 | fp2_handheld_room00/pipeline/supersplat_check_posefix_mask/report/viewer_igs_posefix_mask_grey.json | 10-21 |
+| 6 | viewer_igs_posefix_mask_inpainted | 24.81 | 0.9159 | 0.2185 | fp2_handheld_room00/pipeline/supersplat_check_posefix_mask/report/viewer_igs_posefix_mask_inpainted_grey.json | 10-21 |
+
+## fp2_handheld_room00 — n=138 supersplat_check_posefix [grey]
+
+| # | arm | PSNR | SSIM | LPIPS | source | date |
+|---|---|---|---|---|---|---|
+| 1 | viewer_igs_posefix_clean_static | 26.61 | 0.9294 | 0.2030 | fp2_handheld_room00/pipeline/supersplat_check_posefix/report/viewer_igs_posefix_clean_grey_static.json | 10-20 |
+| 2 | viewer_igs_posefix_static | 26.60 | 0.9293 | 0.2029 * | fp2_handheld_room00/pipeline/supersplat_check_posefix/report/viewer_igs_posefix_grey_static.json | 10-20 |
+| 3 | viewer_igs_posefix_inpainted_static | 26.60 | 0.9293 | 0.2029 * | fp2_handheld_room00/pipeline/supersplat_check_posefix/report/viewer_igs_posefix_inpainted_grey_static.json | 10-20 |
+| 4 | viewer_igs_posefix_clean | 25.08 | 0.9180 | 0.2173 | fp2_handheld_room00/pipeline/supersplat_check_posefix/report/viewer_igs_posefix_clean_grey.json | 10-20 |
+| 5 | viewer_igs_posefix_inpainted | 25.08 | 0.9180 | 0.2172 | fp2_handheld_room00/pipeline/supersplat_check_posefix/report/viewer_igs_posefix_inpainted_grey.json | 10-20 |
+| 6 | viewer_igs_posefix | 25.08 | 0.9180 | 0.2172 | fp2_handheld_room00/pipeline/supersplat_check_posefix/report/viewer_igs_posefix_grey.json | 10-20 |
+
+## fp2_handheld_room00 — n=138 supersplat_check_posefix [black]
+
+| # | arm | PSNR | SSIM | LPIPS | source | date |
+|---|---|---|---|---|---|---|
+| 1 | viewer_igs_posefix_clean_static | 26.61 | 0.9294 | 0.2030 | fp2_handheld_room00/pipeline/supersplat_check_posefix/report/viewer_igs_posefix_clean_black_static.json | 10-20 |
+| 2 | viewer_igs_posefix_static | 26.60 | 0.9293 | 0.2029 * | fp2_handheld_room00/pipeline/supersplat_check_posefix/report/viewer_igs_posefix_black_static.json | 10-20 |
+| 3 | viewer_igs_posefix_inpainted_static | 26.60 | 0.9293 | 0.2029 * | fp2_handheld_room00/pipeline/supersplat_check_posefix/report/viewer_igs_posefix_inpainted_black_static.json | 10-20 |
+| 4 | viewer_igs_posefix_clean | 25.08 | 0.9180 | 0.2173 | fp2_handheld_room00/pipeline/supersplat_check_posefix/report/viewer_igs_posefix_clean_black.json | 10-20 |
+| 5 | viewer_igs_posefix_inpainted | 25.08 | 0.9180 | 0.2172 | fp2_handheld_room00/pipeline/supersplat_check_posefix/report/viewer_igs_posefix_inpainted_black.json | 10-20 |
+| 6 | viewer_igs_posefix | 25.08 | 0.9180 | 0.2172 | fp2_handheld_room00/pipeline/supersplat_check_posefix/report/viewer_igs_posefix_black.json | 10-20 |
 
 ## fp2_handheld_room00 — n=138 supersplat_check_cpp [black]
 
@@ -110,6 +179,94 @@ Rows within one table share sequence, scored-view count and evaluation set; PSNR
 | 1 | viewer_igs_clean | 21.49 | 0.7968 | 0.2866 * | fp2_handheld_room00/pipeline/supersplat_check/report/summary.json | 10-19 |
 | 2 | viewer_igs | 21.49 | 0.7969 | 0.2866 * | fp2_handheld_room00/pipeline/supersplat_check/report/viewer_igs_grey.json | 10-19 |
 | 3 | viewer_igs_inpainted | 21.49 | 0.7969 | 0.2866 * | fp2_handheld_room00/pipeline/supersplat_check/report/viewer_igs_inpainted_grey.json | 10-19 |
+
+## fp2_legged_room00 — n=174 supersplat_check_posefix [grey]
+
+| # | arm | PSNR | SSIM | LPIPS | source | date |
+|---|---|---|---|---|---|---|
+| 1 | viewer_igs_posefix_clean_static | 25.79 | 0.8837 | 0.2324 | fp2_legged_room00/pipeline/supersplat_check_posefix/report/viewer_igs_posefix_clean_grey_static.json | 10-21 |
+| 2 | viewer_igs_posefix_static | 25.79 | 0.8837 | 0.2323 * | fp2_legged_room00/pipeline/supersplat_check_posefix/report/summary.json | 10-21 |
+| 3 | viewer_igs_posefix_inpainted_static | 25.79 | 0.8837 | 0.2323 * | fp2_legged_room00/pipeline/supersplat_check_posefix/report/summary.json | 10-21 |
+| 4 | viewer_igs_posefix_clean | 23.81 | 0.8626 | 0.2569 | fp2_legged_room00/pipeline/supersplat_check_posefix/report/viewer_igs_posefix_clean_grey.json | 10-21 |
+| 5 | viewer_igs_posefix | 23.81 | 0.8626 | 0.2569 | fp2_legged_room00/pipeline/supersplat_check_posefix/report/viewer_igs_posefix_grey.json | 10-21 |
+| 6 | viewer_igs_posefix_inpainted | 23.80 | 0.8626 | 0.2569 | fp2_legged_room00/pipeline/supersplat_check_posefix/report/viewer_igs_posefix_inpainted_grey.json | 10-21 |
+
+## fp2_legged_room00 — n=174 supersplat_check_posefix [black]
+
+| # | arm | PSNR | SSIM | LPIPS | source | date |
+|---|---|---|---|---|---|---|
+| 1 | viewer_igs_posefix_clean_static | 25.79 | 0.8837 | 0.2324 | fp2_legged_room00/pipeline/supersplat_check_posefix/report/summary.json | 10-21 |
+| 2 | viewer_igs_posefix_static | 25.79 | 0.8837 | 0.2323 * | fp2_legged_room00/pipeline/supersplat_check_posefix/report/viewer_igs_posefix_black_static.json | 10-21 |
+| 3 | viewer_igs_posefix_inpainted_static | 25.79 | 0.8837 | 0.2323 * | fp2_legged_room00/pipeline/supersplat_check_posefix/report/viewer_igs_posefix_inpainted_black_static.json | 10-21 |
+| 4 | viewer_igs_posefix_clean | 23.81 | 0.8626 | 0.2569 | fp2_legged_room00/pipeline/supersplat_check_posefix/report/viewer_igs_posefix_clean_black.json | 10-21 |
+| 5 | viewer_igs_posefix | 23.81 | 0.8626 | 0.2569 | fp2_legged_room00/pipeline/supersplat_check_posefix/report/viewer_igs_posefix_black.json | 10-21 |
+| 6 | viewer_igs_posefix_inpainted | 23.81 | 0.8626 | 0.2569 | fp2_legged_room00/pipeline/supersplat_check_posefix/report/viewer_igs_posefix_inpainted_black.json | 10-21 |
+
+## fp2_legged_room00 — n=174 supersplat_check_posefix_mask [black]
+
+| # | arm | PSNR | SSIM | LPIPS | source | date |
+|---|---|---|---|---|---|---|
+| 1 | viewer_igs_posefix_mask_clean_static | 25.99 | 0.8855 | 0.2284 * | fp2_legged_room00/pipeline/supersplat_check_posefix_mask/report/viewer_igs_posefix_mask_clean_black_static.json | 10-21 |
+| 2 | viewer_igs_posefix_mask_inpainted_static | 25.99 | 0.8855 | 0.2284 * | fp2_legged_room00/pipeline/supersplat_check_posefix_mask/report/summary.json | 10-21 |
+| 3 | viewer_igs_posefix_mask_static | 25.99 | 0.8855 | 0.2284 * | fp2_legged_room00/pipeline/supersplat_check_posefix_mask/report/viewer_igs_posefix_mask_black_static.json | 10-21 |
+| 4 | viewer_igs_posefix_mask_clean | 23.49 | 0.8629 | 0.2555 | fp2_legged_room00/pipeline/supersplat_check_posefix_mask/report/summary.json | 10-21 |
+| 5 | viewer_igs_posefix_mask | 23.49 | 0.8629 | 0.2555 | fp2_legged_room00/pipeline/supersplat_check_posefix_mask/report/viewer_igs_posefix_mask_black.json | 10-21 |
+| 6 | viewer_igs_posefix_mask_inpainted | 23.49 | 0.8629 | 0.2555 | fp2_legged_room00/pipeline/supersplat_check_posefix_mask/report/summary.json | 10-21 |
+
+## fp2_legged_room00 — n=174 supersplat_check_posefix_mask [grey]
+
+| # | arm | PSNR | SSIM | LPIPS | source | date |
+|---|---|---|---|---|---|---|
+| 1 | viewer_igs_posefix_mask_clean_static | 25.99 | 0.8855 | 0.2284 * | fp2_legged_room00/pipeline/supersplat_check_posefix_mask/report/summary.json | 10-21 |
+| 2 | viewer_igs_posefix_mask_inpainted_static | 25.99 | 0.8855 | 0.2284 * | fp2_legged_room00/pipeline/supersplat_check_posefix_mask/report/summary.json | 10-21 |
+| 3 | viewer_igs_posefix_mask_static | 25.99 | 0.8855 | 0.2284 * | fp2_legged_room00/pipeline/supersplat_check_posefix_mask/report/viewer_igs_posefix_mask_grey_static.json | 10-21 |
+| 4 | viewer_igs_posefix_mask_clean | 23.49 | 0.8629 | 0.2555 | fp2_legged_room00/pipeline/supersplat_check_posefix_mask/report/summary.json | 10-21 |
+| 5 | viewer_igs_posefix_mask | 23.49 | 0.8629 | 0.2555 | fp2_legged_room00/pipeline/supersplat_check_posefix_mask/report/summary.json | 10-21 |
+| 6 | viewer_igs_posefix_mask_inpainted | 23.49 | 0.8629 | 0.2555 | fp2_legged_room00/pipeline/supersplat_check_posefix_mask/report/summary.json | 10-21 |
+
+## fp2_legged_room00 — n=174 supersplat_check_mask [black]
+
+| # | arm | PSNR | SSIM | LPIPS | source | date |
+|---|---|---|---|---|---|---|
+| 1 | viewer_igs_mask_clean_static | 25.77 | 0.8820 | 0.2295 * | fp2_legged_room00/pipeline/supersplat_check_mask/report/summary.json | 10-20 |
+| 2 | viewer_igs_mask_static | 25.77 | 0.8820 | 0.2295 * | fp2_legged_room00/pipeline/supersplat_check_mask/report/summary.json | 10-20 |
+| 3 | viewer_igs_mask_inpainted_static | 25.77 | 0.8820 | 0.2295 * | fp2_legged_room00/pipeline/supersplat_check_mask/report/viewer_igs_mask_inpainted_black_static.json | 10-20 |
+| 4 | viewer_igs_mask_clean | 23.31 | 0.8593 | 0.2566 | fp2_legged_room00/pipeline/supersplat_check_mask/report/summary.json | 10-20 |
+| 5 | viewer_igs_mask_inpainted | 23.31 | 0.8593 | 0.2566 | fp2_legged_room00/pipeline/supersplat_check_mask/report/viewer_igs_mask_inpainted_black.json | 10-20 |
+| 6 | viewer_igs_mask | 23.31 | 0.8593 | 0.2566 | fp2_legged_room00/pipeline/supersplat_check_mask/report/summary.json | 10-20 |
+
+## fp2_legged_room00 — n=174 supersplat_check_mask [grey]
+
+| # | arm | PSNR | SSIM | LPIPS | source | date |
+|---|---|---|---|---|---|---|
+| 1 | viewer_igs_mask_clean_static | 25.77 | 0.8820 | 0.2295 * | fp2_legged_room00/pipeline/supersplat_check_mask/report/viewer_igs_mask_clean_grey_static.json | 10-20 |
+| 2 | viewer_igs_mask_static | 25.77 | 0.8820 | 0.2295 * | fp2_legged_room00/pipeline/supersplat_check_mask/report/summary.json | 10-20 |
+| 3 | viewer_igs_mask_inpainted_static | 25.77 | 0.8820 | 0.2295 * | fp2_legged_room00/pipeline/supersplat_check_mask/report/summary.json | 10-20 |
+| 4 | viewer_igs_mask_clean | 23.31 | 0.8593 | 0.2566 | fp2_legged_room00/pipeline/supersplat_check_mask/report/viewer_igs_mask_clean_grey.json | 10-20 |
+| 5 | viewer_igs_mask | 23.31 | 0.8593 | 0.2566 | fp2_legged_room00/pipeline/supersplat_check_mask/report/summary.json | 10-20 |
+| 6 | viewer_igs_mask_inpainted | 23.31 | 0.8593 | 0.2566 | fp2_legged_room00/pipeline/supersplat_check_mask/report/summary.json | 10-20 |
+
+## fp2_legged_room00 — n=174 supersplat_check_depth [grey]
+
+| # | arm | PSNR | SSIM | LPIPS | source | date |
+|---|---|---|---|---|---|---|
+| 1 | viewer_igs_depth_clean_static | 25.24 | 0.8759 | 0.2368 * | fp2_legged_room00/pipeline/supersplat_check_depth/report/summary.json | 10-20 |
+| 2 | viewer_igs_depth_static | 25.24 | 0.8759 | 0.2368 * | fp2_legged_room00/pipeline/supersplat_check_depth/report/viewer_igs_depth_grey_static.json | 10-20 |
+| 3 | viewer_igs_depth_inpainted_static | 25.24 | 0.8759 | 0.2368 * | fp2_legged_room00/pipeline/supersplat_check_depth/report/summary.json | 10-20 |
+| 4 | viewer_igs_depth_clean | 23.27 | 0.8544 | 0.2617 | fp2_legged_room00/pipeline/supersplat_check_depth/report/summary.json | 10-20 |
+| 5 | viewer_igs_depth | 23.27 | 0.8545 | 0.2617 | fp2_legged_room00/pipeline/supersplat_check_depth/report/summary.json | 10-20 |
+| 6 | viewer_igs_depth_inpainted | 23.27 | 0.8545 | 0.2617 | fp2_legged_room00/pipeline/supersplat_check_depth/report/summary.json | 10-20 |
+
+## fp2_legged_room00 — n=174 supersplat_check_depth [black]
+
+| # | arm | PSNR | SSIM | LPIPS | source | date |
+|---|---|---|---|---|---|---|
+| 1 | viewer_igs_depth_clean_static | 25.24 | 0.8759 | 0.2368 * | fp2_legged_room00/pipeline/supersplat_check_depth/report/summary.json | 10-20 |
+| 2 | viewer_igs_depth_static | 25.24 | 0.8760 | 0.2368 * | fp2_legged_room00/pipeline/supersplat_check_depth/report/summary.json | 10-20 |
+| 3 | viewer_igs_depth_inpainted_static | 25.24 | 0.8760 | 0.2368 * | fp2_legged_room00/pipeline/supersplat_check_depth/report/summary.json | 10-20 |
+| 4 | viewer_igs_depth_clean | 23.27 | 0.8545 | 0.2617 | fp2_legged_room00/pipeline/supersplat_check_depth/report/summary.json | 10-20 |
+| 5 | viewer_igs_depth | 23.27 | 0.8545 | 0.2617 | fp2_legged_room00/pipeline/supersplat_check_depth/report/summary.json | 10-20 |
+| 6 | viewer_igs_depth_inpainted | 23.27 | 0.8545 | 0.2617 | fp2_legged_room00/pipeline/supersplat_check_depth/report/summary.json | 10-20 |
 
 ## fp2_legged_room00 — n=174 supersplat_check_cpp [black]
 
@@ -1549,226 +1706,294 @@ Rows within one table share sequence, scored-view count and evaluation set; PSNR
 | 1 | completed | 36.95 | 0.9700 | 0.1559 * | mocap2_well-lit_trot/pipeline/objects_v2/v2/report/train_completed.json | 10-11 |
 | 2 | base | 36.95 | 0.9700 | 0.1559 * | mocap2_well-lit_trot/pipeline/objects_v2/v2/report/train_base.json | 10-11 |
 
-## ricoh360_bricks — n=250 supersplat [black]
-
-| # | arm | PSNR | SSIM | LPIPS | source | date |
-|---|---|---|---|---|---|---|
-| 1 | rect_igs_ft | 28.27 | 0.8935 | 0.2111 | ricoh360_bricks/pipeline/supersplat/report/rect_igs_ft_black.json | 10-19 |
-| 2 | rect_igs_app_ft | 28.25 | 0.8937 | 0.2105 | ricoh360_bricks/pipeline/supersplat/report/rect_igs_app_ft_black.json | 10-19 |
-| 3 | rect_igs_train | 28.04 | 0.8926 | 0.2080 | ricoh360_bricks/pipeline/supersplat/report/rect_igs_train_black.json | 10-19 |
-| 4 | rect_igs_app_train | 27.91 | 0.8919 | 0.2075 * | ricoh360_bricks/pipeline/supersplat/report/rect_igs_app_train_black.json | 10-19 |
-| 5 | rect_grav_train | 25.91 | 0.8603 | 0.2459 | ricoh360_bricks/pipeline/supersplat/report/rect_grav_train_black.json | 10-19 |
-| 6 | rect_grav_ft | 25.76 | 0.8616 | 0.2478 | ricoh360_bricks/pipeline/supersplat/report/rect_grav_ft_black.json | 10-19 |
-| 7 | native_odgs_ft | 25.16 | 0.8282 | 0.2904 | ricoh360_bricks/pipeline/supersplat/report/native_odgs_ft_black.json | 10-19 |
-| 8 | native_odgs | 20.64 | 0.7006 | 0.4346 | ricoh360_bricks/pipeline/supersplat/report/native_odgs_black.json | 10-19 |
-
 ## ricoh360_bricks — n=250 supersplat [grey]
 
 | # | arm | PSNR | SSIM | LPIPS | source | date |
 |---|---|---|---|---|---|---|
-| 1 | rect_igs_ft | 28.26 | 0.8935 | 0.2111 | ricoh360_bricks/pipeline/supersplat/report/rect_igs_ft_grey.json | 10-19 |
-| 2 | rect_igs_app_ft | 28.24 | 0.8936 | 0.2106 | ricoh360_bricks/pipeline/supersplat/report/rect_igs_app_ft_grey.json | 10-19 |
-| 3 | rect_igs_train | 28.07 | 0.8928 | 0.2078 | ricoh360_bricks/pipeline/supersplat/report/rect_igs_train_grey.json | 10-19 |
-| 4 | rect_igs_app_train | 27.96 | 0.8922 | 0.2074 * | ricoh360_bricks/pipeline/supersplat/report/rect_igs_app_train_grey.json | 10-19 |
-| 5 | rect_grav_train | 26.03 | 0.8611 | 0.2455 | ricoh360_bricks/pipeline/supersplat/report/rect_grav_train_grey.json | 10-19 |
-| 6 | native_odgs_ft | 23.50 | 0.7927 | 0.3166 | ricoh360_bricks/pipeline/supersplat/report/native_odgs_ft_grey.json | 10-19 |
-| 7 | native_odgs | 20.20 | 0.6769 | 0.4504 | ricoh360_bricks/pipeline/supersplat/report/native_odgs_grey.json | 10-19 |
+| 1 | rect_igs_ds1_ft | 28.54 | 0.8986 | 0.2046 | ricoh360_bricks/pipeline/supersplat/report/rect_igs_ds1_ft_grey.json | 10-20 |
+| 2 | rect_igs_ft | 28.26 | 0.8935 | 0.2111 | ricoh360_bricks/pipeline/supersplat/report/rect_igs_ft_grey.json | 10-19 |
+| 3 | rect_igs_app_ft | 28.24 | 0.8936 | 0.2106 | ricoh360_bricks/pipeline/supersplat/report/rect_igs_app_ft_grey.json | 10-19 |
+| 4 | rect_igs_wd_ft | 28.13 | 0.8893 | 0.1718 * | ricoh360_bricks/pipeline/supersplat/report/rect_igs_wd_ft_grey.json | 10-20 |
+| 5 | rect_igs_train | 28.07 | 0.8928 | 0.2078 | ricoh360_bricks/pipeline/supersplat/report/rect_igs_train_grey.json | 10-19 |
+| 6 | rect_igs_ds1_train | 28.07 | 0.8928 | 0.2078 | ricoh360_bricks/pipeline/supersplat/report/rect_igs_ds1_train_grey.json | 10-20 |
+| 7 | rect_igs_wd_train | 28.07 | 0.8928 | 0.2078 | ricoh360_bricks/pipeline/supersplat/report/rect_igs_wd_train_grey.json | 10-20 |
+| 8 | rect_igs_app_train | 27.96 | 0.8922 | 0.2074 | ricoh360_bricks/pipeline/supersplat/report/rect_igs_app_train_grey.json | 10-19 |
+| 9 | rect_grav_train | 26.03 | 0.8611 | 0.2455 | ricoh360_bricks/pipeline/supersplat/report/rect_grav_train_grey.json | 10-19 |
+| 10 | native_odgs_ft | 23.50 | 0.7927 | 0.3166 | ricoh360_bricks/pipeline/supersplat/report/native_odgs_ft_grey.json | 10-19 |
+| 11 | native_odgs | 20.20 | 0.6769 | 0.4504 | ricoh360_bricks/pipeline/supersplat/report/native_odgs_grey.json | 10-19 |
+
+## ricoh360_bricks — n=250 supersplat [black]
+
+| # | arm | PSNR | SSIM | LPIPS | source | date |
+|---|---|---|---|---|---|---|
+| 1 | rect_igs_ds1_ft | 28.54 | 0.8987 | 0.2045 | ricoh360_bricks/pipeline/supersplat/report/rect_igs_ds1_ft_black.json | 10-20 |
+| 2 | rect_igs_ft | 28.27 | 0.8935 | 0.2111 | ricoh360_bricks/pipeline/supersplat/report/rect_igs_ft_black.json | 10-19 |
+| 3 | rect_igs_app_ft | 28.25 | 0.8937 | 0.2105 | ricoh360_bricks/pipeline/supersplat/report/rect_igs_app_ft_black.json | 10-19 |
+| 4 | rect_igs_wd_ft | 28.13 | 0.8894 | 0.1718 * | ricoh360_bricks/pipeline/supersplat/report/rect_igs_wd_ft_black.json | 10-20 |
+| 5 | rect_igs_wd_train | 28.04 | 0.8926 | 0.2080 | ricoh360_bricks/pipeline/supersplat/report/rect_igs_wd_train_black.json | 10-20 |
+| 6 | rect_igs_train | 28.04 | 0.8926 | 0.2080 | ricoh360_bricks/pipeline/supersplat/report/rect_igs_train_black.json | 10-19 |
+| 7 | rect_igs_app_train | 27.91 | 0.8919 | 0.2075 | ricoh360_bricks/pipeline/supersplat/report/rect_igs_app_train_black.json | 10-19 |
+| 8 | rect_grav_train | 25.91 | 0.8603 | 0.2459 | ricoh360_bricks/pipeline/supersplat/report/rect_grav_train_black.json | 10-19 |
+| 9 | rect_grav_ft | 25.76 | 0.8616 | 0.2478 | ricoh360_bricks/pipeline/supersplat/report/rect_grav_ft_black.json | 10-19 |
+| 10 | native_odgs_ft | 25.16 | 0.8282 | 0.2904 | ricoh360_bricks/pipeline/supersplat/report/native_odgs_ft_black.json | 10-19 |
+| 11 | native_odgs | 20.64 | 0.7006 | 0.4346 | ricoh360_bricks/pipeline/supersplat/report/native_odgs_black.json | 10-19 |
 
 ## ricoh360_bricks — n=250 supersplat_rect_grav [grey]
 
 | # | arm | PSNR | SSIM | LPIPS | source | date |
 |---|---|---|---|---|---|---|
-| 1 | rect_grav_ft | 28.27 | 0.8934 | 0.2148 * | ricoh360_bricks/pipeline/supersplat_rect_grav/report/rect_grav_ft_grey.json | 10-20 |
-| 2 | rect_igs_ft | 26.92 | 0.8712 | 0.2348 | ricoh360_bricks/pipeline/supersplat_rect_grav/report/rect_igs_ft_grey.json | 10-20 |
-| 3 | rect_igs_train | 26.78 | 0.8706 | 0.2312 | ricoh360_bricks/pipeline/supersplat_rect_grav/report/rect_igs_train_grey.json | 10-20 |
+| 1 | rect_grav_ft | 28.27 | 0.8934 | 0.2148 | ricoh360_bricks/pipeline/supersplat_rect_grav/report/rect_grav_ft_grey.json | 10-20 |
+| 2 | rect_grav_train | 28.15 | 0.8930 | 0.2107 * | ricoh360_bricks/pipeline/supersplat_rect_grav/report/rect_grav_train_grey.json | 10-20 |
+| 3 | rect_igs_ft | 26.92 | 0.8712 | 0.2348 | ricoh360_bricks/pipeline/supersplat_rect_grav/report/rect_igs_ft_grey.json | 10-20 |
 
 ## ricoh360_bricks — n=250 supersplat_rect_grav [black]
 
 | # | arm | PSNR | SSIM | LPIPS | source | date |
 |---|---|---|---|---|---|---|
-| 1 | rect_grav_ft | 28.27 | 0.8935 | 0.2147 * | ricoh360_bricks/pipeline/supersplat_rect_grav/report/rect_grav_ft_black.json | 10-20 |
-| 2 | rect_igs_ft | 26.93 | 0.8713 | 0.2348 | ricoh360_bricks/pipeline/supersplat_rect_grav/report/rect_igs_ft_black.json | 10-20 |
+| 1 | rect_grav_ft | 28.27 | 0.8935 | 0.2147 | ricoh360_bricks/pipeline/supersplat_rect_grav/report/rect_grav_ft_black.json | 10-20 |
+| 2 | rect_grav_train | 28.13 | 0.8926 | 0.2112 * | ricoh360_bricks/pipeline/supersplat_rect_grav/report/rect_grav_train_black.json | 10-20 |
 | 3 | rect_igs_train | 26.79 | 0.8707 | 0.2312 | ricoh360_bricks/pipeline/supersplat_rect_grav/report/rect_igs_train_black.json | 10-20 |
+
+## ricoh360_bricks — n=50 pipeline [bg?]
+
+| # | arm | PSNR | SSIM | LPIPS | source | date |
+|---|---|---|---|---|---|---|
+| 1 | native_odgs | 22.36 | 0.7562 | 0.3357 * | ricoh360_bricks/pipeline/native_report/native_odgs.json | 10-19 |
+| 2 | native_odgs_rbg | 22.18 | 0.7469 | 0.3476 | ricoh360_bricks/pipeline/native_report/native_odgs_rbg.json | 10-20 |
+
+## ricoh360_bricks — n=250  [grey]
+
+| # | arm | PSNR | SSIM | LPIPS | source | date |
+|---|---|---|---|---|---|---|
+| 1 | rect_igs_train | 26.78 | 0.8706 | 0.2312 * | ricoh360_bricks/pipeline/supersplat_rect_grav/report/summary.json | 10-20 |
+| 2 | rect_grav_ft | 25.83 | 0.8617 | 0.2478 | ricoh360_bricks/pipeline/supersplat/report/summary.json | 10-20 |
+
+## ricoh360_bricks — n=250  [black]
+
+| # | arm | PSNR | SSIM | LPIPS | source | date |
+|---|---|---|---|---|---|---|
+| 1 | rect_igs_ds1_train | 28.04 | 0.8926 | 0.2080 * | ricoh360_bricks/pipeline/supersplat/report/summary.json | 10-20 |
+| 2 | rect_igs_ft | 26.93 | 0.8713 | 0.2348 | ricoh360_bricks/pipeline/supersplat_rect_grav/report/summary.json | 10-20 |
 
 ## spires — n=9 score [bg?]
 
 | # | arm | PSNR | SSIM | LPIPS | source | date |
 |---|---|---|---|---|---|---|
-| 1 | fishft_clean_bench_test_in_cam2 | 23.88 | 0.7899 | 0.3694 | spires/2024-03-13-observatory-quarter-01/score/fishft_clean/bench_test_in_cam2.json | 10-19 |
-| 2 | depth_clean_bench_test_in_cam2 | 23.79 | 0.7602 | 0.3006 * | spires/2024-03-13-observatory-quarter-01/score/depth_clean/bench_test_in_cam2.json | 10-20 |
-| 3 | fishft_bench_test_in_cam2 | 23.56 | 0.7819 | 0.3830 | spires/2024-03-13-observatory-quarter-01/score/fishft/bench_test_in_cam2.json | 10-19 |
-| 4 | fishft_clean_bench_test_in_cam0 | 23.25 | 0.8227 | 0.3532 | spires/2024-03-13-observatory-quarter-01/score/fishft_clean/bench_test_in_cam0.json | 10-19 |
-| 5 | app_clean_bench_test_in_cam2 | 23.19 | 0.7562 | 0.3153 | spires/2024-03-13-observatory-quarter-01/score/app_clean/bench_test_in_cam2.json | 10-19 |
-| 6 | center_ft_bench_test_in_cam2 | 23.18 | 0.7562 | 0.3176 | spires/2024-03-13-observatory-quarter-01/score/center_ft/bench_test_in_cam2.json | 10-19 |
-| 7 | center_clean_bench_test_in_cam2 | 23.18 | 0.7562 | 0.3176 | spires/2024-03-13-observatory-quarter-01/score/center_clean/bench_test_in_cam2.json | 10-19 |
-| 8 | fishft_bench_test_in_cam0 | 22.82 | 0.8119 | 0.3708 | spires/2024-03-13-observatory-quarter-01/score/fishft/bench_test_in_cam0.json | 10-19 |
-| 9 | depth_clean_bench_test_in_cam0 | 22.76 | 0.8037 | 0.3108 | spires/2024-03-13-observatory-quarter-01/score/depth_clean/bench_test_in_cam0.json | 10-20 |
-| 10 | cube_clean_bench_test_in_cam2 | 22.36 | 0.7654 | 0.3424 | spires/2024-03-13-observatory-quarter-01/score/cube_clean/bench_test_in_cam2.json | 10-20 |
-| 11 | center_clean_bench_test_in_cam0 | 22.28 | 0.8003 | 0.3073 | spires/2024-03-13-observatory-quarter-01/score/center_clean/bench_test_in_cam0.json | 10-19 |
-| 12 | center_ft_bench_test_in_cam0 | 22.28 | 0.8003 | 0.3074 | spires/2024-03-13-observatory-quarter-01/score/center_ft/bench_test_in_cam0.json | 10-19 |
-| 13 | app_clean_bench_test_in_cam0 | 22.22 | 0.7999 | 0.3044 | spires/2024-03-13-observatory-quarter-01/score/app_clean/bench_test_in_cam0.json | 10-19 |
-| 14 | cube_clean_bench_test_in_cam0 | 20.63 | 0.7891 | 0.3271 | spires/2024-03-13-observatory-quarter-01/score/cube_clean/bench_test_in_cam0.json | 10-20 |
-| 15 | fish_gut_mcmc_bench_test_in_cam2 | 20.37 | 0.7553 | 0.4215 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc/bench_test_in_cam2.json | 10-19 |
+| 1 | fish3m_ft_clean_bench_test_in_cam2 | 24.40 | 0.7869 | 0.3365 | spires/2024-03-13-observatory-quarter-01/score/fish3m_ft_clean/bench_test_in_cam2.json | 10-21 |
+| 2 | fishd_ft_clean_bench_test_in_cam2 | 24.20 | 0.7836 | 0.3274 | spires/2024-03-13-observatory-quarter-01/score/fishd_ft_clean/bench_test_in_cam2.json | 10-21 |
+| 3 | fishedgs_ftd_clean_bench_test_in_cam2 | 24.03 | 0.7850 | 0.3444 | spires/2024-03-13-observatory-quarter-01/score/fishedgs_ftd_clean/bench_test_in_cam2.json | 10-21 |
+| 4 | fishft_clean_bench_test_in_cam2 | 23.88 | 0.7899 | 0.3694 | spires/2024-03-13-observatory-quarter-01/score/fishft_clean/bench_test_in_cam2.json | 10-19 |
+| 5 | depth_clean_bench_test_in_cam2 | 23.79 | 0.7602 | 0.3006 * | spires/2024-03-13-observatory-quarter-01/score/depth_clean/bench_test_in_cam2.json | 10-20 |
+| 6 | fishd_ft_clean_bench_test_in_cam0 | 23.70 | 0.8204 | 0.3400 | spires/2024-03-13-observatory-quarter-01/score/fishd_ft_clean/bench_test_in_cam0.json | 10-21 |
+| 7 | fishft_bench_test_in_cam2 | 23.56 | 0.7819 | 0.3830 | spires/2024-03-13-observatory-quarter-01/score/fishft/bench_test_in_cam2.json | 10-19 |
+| 8 | fishedgs_ftd_clean_bench_test_in_cam0 | 23.31 | 0.8202 | 0.3401 | spires/2024-03-13-observatory-quarter-01/score/fishedgs_ftd_clean/bench_test_in_cam0.json | 10-21 |
+| 9 | fishft_clean_bench_test_in_cam0 | 23.25 | 0.8227 | 0.3532 | spires/2024-03-13-observatory-quarter-01/score/fishft_clean/bench_test_in_cam0.json | 10-19 |
+| 10 | app_clean_bench_test_in_cam2 | 23.19 | 0.7562 | 0.3153 | spires/2024-03-13-observatory-quarter-01/score/app_clean/bench_test_in_cam2.json | 10-19 |
+| 11 | center_ft_bench_test_in_cam2 | 23.18 | 0.7562 | 0.3176 | spires/2024-03-13-observatory-quarter-01/score/center_ft/bench_test_in_cam2.json | 10-19 |
+| 12 | center_clean_bench_test_in_cam2 | 23.18 | 0.7562 | 0.3176 | spires/2024-03-13-observatory-quarter-01/score/center_clean/bench_test_in_cam2.json | 10-19 |
+| 13 | fish3m_ft_clean_bench_test_in_cam0 | 23.08 | 0.8206 | 0.3395 | spires/2024-03-13-observatory-quarter-01/score/fish3m_ft_clean/bench_test_in_cam0.json | 10-21 |
+| 14 | fishft_bench_test_in_cam0 | 22.82 | 0.8119 | 0.3708 | spires/2024-03-13-observatory-quarter-01/score/fishft/bench_test_in_cam0.json | 10-19 |
+| 15 | depth_clean_bench_test_in_cam0 | 22.76 | 0.8037 | 0.3108 | spires/2024-03-13-observatory-quarter-01/score/depth_clean/bench_test_in_cam0.json | 10-20 |
 
 ## spires — n=26 live_test_in [black]
 
 | # | arm | PSNR | SSIM | LPIPS | source | date |
 |---|---|---|---|---|---|---|
-| 1 | fishft_clean_test_in | 27.41 | 0.8713 | 0.3479 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 2 | depth_clean_test_in | 26.81 | 0.8649 | 0.2960 * | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 3 | fishft_test_in | 26.20 | 0.8562 | 0.3675 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 4 | center_ft_test_in | 25.99 | 0.8593 | 0.3097 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 5 | center_clean_test_in | 25.99 | 0.8593 | 0.3096 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 6 | app_clean_test_in | 25.96 | 0.8599 | 0.3077 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 7 | cube_clean_test_in | 23.93 | 0.8519 | 0.3351 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 8 | fish_gut_mcmc_test_in | 22.83 | 0.8422 | 0.3843 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 9 | fish_gut_mcmc3m_test_in | 21.32 | 0.8262 | 0.3875 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 10 | fish_gut_depth3m_test_in | 21.21 | 0.8106 | 0.3978 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 11 | fish_gut_ppisp_test_in | 19.67 | 0.8314 | 0.3869 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
+| 1 | fishd_ft_clean_test_in | 27.48 | 0.8752 | 0.3185 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 2 | fishft_clean_test_in | 27.41 | 0.8713 | 0.3479 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 3 | fish3m_ft_clean_test_in | 27.40 | 0.8746 | 0.3268 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 4 | fishedgs_ftd_clean_test_in | 27.20 | 0.8736 | 0.3287 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 5 | depth_clean_test_in | 26.81 | 0.8649 | 0.2960 * | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 6 | fishft_test_in | 26.20 | 0.8562 | 0.3675 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 7 | center_ft_test_in | 25.99 | 0.8593 | 0.3097 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 8 | center_clean_test_in | 25.99 | 0.8593 | 0.3096 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 9 | app_clean_test_in | 25.96 | 0.8599 | 0.3077 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 10 | cube_clean_test_in | 23.93 | 0.8519 | 0.3351 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 11 | fish_gut_mcmc_test_in | 22.83 | 0.8422 | 0.3843 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 12 | fish_gut_edgs3m_test_in | 21.38 | 0.8161 | 0.4015 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 13 | fish_gut_mcmc3m_test_in | 21.32 | 0.8262 | 0.3875 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 14 | fish_gut_depth3m_test_in | 21.21 | 0.8106 | 0.3978 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 15 | fish_gut_ppisp_test_in | 19.67 | 0.8314 | 0.3869 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
 
 ## spires — n=137 live_test_out [black]
 
 | # | arm | PSNR | SSIM | LPIPS | source | date |
 |---|---|---|---|---|---|---|
-| 1 | fishft_clean_test_out | 21.93 | 0.8033 | 0.4088 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 2 | depth_clean_test_out | 21.71 | 0.7883 | 0.3914 * | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 3 | fishft_test_out | 21.61 | 0.7938 | 0.4223 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 4 | center_clean_test_out | 21.49 | 0.7839 | 0.3948 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 5 | center_ft_test_out | 21.49 | 0.7839 | 0.3948 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 6 | app_clean_test_out | 21.45 | 0.7841 | 0.3951 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 7 | cube_clean_test_out | 20.98 | 0.7842 | 0.4067 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 8 | fish_gut_mcmc_test_out | 19.80 | 0.7837 | 0.4302 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 9 | fish_gut_mcmc3m_test_out | 19.47 | 0.7712 | 0.4351 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 10 | fish_gut_depth3m_test_out | 18.64 | 0.7500 | 0.4471 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 11 | fish_gut_ppisp_test_out | 18.36 | 0.7769 | 0.4342 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
+| 1 | fish3m_ft_clean_test_out | 21.96 | 0.7987 | 0.3998 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 2 | fishft_clean_test_out | 21.93 | 0.8033 | 0.4088 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 3 | fishedgs_ftd_clean_test_out | 21.82 | 0.7959 | 0.4050 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 4 | depth_clean_test_out | 21.71 | 0.7883 | 0.3914 * | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 5 | fishd_ft_clean_test_out | 21.64 | 0.7941 | 0.4004 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 6 | fishft_test_out | 21.61 | 0.7938 | 0.4223 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 7 | center_clean_test_out | 21.49 | 0.7839 | 0.3948 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 8 | center_ft_test_out | 21.49 | 0.7839 | 0.3948 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 9 | app_clean_test_out | 21.45 | 0.7841 | 0.3951 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 10 | cube_clean_test_out | 20.98 | 0.7842 | 0.4067 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 11 | fish_gut_mcmc_test_out | 19.80 | 0.7837 | 0.4302 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 12 | fish_gut_mcmc3m_test_out | 19.47 | 0.7712 | 0.4351 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 13 | fish_gut_edgs3m_test_out | 19.10 | 0.7593 | 0.4524 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 14 | fish_gut_depth3m_test_out | 18.64 | 0.7500 | 0.4471 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 15 | fish_gut_ppisp_test_out | 18.36 | 0.7769 | 0.4342 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
 
 ## spires — n=137 live_test_out [grey]
 
 | # | arm | PSNR | SSIM | LPIPS | source | date |
 |---|---|---|---|---|---|---|
-| 1 | fishft_clean_test_out | 21.90 | 0.8027 | 0.4094 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 2 | depth_clean_test_out | 21.70 | 0.7882 | 0.3916 * | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 3 | fishft_test_out | 21.58 | 0.7932 | 0.4229 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 4 | center_ft_test_out | 21.48 | 0.7838 | 0.3948 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 5 | center_clean_test_out | 21.48 | 0.7838 | 0.3948 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 6 | app_clean_test_out | 21.44 | 0.7840 | 0.3952 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 7 | cube_clean_test_out | 20.98 | 0.7841 | 0.4069 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 8 | fish_gut_mcmc_test_out | 19.79 | 0.7832 | 0.4306 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 9 | fish_gut_mcmc3m_test_out | 19.46 | 0.7710 | 0.4354 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 10 | fish_gut_depth3m_test_out | 18.60 | 0.7490 | 0.4488 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 11 | fish_gut_ppisp_test_out | 18.22 | 0.7743 | 0.4355 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
+| 1 | fish3m_ft_clean_test_out | 21.94 | 0.7986 | 0.3999 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 2 | fishft_clean_test_out | 21.90 | 0.8027 | 0.4094 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 3 | fishedgs_ftd_clean_test_out | 21.81 | 0.7960 | 0.4053 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 4 | depth_clean_test_out | 21.70 | 0.7882 | 0.3916 * | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 5 | fishft_test_out | 21.58 | 0.7932 | 0.4229 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 6 | fishd_ft_clean_test_out | 21.55 | 0.7926 | 0.4020 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 7 | center_ft_test_out | 21.48 | 0.7838 | 0.3948 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 8 | center_clean_test_out | 21.48 | 0.7838 | 0.3948 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 9 | app_clean_test_out | 21.44 | 0.7840 | 0.3952 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 10 | cube_clean_test_out | 20.98 | 0.7841 | 0.4069 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 11 | fish_gut_mcmc_test_out | 19.79 | 0.7832 | 0.4306 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 12 | fish_gut_mcmc3m_test_out | 19.46 | 0.7710 | 0.4354 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 13 | fish_gut_edgs3m_test_out | 19.11 | 0.7595 | 0.4527 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 14 | fish_gut_depth3m_test_out | 18.60 | 0.7490 | 0.4488 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 15 | fish_gut_ppisp_test_out | 18.22 | 0.7743 | 0.4355 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
 
 ## spires — n=26 bench_test_in [bg?]
 
 | # | arm | PSNR | SSIM | LPIPS | source | date |
 |---|---|---|---|---|---|---|
-| 1 | fishft_clean/bench_test_in | 23.95 | 0.8055 | 0.3588 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 2 | fishft/bench_test_in | 23.53 | 0.7951 | 0.3775 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 3 | depth_clean/bench_test_in | 23.46 | 0.7776 | 0.3023 * | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 4 | app_clean/bench_test_in | 23.08 | 0.7742 | 0.3075 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 5 | center_clean/bench_test_in | 23.02 | 0.7736 | 0.3101 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 6 | center_ft/bench_test_in | 23.02 | 0.7736 | 0.3101 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 7 | cube_clean/bench_test_in | 21.95 | 0.7750 | 0.3353 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 8 | fish_gut_mcmc/bench_test_in | 20.77 | 0.7737 | 0.4073 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 9 | fish_gut_depth3m/bench_test_in | 20.26 | 0.7425 | 0.4139 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 10 | fish_gut_mcmc3m/bench_test_in | 19.75 | 0.7543 | 0.4099 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 11 | fish_gut_ppisp/bench_test_in | 17.73 | 0.7576 | 0.4002 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
+| 1 | fishd_ft_clean/bench_test_in | 24.17 | 0.8000 | 0.3291 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 2 | fish3m_ft_clean/bench_test_in | 24.03 | 0.8028 | 0.3348 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 3 | fishft_clean/bench_test_in | 23.95 | 0.8055 | 0.3588 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 4 | fishedgs_ftd_clean/bench_test_in | 23.93 | 0.8011 | 0.3397 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 5 | fishft/bench_test_in | 23.53 | 0.7951 | 0.3775 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 6 | depth_clean/bench_test_in | 23.46 | 0.7776 | 0.3023 * | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 7 | app_clean/bench_test_in | 23.08 | 0.7742 | 0.3075 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 8 | center_clean/bench_test_in | 23.02 | 0.7736 | 0.3101 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 9 | center_ft/bench_test_in | 23.02 | 0.7736 | 0.3101 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 10 | cube_clean/bench_test_in | 21.95 | 0.7750 | 0.3353 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 11 | fish_gut_mcmc/bench_test_in | 20.77 | 0.7737 | 0.4073 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 12 | fish_gut_depth3m/bench_test_in | 20.26 | 0.7425 | 0.4139 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 13 | fish_gut_edgs3m/bench_test_in | 19.98 | 0.7432 | 0.4249 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 14 | fish_gut_mcmc3m/bench_test_in | 19.75 | 0.7543 | 0.4099 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 15 | fish_gut_ppisp/bench_test_in | 17.73 | 0.7576 | 0.4002 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
 
 ## spires — n=137 bench_test_out [bg?]
 
 | # | arm | PSNR | SSIM | LPIPS | source | date |
 |---|---|---|---|---|---|---|
-| 1 | fishft_clean/bench_test_out | 20.96 | 0.7754 | 0.4147 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 2 | depth_clean/bench_test_out | 20.90 | 0.7518 | 0.3883 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 3 | fishft/bench_test_out | 20.71 | 0.7662 | 0.4295 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 4 | app_clean/bench_test_out | 20.64 | 0.7472 | 0.3846 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 5 | center_ft/bench_test_out | 20.56 | 0.7470 | 0.3842 * | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 6 | center_clean/bench_test_out | 20.56 | 0.7470 | 0.3842 * | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 7 | cube_clean/bench_test_out | 19.99 | 0.7450 | 0.3952 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 8 | fish_gut_mcmc/bench_test_out | 18.83 | 0.7484 | 0.4465 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 9 | fish_gut_mcmc3m/bench_test_out | 18.59 | 0.7314 | 0.4532 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 10 | fish_gut_depth3m/bench_test_out | 18.43 | 0.7168 | 0.4559 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
-| 11 | fish_gut_ppisp/bench_test_out | 16.95 | 0.7372 | 0.4466 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-20 |
+| 1 | fish3m_ft_clean/bench_test_out | 21.08 | 0.7691 | 0.4013 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 2 | fishedgs_ftd_clean/bench_test_out | 21.03 | 0.7658 | 0.4082 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 3 | fishd_ft_clean/bench_test_out | 20.99 | 0.7644 | 0.4007 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 4 | fishft_clean/bench_test_out | 20.96 | 0.7754 | 0.4147 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 5 | depth_clean/bench_test_out | 20.90 | 0.7518 | 0.3883 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 6 | fishft/bench_test_out | 20.71 | 0.7662 | 0.4295 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 7 | app_clean/bench_test_out | 20.64 | 0.7472 | 0.3846 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 8 | center_ft/bench_test_out | 20.56 | 0.7470 | 0.3842 * | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 9 | center_clean/bench_test_out | 20.56 | 0.7470 | 0.3842 * | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 10 | cube_clean/bench_test_out | 19.99 | 0.7450 | 0.3952 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 11 | fish_gut_mcmc/bench_test_out | 18.83 | 0.7484 | 0.4465 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 12 | fish_gut_mcmc3m/bench_test_out | 18.59 | 0.7314 | 0.4532 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 13 | fish_gut_edgs3m/bench_test_out | 18.45 | 0.7206 | 0.4722 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 14 | fish_gut_depth3m/bench_test_out | 18.43 | 0.7168 | 0.4559 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
+| 15 | fish_gut_ppisp/bench_test_out | 16.95 | 0.7372 | 0.4466 | spires/2024-03-13-observatory-quarter-01/score/summary.json | 10-21 |
 
 ## spires — n=47 score [bg?]
 
 | # | arm | PSNR | SSIM | LPIPS | source | date |
 |---|---|---|---|---|---|---|
-| 1 | depth_clean_bench_test_out_cam0 | 21.08 | 0.7837 | 0.4065 | spires/2024-03-13-observatory-quarter-01/score/depth_clean/bench_test_out_cam0.json | 10-20 |
-| 2 | fishft_clean_bench_test_out_cam0 | 21.03 | 0.8110 | 0.4134 | spires/2024-03-13-observatory-quarter-01/score/fishft_clean/bench_test_out_cam0.json | 10-19 |
-| 3 | fishft_bench_test_out_cam0 | 20.78 | 0.8024 | 0.4247 | spires/2024-03-13-observatory-quarter-01/score/fishft/bench_test_out_cam0.json | 10-19 |
-| 4 | app_clean_bench_test_out_cam0 | 20.32 | 0.7765 | 0.3958 * | spires/2024-03-13-observatory-quarter-01/score/app_clean/bench_test_out_cam0.json | 10-19 |
-| 5 | center_ft_bench_test_out_cam0 | 20.22 | 0.7766 | 0.3972 | spires/2024-03-13-observatory-quarter-01/score/center_ft/bench_test_out_cam0.json | 10-19 |
-| 6 | center_clean_bench_test_out_cam0 | 20.22 | 0.7766 | 0.3972 | spires/2024-03-13-observatory-quarter-01/score/center_clean/bench_test_out_cam0.json | 10-19 |
-| 7 | cube_clean_bench_test_out_cam0 | 19.37 | 0.7713 | 0.3990 | spires/2024-03-13-observatory-quarter-01/score/cube_clean/bench_test_out_cam0.json | 10-20 |
-| 8 | fish_gut_depth3m_bench_test_out_cam0 | 19.18 | 0.7621 | 0.4458 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_depth3m/bench_test_out_cam0.json | 10-20 |
-| 9 | fish_gut_mcmc_bench_test_out_cam0 | 18.63 | 0.7816 | 0.4384 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc/bench_test_out_cam0.json | 10-19 |
-| 10 | fish_gut_mcmc3m_bench_test_out_cam0 | 18.13 | 0.7636 | 0.4476 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc3m/bench_test_out_cam0.json | 10-20 |
-| 11 | fish_gut_ppisp_bench_test_out_cam0 | 15.61 | 0.7597 | 0.4509 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_ppisp/bench_test_out_cam0.json | 10-19 |
+| 1 | fishedgs_ftd_clean_bench_test_out_cam0 | 21.34 | 0.8027 | 0.4144 | spires/2024-03-13-observatory-quarter-01/score/fishedgs_ftd_clean/bench_test_out_cam0.json | 10-21 |
+| 2 | depth_clean_bench_test_out_cam0 | 21.08 | 0.7837 | 0.4065 | spires/2024-03-13-observatory-quarter-01/score/depth_clean/bench_test_out_cam0.json | 10-20 |
+| 3 | fishd_ft_clean_bench_test_out_cam0 | 21.07 | 0.7970 | 0.4105 | spires/2024-03-13-observatory-quarter-01/score/fishd_ft_clean/bench_test_out_cam0.json | 10-21 |
+| 4 | fishft_clean_bench_test_out_cam0 | 21.03 | 0.8110 | 0.4134 | spires/2024-03-13-observatory-quarter-01/score/fishft_clean/bench_test_out_cam0.json | 10-19 |
+| 5 | fish3m_ft_clean_bench_test_out_cam0 | 20.88 | 0.8014 | 0.4048 | spires/2024-03-13-observatory-quarter-01/score/fish3m_ft_clean/bench_test_out_cam0.json | 10-21 |
+| 6 | fishft_bench_test_out_cam0 | 20.78 | 0.8024 | 0.4247 | spires/2024-03-13-observatory-quarter-01/score/fishft/bench_test_out_cam0.json | 10-19 |
+| 7 | app_clean_bench_test_out_cam0 | 20.32 | 0.7765 | 0.3958 * | spires/2024-03-13-observatory-quarter-01/score/app_clean/bench_test_out_cam0.json | 10-19 |
+| 8 | center_ft_bench_test_out_cam0 | 20.22 | 0.7766 | 0.3972 | spires/2024-03-13-observatory-quarter-01/score/center_ft/bench_test_out_cam0.json | 10-19 |
+| 9 | center_clean_bench_test_out_cam0 | 20.22 | 0.7766 | 0.3972 | spires/2024-03-13-observatory-quarter-01/score/center_clean/bench_test_out_cam0.json | 10-19 |
+| 10 | cube_clean_bench_test_out_cam0 | 19.37 | 0.7713 | 0.3990 | spires/2024-03-13-observatory-quarter-01/score/cube_clean/bench_test_out_cam0.json | 10-20 |
+| 11 | fish_gut_depth3m_bench_test_out_cam0 | 19.18 | 0.7621 | 0.4458 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_depth3m/bench_test_out_cam0.json | 10-20 |
+| 12 | fish_gut_mcmc_bench_test_out_cam0 | 18.63 | 0.7816 | 0.4384 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc/bench_test_out_cam0.json | 10-19 |
+| 13 | fish_gut_edgs3m_bench_test_out_cam0 | 18.20 | 0.7533 | 0.4714 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_edgs3m/bench_test_out_cam0.json | 10-21 |
+| 14 | fish_gut_mcmc3m_bench_test_out_cam0 | 18.13 | 0.7636 | 0.4476 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc3m/bench_test_out_cam0.json | 10-20 |
+| 15 | fish_gut_ppisp_bench_test_out_cam0 | 15.61 | 0.7597 | 0.4509 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_ppisp/bench_test_out_cam0.json | 10-19 |
 
 ## spires — n=8 score [bg?]
 
 | # | arm | PSNR | SSIM | LPIPS | source | date |
 |---|---|---|---|---|---|---|
 | 1 | fishft_clean_bench_test_in_cam1 | 24.82 | 0.8036 | 0.3531 | spires/2024-03-13-observatory-quarter-01/score/fishft_clean/bench_test_in_cam1.json | 10-19 |
-| 2 | fishft_bench_test_in_cam1 | 24.31 | 0.7909 | 0.3789 | spires/2024-03-13-observatory-quarter-01/score/fishft/bench_test_in_cam1.json | 10-19 |
-| 3 | app_clean_bench_test_in_cam1 | 23.91 | 0.7657 | 0.3023 | spires/2024-03-13-observatory-quarter-01/score/app_clean/bench_test_in_cam1.json | 10-19 |
-| 4 | depth_clean_bench_test_in_cam1 | 23.89 | 0.7677 | 0.2948 * | spires/2024-03-13-observatory-quarter-01/score/depth_clean/bench_test_in_cam1.json | 10-20 |
-| 5 | center_ft_bench_test_in_cam1 | 23.68 | 0.7633 | 0.3047 | spires/2024-03-13-observatory-quarter-01/score/center_ft/bench_test_in_cam1.json | 10-19 |
-| 6 | center_clean_bench_test_in_cam1 | 23.68 | 0.7632 | 0.3047 | spires/2024-03-13-observatory-quarter-01/score/center_clean/bench_test_in_cam1.json | 10-19 |
-| 7 | cube_clean_bench_test_in_cam1 | 22.98 | 0.7699 | 0.3364 | spires/2024-03-13-observatory-quarter-01/score/cube_clean/bench_test_in_cam1.json | 10-20 |
-| 8 | fish_gut_mcmc_bench_test_in_cam1 | 22.66 | 0.7813 | 0.3938 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc/bench_test_in_cam1.json | 10-19 |
-| 9 | fish_gut_depth3m_bench_test_in_cam1 | 21.32 | 0.7371 | 0.4118 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_depth3m/bench_test_in_cam1.json | 10-20 |
-| 10 | fish_gut_mcmc3m_bench_test_in_cam1 | 21.11 | 0.7536 | 0.4041 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc3m/bench_test_in_cam1.json | 10-20 |
-| 11 | fish_gut_ppisp_bench_test_in_cam1 | 20.44 | 0.7742 | 0.3845 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_ppisp/bench_test_in_cam1.json | 10-19 |
+| 2 | fish3m_ft_clean_bench_test_in_cam1 | 24.68 | 0.8005 | 0.3276 | spires/2024-03-13-observatory-quarter-01/score/fish3m_ft_clean/bench_test_in_cam1.json | 10-21 |
+| 3 | fishd_ft_clean_bench_test_in_cam1 | 24.68 | 0.7956 | 0.3187 | spires/2024-03-13-observatory-quarter-01/score/fishd_ft_clean/bench_test_in_cam1.json | 10-21 |
+| 4 | fishedgs_ftd_clean_bench_test_in_cam1 | 24.51 | 0.7978 | 0.3339 | spires/2024-03-13-observatory-quarter-01/score/fishedgs_ftd_clean/bench_test_in_cam1.json | 10-21 |
+| 5 | fishft_bench_test_in_cam1 | 24.31 | 0.7909 | 0.3789 | spires/2024-03-13-observatory-quarter-01/score/fishft/bench_test_in_cam1.json | 10-19 |
+| 6 | app_clean_bench_test_in_cam1 | 23.91 | 0.7657 | 0.3023 | spires/2024-03-13-observatory-quarter-01/score/app_clean/bench_test_in_cam1.json | 10-19 |
+| 7 | depth_clean_bench_test_in_cam1 | 23.89 | 0.7677 | 0.2948 * | spires/2024-03-13-observatory-quarter-01/score/depth_clean/bench_test_in_cam1.json | 10-20 |
+| 8 | center_ft_bench_test_in_cam1 | 23.68 | 0.7633 | 0.3047 | spires/2024-03-13-observatory-quarter-01/score/center_ft/bench_test_in_cam1.json | 10-19 |
+| 9 | center_clean_bench_test_in_cam1 | 23.68 | 0.7632 | 0.3047 | spires/2024-03-13-observatory-quarter-01/score/center_clean/bench_test_in_cam1.json | 10-19 |
+| 10 | cube_clean_bench_test_in_cam1 | 22.98 | 0.7699 | 0.3364 | spires/2024-03-13-observatory-quarter-01/score/cube_clean/bench_test_in_cam1.json | 10-20 |
+| 11 | fish_gut_mcmc_bench_test_in_cam1 | 22.66 | 0.7813 | 0.3938 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc/bench_test_in_cam1.json | 10-19 |
+| 12 | fish_gut_depth3m_bench_test_in_cam1 | 21.32 | 0.7371 | 0.4118 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_depth3m/bench_test_in_cam1.json | 10-20 |
+| 13 | fish_gut_mcmc3m_bench_test_in_cam1 | 21.11 | 0.7536 | 0.4041 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc3m/bench_test_in_cam1.json | 10-20 |
+| 14 | fish_gut_edgs3m_bench_test_in_cam1 | 20.72 | 0.7381 | 0.4240 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_edgs3m/bench_test_in_cam1.json | 10-21 |
+| 15 | fish_gut_ppisp_bench_test_in_cam1 | 20.44 | 0.7742 | 0.3845 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_ppisp/bench_test_in_cam1.json | 10-19 |
 
 ## spires — n=46 score [bg?]
 
 | # | arm | PSNR | SSIM | LPIPS | source | date |
 |---|---|---|---|---|---|---|
-| 1 | depth_clean_bench_test_out_cam1 | 21.73 | 0.8046 | 0.3431 * | spires/2024-03-13-observatory-quarter-01/score/depth_clean/bench_test_out_cam1.json | 10-20 |
-| 2 | fishft_clean_bench_test_out_cam1 | 21.58 | 0.8234 | 0.3884 | spires/2024-03-13-observatory-quarter-01/score/fishft_clean/bench_test_out_cam1.json | 10-19 |
-| 3 | fishft_bench_test_out_cam1 | 21.55 | 0.8189 | 0.3964 | spires/2024-03-13-observatory-quarter-01/score/fishft/bench_test_out_cam1.json | 10-19 |
-| 4 | app_clean_bench_test_out_cam1 | 21.48 | 0.7977 | 0.3463 | spires/2024-03-13-observatory-quarter-01/score/app_clean/bench_test_out_cam1.json | 10-19 |
-| 5 | center_clean_bench_test_out_cam1 | 21.32 | 0.7970 | 0.3437 | spires/2024-03-13-observatory-quarter-01/score/center_clean/bench_test_out_cam1.json | 10-19 |
-| 6 | center_ft_bench_test_out_cam1 | 21.31 | 0.7970 | 0.3437 | spires/2024-03-13-observatory-quarter-01/score/center_ft/bench_test_out_cam1.json | 10-19 |
-| 7 | cube_clean_bench_test_out_cam1 | 20.84 | 0.7984 | 0.3581 | spires/2024-03-13-observatory-quarter-01/score/cube_clean/bench_test_out_cam1.json | 10-20 |
-| 8 | fish_gut_mcmc3m_bench_test_out_cam1 | 18.70 | 0.7807 | 0.4321 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc3m/bench_test_out_cam1.json | 10-20 |
-| 9 | fish_gut_depth3m_bench_test_out_cam1 | 18.42 | 0.7662 | 0.4166 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_depth3m/bench_test_out_cam1.json | 10-20 |
-| 10 | fish_gut_mcmc_bench_test_out_cam1 | 18.17 | 0.7899 | 0.4346 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc/bench_test_out_cam1.json | 10-19 |
-| 11 | fish_gut_ppisp_bench_test_out_cam1 | 15.86 | 0.7705 | 0.4283 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_ppisp/bench_test_out_cam1.json | 10-19 |
+| 1 | fish3m_ft_clean_bench_test_out_cam1 | 22.29 | 0.8219 | 0.3691 | spires/2024-03-13-observatory-quarter-01/score/fish3m_ft_clean/bench_test_out_cam1.json | 10-21 |
+| 2 | fishd_ft_clean_bench_test_out_cam1 | 21.93 | 0.8150 | 0.3577 | spires/2024-03-13-observatory-quarter-01/score/fishd_ft_clean/bench_test_out_cam1.json | 10-21 |
+| 3 | fishedgs_ftd_clean_bench_test_out_cam1 | 21.85 | 0.8138 | 0.3755 | spires/2024-03-13-observatory-quarter-01/score/fishedgs_ftd_clean/bench_test_out_cam1.json | 10-21 |
+| 4 | depth_clean_bench_test_out_cam1 | 21.73 | 0.8046 | 0.3431 * | spires/2024-03-13-observatory-quarter-01/score/depth_clean/bench_test_out_cam1.json | 10-20 |
+| 5 | fishft_clean_bench_test_out_cam1 | 21.58 | 0.8234 | 0.3884 | spires/2024-03-13-observatory-quarter-01/score/fishft_clean/bench_test_out_cam1.json | 10-19 |
+| 6 | fishft_bench_test_out_cam1 | 21.55 | 0.8189 | 0.3964 | spires/2024-03-13-observatory-quarter-01/score/fishft/bench_test_out_cam1.json | 10-19 |
+| 7 | app_clean_bench_test_out_cam1 | 21.48 | 0.7977 | 0.3463 | spires/2024-03-13-observatory-quarter-01/score/app_clean/bench_test_out_cam1.json | 10-19 |
+| 8 | center_clean_bench_test_out_cam1 | 21.32 | 0.7970 | 0.3437 | spires/2024-03-13-observatory-quarter-01/score/center_clean/bench_test_out_cam1.json | 10-19 |
+| 9 | center_ft_bench_test_out_cam1 | 21.31 | 0.7970 | 0.3437 | spires/2024-03-13-observatory-quarter-01/score/center_ft/bench_test_out_cam1.json | 10-19 |
+| 10 | cube_clean_bench_test_out_cam1 | 20.84 | 0.7984 | 0.3581 | spires/2024-03-13-observatory-quarter-01/score/cube_clean/bench_test_out_cam1.json | 10-20 |
+| 11 | fish_gut_edgs3m_bench_test_out_cam1 | 19.03 | 0.7781 | 0.4425 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_edgs3m/bench_test_out_cam1.json | 10-21 |
+| 12 | fish_gut_mcmc3m_bench_test_out_cam1 | 18.70 | 0.7807 | 0.4321 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc3m/bench_test_out_cam1.json | 10-20 |
+| 13 | fish_gut_depth3m_bench_test_out_cam1 | 18.42 | 0.7662 | 0.4166 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_depth3m/bench_test_out_cam1.json | 10-20 |
+| 14 | fish_gut_mcmc_bench_test_out_cam1 | 18.17 | 0.7899 | 0.4346 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc/bench_test_out_cam1.json | 10-19 |
+| 15 | fish_gut_ppisp_bench_test_out_cam1 | 15.86 | 0.7705 | 0.4283 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_ppisp/bench_test_out_cam1.json | 10-19 |
 
 ## spires — n=26 score [bg?]
 
 | # | arm | PSNR | SSIM | LPIPS | source | date |
 |---|---|---|---|---|---|---|
-| 1 | bench_test_in | 23.95 | 0.8055 | 0.3588 | spires/2024-03-13-observatory-quarter-01/score/fishft_clean/bench_test_in.json | 10-19 |
-| 2 | bench_test_in | 23.53 | 0.7951 | 0.3775 | spires/2024-03-13-observatory-quarter-01/score/fishft/bench_test_in.json | 10-19 |
-| 3 | bench_test_in | 23.46 | 0.7776 | 0.3023 * | spires/2024-03-13-observatory-quarter-01/score/depth_clean/bench_test_in.json | 10-20 |
-| 4 | bench_test_in | 23.08 | 0.7742 | 0.3075 | spires/2024-03-13-observatory-quarter-01/score/app_clean/bench_test_in.json | 10-19 |
-| 5 | bench_test_in | 23.02 | 0.7736 | 0.3101 | spires/2024-03-13-observatory-quarter-01/score/center_clean/bench_test_in.json | 10-19 |
-| 6 | bench_test_in | 23.02 | 0.7736 | 0.3101 | spires/2024-03-13-observatory-quarter-01/score/center_ft/bench_test_in.json | 10-19 |
-| 7 | bench_test_in | 21.95 | 0.7750 | 0.3353 | spires/2024-03-13-observatory-quarter-01/score/cube_clean/bench_test_in.json | 10-20 |
-| 8 | bench_test_in | 20.77 | 0.7737 | 0.4073 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc/bench_test_in.json | 10-19 |
-| 9 | bench_test_in | 20.26 | 0.7425 | 0.4139 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_depth3m/bench_test_in.json | 10-20 |
-| 10 | bench_test_in | 19.75 | 0.7543 | 0.4099 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc3m/bench_test_in.json | 10-20 |
-| 11 | bench_test_in | 17.73 | 0.7576 | 0.4002 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_ppisp/bench_test_in.json | 10-19 |
+| 1 | bench_test_in | 24.17 | 0.8000 | 0.3291 | spires/2024-03-13-observatory-quarter-01/score/fishd_ft_clean/bench_test_in.json | 10-21 |
+| 2 | bench_test_in | 24.03 | 0.8028 | 0.3348 | spires/2024-03-13-observatory-quarter-01/score/fish3m_ft_clean/bench_test_in.json | 10-21 |
+| 3 | bench_test_in | 23.95 | 0.8055 | 0.3588 | spires/2024-03-13-observatory-quarter-01/score/fishft_clean/bench_test_in.json | 10-19 |
+| 4 | bench_test_in | 23.93 | 0.8011 | 0.3397 | spires/2024-03-13-observatory-quarter-01/score/fishedgs_ftd_clean/bench_test_in.json | 10-21 |
+| 5 | bench_test_in | 23.53 | 0.7951 | 0.3775 | spires/2024-03-13-observatory-quarter-01/score/fishft/bench_test_in.json | 10-19 |
+| 6 | bench_test_in | 23.46 | 0.7776 | 0.3023 * | spires/2024-03-13-observatory-quarter-01/score/depth_clean/bench_test_in.json | 10-20 |
+| 7 | bench_test_in | 23.08 | 0.7742 | 0.3075 | spires/2024-03-13-observatory-quarter-01/score/app_clean/bench_test_in.json | 10-19 |
+| 8 | bench_test_in | 23.02 | 0.7736 | 0.3101 | spires/2024-03-13-observatory-quarter-01/score/center_clean/bench_test_in.json | 10-19 |
+| 9 | bench_test_in | 23.02 | 0.7736 | 0.3101 | spires/2024-03-13-observatory-quarter-01/score/center_ft/bench_test_in.json | 10-19 |
+| 10 | bench_test_in | 21.95 | 0.7750 | 0.3353 | spires/2024-03-13-observatory-quarter-01/score/cube_clean/bench_test_in.json | 10-20 |
+| 11 | bench_test_in | 20.77 | 0.7737 | 0.4073 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc/bench_test_in.json | 10-19 |
+| 12 | bench_test_in | 20.26 | 0.7425 | 0.4139 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_depth3m/bench_test_in.json | 10-20 |
+| 13 | bench_test_in | 19.98 | 0.7432 | 0.4249 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_edgs3m/bench_test_in.json | 10-21 |
+| 14 | bench_test_in | 19.75 | 0.7543 | 0.4099 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc3m/bench_test_in.json | 10-20 |
+| 15 | bench_test_in | 17.73 | 0.7576 | 0.4002 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_ppisp/bench_test_in.json | 10-19 |
 
 ## spires — n=26 score [grey]
 
 | # | arm | PSNR | SSIM | LPIPS | source | date |
 |---|---|---|---|---|---|---|
-| 1 | fishft_clean_test_in | 27.23 | 0.8693 | 0.3491 | spires/2024-03-13-observatory-quarter-01/score/fishft_clean/live_test_in_grey.json | 10-19 |
-| 2 | depth_clean_test_in | 26.77 | 0.8648 | 0.2960 * | spires/2024-03-13-observatory-quarter-01/score/depth_clean/live_test_in_grey.json | 10-20 |
-| 3 | fishft_test_in | 26.06 | 0.8543 | 0.3687 | spires/2024-03-13-observatory-quarter-01/score/fishft/live_test_in_grey.json | 10-19 |
-| 4 | center_clean_test_in | 25.98 | 0.8592 | 0.3097 | spires/2024-03-13-observatory-quarter-01/score/center_clean/live_test_in_grey.json | 10-19 |
-| 5 | center_ft_test_in | 25.98 | 0.8592 | 0.3097 | spires/2024-03-13-observatory-quarter-01/score/center_ft/live_test_in_grey.json | 10-19 |
-| 6 | app_clean_test_in | 25.96 | 0.8599 | 0.3077 | spires/2024-03-13-observatory-quarter-01/score/app_clean/live_test_in_grey.json | 10-19 |
-| 7 | cube_clean_test_in | 23.93 | 0.8519 | 0.3351 | spires/2024-03-13-observatory-quarter-01/score/cube_clean/live_test_in_grey.json | 10-20 |
-| 8 | fish_gut_mcmc_test_in | 22.77 | 0.8405 | 0.3851 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc/live_test_in_grey.json | 10-19 |
-| 9 | fish_gut_mcmc3m_test_in | 21.30 | 0.8256 | 0.3878 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc3m/live_test_in_grey.json | 10-20 |
-| 10 | fish_gut_depth3m_test_in | 21.14 | 0.8079 | 0.3998 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_depth3m/live_test_in_grey.json | 10-20 |
-| 11 | fish_gut_ppisp_test_in | 19.42 | 0.8279 | 0.3882 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_ppisp/live_test_in_grey.json | 10-19 |
+| 1 | fish3m_ft_clean_test_in | 27.30 | 0.8738 | 0.3273 | spires/2024-03-13-observatory-quarter-01/score/fish3m_ft_clean/live_test_in_grey.json | 10-21 |
+| 2 | fishft_clean_test_in | 27.23 | 0.8693 | 0.3491 | spires/2024-03-13-observatory-quarter-01/score/fishft_clean/live_test_in_grey.json | 10-19 |
+| 3 | fishd_ft_clean_test_in | 27.15 | 0.8721 | 0.3208 | spires/2024-03-13-observatory-quarter-01/score/fishd_ft_clean/live_test_in_grey.json | 10-21 |
+| 4 | fishedgs_ftd_clean_test_in | 27.09 | 0.8727 | 0.3291 | spires/2024-03-13-observatory-quarter-01/score/fishedgs_ftd_clean/live_test_in_grey.json | 10-21 |
+| 5 | depth_clean_test_in | 26.77 | 0.8648 | 0.2960 * | spires/2024-03-13-observatory-quarter-01/score/depth_clean/live_test_in_grey.json | 10-20 |
+| 6 | fishft_test_in | 26.06 | 0.8543 | 0.3687 | spires/2024-03-13-observatory-quarter-01/score/fishft/live_test_in_grey.json | 10-19 |
+| 7 | center_clean_test_in | 25.98 | 0.8592 | 0.3097 | spires/2024-03-13-observatory-quarter-01/score/center_clean/live_test_in_grey.json | 10-19 |
+| 8 | center_ft_test_in | 25.98 | 0.8592 | 0.3097 | spires/2024-03-13-observatory-quarter-01/score/center_ft/live_test_in_grey.json | 10-19 |
+| 9 | app_clean_test_in | 25.96 | 0.8599 | 0.3077 | spires/2024-03-13-observatory-quarter-01/score/app_clean/live_test_in_grey.json | 10-19 |
+| 10 | cube_clean_test_in | 23.93 | 0.8519 | 0.3351 | spires/2024-03-13-observatory-quarter-01/score/cube_clean/live_test_in_grey.json | 10-20 |
+| 11 | fish_gut_mcmc_test_in | 22.77 | 0.8405 | 0.3851 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc/live_test_in_grey.json | 10-19 |
+| 12 | fish_gut_edgs3m_test_in | 21.35 | 0.8153 | 0.4019 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_edgs3m/live_test_in_grey.json | 10-21 |
+| 13 | fish_gut_mcmc3m_test_in | 21.30 | 0.8256 | 0.3878 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc3m/live_test_in_grey.json | 10-20 |
+| 14 | fish_gut_depth3m_test_in | 21.14 | 0.8079 | 0.3998 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_depth3m/live_test_in_grey.json | 10-20 |
+| 15 | fish_gut_ppisp_test_in | 19.42 | 0.8279 | 0.3882 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_ppisp/live_test_in_grey.json | 10-19 |
 
 ## spires — n=44 score [bg?]
 
@@ -1778,27 +2003,35 @@ Rows within one table share sequence, scored-view count and evaluation set; PSNR
 | 2 | center_ft_bench_test_out_cam2 | 20.14 | 0.6631 | 0.4125 * | spires/2024-03-13-observatory-quarter-01/score/center_ft/bench_test_out_cam2.json | 10-19 |
 | 3 | center_clean_bench_test_out_cam2 | 20.14 | 0.6631 | 0.4126 | spires/2024-03-13-observatory-quarter-01/score/center_clean/bench_test_out_cam2.json | 10-19 |
 | 4 | app_clean_bench_test_out_cam2 | 20.10 | 0.6632 | 0.4127 | spires/2024-03-13-observatory-quarter-01/score/app_clean/bench_test_out_cam2.json | 10-19 |
-| 5 | depth_clean_bench_test_out_cam2 | 19.84 | 0.6624 | 0.4162 | spires/2024-03-13-observatory-quarter-01/score/depth_clean/bench_test_out_cam2.json | 10-20 |
-| 6 | cube_clean_bench_test_out_cam2 | 19.77 | 0.6612 | 0.4300 | spires/2024-03-13-observatory-quarter-01/score/cube_clean/bench_test_out_cam2.json | 10-20 |
-| 7 | fishft_bench_test_out_cam2 | 19.75 | 0.6725 | 0.4692 | spires/2024-03-13-observatory-quarter-01/score/fishft/bench_test_out_cam2.json | 10-19 |
-| 8 | fish_gut_mcmc_bench_test_out_cam2 | 19.72 | 0.6696 | 0.4675 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc/bench_test_out_cam2.json | 10-19 |
-| 9 | fish_gut_ppisp_bench_test_out_cam2 | 19.53 | 0.6783 | 0.4610 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_ppisp/bench_test_out_cam2.json | 10-19 |
-| 10 | fish_gut_mcmc3m_bench_test_out_cam2 | 18.97 | 0.6455 | 0.4813 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc3m/bench_test_out_cam2.json | 10-20 |
-| 11 | fish_gut_depth3m_bench_test_out_cam2 | 17.64 | 0.6167 | 0.5079 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_depth3m/bench_test_out_cam2.json | 10-20 |
+| 5 | fish3m_ft_clean_bench_test_out_cam2 | 20.02 | 0.6793 | 0.4311 | spires/2024-03-13-observatory-quarter-01/score/fish3m_ft_clean/bench_test_out_cam2.json | 10-21 |
+| 6 | fishd_ft_clean_bench_test_out_cam2 | 19.92 | 0.6768 | 0.4353 | spires/2024-03-13-observatory-quarter-01/score/fishd_ft_clean/bench_test_out_cam2.json | 10-21 |
+| 7 | fishedgs_ftd_clean_bench_test_out_cam2 | 19.84 | 0.6762 | 0.4357 | spires/2024-03-13-observatory-quarter-01/score/fishedgs_ftd_clean/bench_test_out_cam2.json | 10-21 |
+| 8 | depth_clean_bench_test_out_cam2 | 19.84 | 0.6624 | 0.4162 | spires/2024-03-13-observatory-quarter-01/score/depth_clean/bench_test_out_cam2.json | 10-20 |
+| 9 | cube_clean_bench_test_out_cam2 | 19.77 | 0.6612 | 0.4300 | spires/2024-03-13-observatory-quarter-01/score/cube_clean/bench_test_out_cam2.json | 10-20 |
+| 10 | fishft_bench_test_out_cam2 | 19.75 | 0.6725 | 0.4692 | spires/2024-03-13-observatory-quarter-01/score/fishft/bench_test_out_cam2.json | 10-19 |
+| 11 | fish_gut_mcmc_bench_test_out_cam2 | 19.72 | 0.6696 | 0.4675 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc/bench_test_out_cam2.json | 10-19 |
+| 12 | fish_gut_ppisp_bench_test_out_cam2 | 19.53 | 0.6783 | 0.4610 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_ppisp/bench_test_out_cam2.json | 10-19 |
+| 13 | fish_gut_mcmc3m_bench_test_out_cam2 | 18.97 | 0.6455 | 0.4813 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc3m/bench_test_out_cam2.json | 10-20 |
+| 14 | fish_gut_edgs3m_bench_test_out_cam2 | 18.11 | 0.6256 | 0.5041 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_edgs3m/bench_test_out_cam2.json | 10-21 |
+| 15 | fish_gut_depth3m_bench_test_out_cam2 | 17.64 | 0.6167 | 0.5079 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_depth3m/bench_test_out_cam2.json | 10-20 |
 
 ## spires — n=137 score [bg?]
 
 | # | arm | PSNR | SSIM | LPIPS | source | date |
 |---|---|---|---|---|---|---|
-| 1 | bench_test_out | 20.96 | 0.7754 | 0.4147 | spires/2024-03-13-observatory-quarter-01/score/fishft_clean/bench_test_out.json | 10-19 |
-| 2 | bench_test_out | 20.90 | 0.7518 | 0.3883 | spires/2024-03-13-observatory-quarter-01/score/depth_clean/bench_test_out.json | 10-20 |
-| 3 | bench_test_out | 20.71 | 0.7662 | 0.4295 | spires/2024-03-13-observatory-quarter-01/score/fishft/bench_test_out.json | 10-19 |
-| 4 | bench_test_out | 20.64 | 0.7472 | 0.3846 | spires/2024-03-13-observatory-quarter-01/score/app_clean/bench_test_out.json | 10-19 |
-| 5 | bench_test_out | 20.56 | 0.7470 | 0.3842 * | spires/2024-03-13-observatory-quarter-01/score/center_ft/bench_test_out.json | 10-19 |
-| 6 | bench_test_out | 20.56 | 0.7470 | 0.3842 * | spires/2024-03-13-observatory-quarter-01/score/center_clean/bench_test_out.json | 10-19 |
-| 7 | bench_test_out | 19.99 | 0.7450 | 0.3952 | spires/2024-03-13-observatory-quarter-01/score/cube_clean/bench_test_out.json | 10-20 |
-| 8 | bench_test_out | 18.83 | 0.7484 | 0.4465 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc/bench_test_out.json | 10-19 |
-| 9 | bench_test_out | 18.59 | 0.7314 | 0.4532 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc3m/bench_test_out.json | 10-20 |
-| 10 | bench_test_out | 18.43 | 0.7168 | 0.4559 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_depth3m/bench_test_out.json | 10-20 |
-| 11 | bench_test_out | 16.95 | 0.7372 | 0.4466 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_ppisp/bench_test_out.json | 10-19 |
+| 1 | bench_test_out | 21.08 | 0.7691 | 0.4013 | spires/2024-03-13-observatory-quarter-01/score/fish3m_ft_clean/bench_test_out.json | 10-21 |
+| 2 | bench_test_out | 21.03 | 0.7658 | 0.4082 | spires/2024-03-13-observatory-quarter-01/score/fishedgs_ftd_clean/bench_test_out.json | 10-21 |
+| 3 | bench_test_out | 20.99 | 0.7644 | 0.4007 | spires/2024-03-13-observatory-quarter-01/score/fishd_ft_clean/bench_test_out.json | 10-21 |
+| 4 | bench_test_out | 20.96 | 0.7754 | 0.4147 | spires/2024-03-13-observatory-quarter-01/score/fishft_clean/bench_test_out.json | 10-19 |
+| 5 | bench_test_out | 20.90 | 0.7518 | 0.3883 | spires/2024-03-13-observatory-quarter-01/score/depth_clean/bench_test_out.json | 10-20 |
+| 6 | bench_test_out | 20.71 | 0.7662 | 0.4295 | spires/2024-03-13-observatory-quarter-01/score/fishft/bench_test_out.json | 10-19 |
+| 7 | bench_test_out | 20.64 | 0.7472 | 0.3846 | spires/2024-03-13-observatory-quarter-01/score/app_clean/bench_test_out.json | 10-19 |
+| 8 | bench_test_out | 20.56 | 0.7470 | 0.3842 * | spires/2024-03-13-observatory-quarter-01/score/center_ft/bench_test_out.json | 10-19 |
+| 9 | bench_test_out | 20.56 | 0.7470 | 0.3842 * | spires/2024-03-13-observatory-quarter-01/score/center_clean/bench_test_out.json | 10-19 |
+| 10 | bench_test_out | 19.99 | 0.7450 | 0.3952 | spires/2024-03-13-observatory-quarter-01/score/cube_clean/bench_test_out.json | 10-20 |
+| 11 | bench_test_out | 18.83 | 0.7484 | 0.4465 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc/bench_test_out.json | 10-19 |
+| 12 | bench_test_out | 18.59 | 0.7314 | 0.4532 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_mcmc3m/bench_test_out.json | 10-20 |
+| 13 | bench_test_out | 18.45 | 0.7206 | 0.4722 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_edgs3m/bench_test_out.json | 10-21 |
+| 14 | bench_test_out | 18.43 | 0.7168 | 0.4559 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_depth3m/bench_test_out.json | 10-20 |
+| 15 | bench_test_out | 16.95 | 0.7372 | 0.4466 | spires/2024-03-13-observatory-quarter-01/score/fish_gut_ppisp/bench_test_out.json | 10-19 |
 
