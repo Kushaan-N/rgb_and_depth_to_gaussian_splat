@@ -358,6 +358,59 @@ class Spires:
         self.report["init_points"] = {"n": int(len(X)), "coloured_fraction": float((cnt > 0).mean())}
         print(f"[spires] init points: {len(X)} ({100 * (cnt > 0).mean():.0f}% coloured)", flush=True)
 
+    # --- stage: TLS occupancy octree -> leaf dump -------------------------------
+    def stage_occ(self):
+        """gt_cloud.bt (their TLS occupancy OctoMap) -> <root>/gt_occ_leaves.bin via scripts/datasets/octomap_leaves.c
+        (compiled here with gcc; run in a CPU job), for spires_geom.py --occupancy (their unknown-space filter)."""
+        import subprocess
+        bt = os.path.join(self.raw, "reconstruction_benchmark", self.seq, "gt_cloud.bt")
+        exe = os.path.join(self.root, "octomap_leaves"); out = os.path.join(self.root, "gt_occ_leaves.bin")
+        subprocess.run(["gcc", "-O2", "-o", exe, os.path.join(HERE, "octomap_leaves.c")], check=True)
+        r = subprocess.run([exe, bt, out], check=True, capture_output=True, text=True).stdout.strip()
+        info = json.loads(r); json.dump(info, open(out + ".json", "w")); self.report["occupancy"] = info
+        print(f"[spires] TLS occupancy leaves: {info}", flush=True)
+
+    # --- stage: rig / operator masks -------------------------------------------
+    def stage_masks(self):
+        """Static-occluder masks (the operator's body / rig parts fixed in the camera frame): per camera, pixels whose
+        colour barely changes over the training frames (temporal std at 1/4 res < masks_std_rel x the median std),
+        kept only as components touching the image border, dilated by masks_dilate px -> fisheye/masks/<cam>.png
+        (255 = ignore). Carried into the rectified training views (nearest, through the exact view maps) as
+        pinhole_<variant>/train_masks/<stem>_mask.png for train_viewer_gsplat.py / finetune_ply_viewer.py --mask-dir."""
+        import cv2
+        from rectify_views import read_cameras, read_images, view_maps
+        d = os.path.join(self.root, "fisheye", "train"); sp = os.path.join(d, "sparse", "0")
+        cams = read_cameras(os.path.join(sp, "cameras.txt")); ims = read_images(os.path.join(sp, "images.txt"))
+        md = os.path.join(self.root, "fisheye", "masks"); os.makedirs(md, exist_ok=True); M, frac = {}, {}
+        rel, dil = float(self.ad.get("masks_std_rel", 0.25)), int(self.ad.get("masks_dilate", 24))
+        for cid, cam in cams.items():
+            w, h = cam.width // 4, cam.height // 4
+            S = np.stack([cv2.resize(cv2.imread(os.path.join(d, "images", n)), (w, h), interpolation=cv2.INTER_AREA)
+                          .astype(np.float32) for _, _, _, c, n in ims if c == cid])
+            sd = S.std(0).mean(-1); m = (sd < rel * np.median(sd)).astype(np.uint8)
+            n, lab, st, _ = cv2.connectedComponentsWithStats(m); keep = np.zeros_like(m)
+            for i in range(1, n):
+                x, y, ww, hh, a = st[i]
+                if a > 50 and (x == 0 or y == 0 or x + ww == w or y + hh == h):
+                    keep[lab == i] = 1
+            full = cv2.resize(keep * 255, (cam.width, cam.height), interpolation=cv2.INTER_NEAREST)
+            full = cv2.dilate(full, np.ones((dil, dil), np.uint8)); M[cid] = full; frac[cid] = float((full > 0).mean())
+            cv2.imwrite(os.path.join(md, f"cam{cid}.png"), full)
+        variant = self.ad.get("rect_variant", "center"); r = self.ad[f"rect_{variant}"]
+        views = make_views(r["fov"], r["width"], r["height"], r.get("yaws", [0]), r.get("pitches", [0]))
+        out = os.path.join(self.root, f"pinhole_{variant}", "train_masks"); os.makedirs(out, exist_ok=True); vf = []
+        for cid, full in M.items():
+            for v in views:
+                mx, my, ok = view_maps(cams[cid], v, 1)
+                mv = cv2.remap(full, mx, my, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+                for _, _, _, c, n in ims:
+                    if c == cid:
+                        st = os.path.splitext(n)[0]
+                        cv2.imwrite(os.path.join(out, (f"{st}_{v.name}" if v.name else st) + "_mask.png"), mv)
+                vf.append(float((mv > 0).mean()))
+        self.report["masks"] = {"fisheye_fraction": frac, "rect_fraction_mean": float(np.mean(vf))}
+        print(f"[spires] rig masks: fisheye {frac}, rectified mean {np.mean(vf):.4f}", flush=True)
+
     # --- stage: LiDAR depth targets for the fisheye training frames -----------
     def stage_fdepth(self):
         """<stem>_depth.npy (float16 ray distance, 0 = none) next to every fisheye TRAINING image, for 3DGUT's LiDAR depth
@@ -505,7 +558,7 @@ class Spires:
         print(f"[spires] export_viewer layout at {P}", flush=True)
 
 
-STAGES = ("fisheye", "lidar", "tls", "rect", "bench", "layout")   # + fdepth (opt-in: fisheye LiDAR depth targets)
+STAGES = ("fisheye", "lidar", "tls", "rect", "bench", "layout")   # + fdepth, masks, occ (opt-in)
 
 
 def main():
