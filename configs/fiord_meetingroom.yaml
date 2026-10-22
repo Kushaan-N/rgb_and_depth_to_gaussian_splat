@@ -41,3 +41,37 @@ rect_variants:              # `fiord.py prepare --rig <name>` -> pipeline/rect_<
       - {yaw: -22, pitch: 22, fov: 90, name: lu}
       - {yaw: 22, pitch: -22, fov: 90, name: rd}
       - {yaw: -22, pitch: -22, fov: 90, name: ld}
+tls_align:                  # one-time hand-picked model<->scan alignment (user decision 2026-10-22; FIORD ships none).
+  # Room corners read off top/side slices of the levelled splat (rect_igs_long; the camera was mounted upside down, so
+  # model up = +y) and of the Faro scan (+z up, floor z 57.02); wall-floor junctions plus the same corners 1.5 m up
+  # (model height via a provisional scale 0.5; ICP then refines scale). The rectangular room is ~180-deg symmetric,
+  # so both corner assignments are stored; `fiord.py align` ICP-refines each and keeps the better (overlays in
+  # <out>/pipeline/align_manual_<h>_{top,side}.jpg). The glass/blind wall (scan sees through it) is not used.
+  sim3:                     # result of the pairs (hypothesis H2: pair residual median 0.111 m) + ICP on
+                            # the rect_igs splat's opaque centres; F@10 cm 0.500 (acc 0.429 / comp 0.601).
+                            # H1 (the 180-deg twin) scored F 0.472 and its chairs/bench fall on empty floor in the
+                            # overlays; H2's bench row, table and whiteboard coincide. x_tls = s R x_model + t
+    s: 0.539841
+    R: [[-0.236564, -0.027820, -0.971217], [-0.971592, -0.000267, 0.236663], [-0.006843, 0.999613, -0.026967]]
+    t: [2.495288, 0.023260, 58.364119]
+    hypothesis: H2
+    fitness: 0.500           # F@10 cm of the ICP source (validity check in geom / clean)
+  hypotheses:
+    H1:
+      - {model: [7.002, -2.909, -2.346], scan: [0.75, 4.25, 57.02], what: 'room corner TR/A, floor'}
+      - {model: [6.992, 0.091, -2.322], scan: [0.75, 4.25, 58.52], what: 'room corner TR/A, 1.5 m'}
+      - {model: [2.238, -3.017, 9.069], scan: [6.05, 0.15, 57.02], what: 'room corner BR/B, floor'}
+      - {model: [2.229, -0.017, 9.093], scan: [6.05, 0.15, 58.52], what: 'room corner BR/B, 1.5 m'}
+      - {model: [-7.173, -3.017, 5.399], scan: [2.95, -3.75, 57.02], what: 'room corner BL/C, floor'}
+      - {model: [-7.183, -0.017, 5.423], scan: [2.95, -3.75, 58.52], what: 'room corner BL/C, 1.5 m'}
+      - {model: [-2.111, -2.905, -6.317], scan: [-2.10, 0.20, 57.02], what: 'room corner TL/D, floor'}
+      - {model: [-2.120, 0.095, -6.293], scan: [-2.10, 0.20, 58.52], what: 'room corner TL/D, 1.5 m'}
+    H2:
+      - {model: [7.002, -2.909, -2.346], scan: [2.95, -3.75, 57.02], what: 'room corner TR/C, floor'}
+      - {model: [6.992, 0.091, -2.322], scan: [2.95, -3.75, 58.52], what: 'room corner TR/C, 1.5 m'}
+      - {model: [2.238, -3.017, 9.069], scan: [-2.10, 0.20, 57.02], what: 'room corner BR/D, floor'}
+      - {model: [2.229, -0.017, 9.093], scan: [-2.10, 0.20, 58.52], what: 'room corner BR/D, 1.5 m'}
+      - {model: [-7.173, -3.017, 5.399], scan: [0.75, 4.25, 57.02], what: 'room corner BL/A, floor'}
+      - {model: [-7.183, -0.017, 5.423], scan: [0.75, 4.25, 58.52], what: 'room corner BL/A, 1.5 m'}
+      - {model: [-2.111, -2.905, -6.317], scan: [6.05, 0.15, 57.02], what: 'room corner TL/B, floor'}
+      - {model: [-2.120, 0.095, -6.293], scan: [6.05, 0.15, 58.52], what: 'room corner TL/B, 1.5 m'}
