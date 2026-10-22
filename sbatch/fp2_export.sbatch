@@ -8,7 +8,7 @@
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o logs/%x-%j.out sbatch/fp2_export.sbatch configs/fp2_legged_room00.yaml
 # Env: NAME (viewer_igs), ARM_FLAGS (default "--strategy improved --budget 4000000 --iters 60000"), PROF (pc274),
 #      DSCALE (1.5:4), FT_ITERS (7000), FT_ARGS ("--lambda-wd 0.025 --wd-log2-sigma 4" = the WD fine-tune),
-#      TRAIN_DATA (default <P>/onpath/train), TEST_DATA (default <P>/onpath/test), EDGS_ARGS, CLEAN (1), CHECK (1),
+#      TRAIN_PLY (reuse a trained stage-1 splat, e.g. to test fine-tune variants), TRAIN_DATA (default <P>/onpath/train), TEST_DATA (default <P>/onpath/test), EDGS_ARGS, CLEAN (1), CHECK (1),
 #      MASK=1 (person masks on the train frames, scripts/datasets/fusionportable_masks.py, excluded from the training and
 #      fine-tune losses via --mask-dir), VIEW (1: also <NAME>*_view.ply, scripts/view_frame.py), FP2_WS
 #SBATCH -J fp2-export
@@ -53,6 +53,7 @@ echo "== 0. EDGS dense-correspondence init (train frames)"
 tail -2 "$F/edgs_init.log"
 
 echo "== 1. viewer-matched training ($PROF kernels): $ARM_FLAGS"
+if [ -n "${TRAIN_PLY:-}" ] && [ ! -f "$F/train/splat.ply" ]; then mkdir -p "$F/train"; cp "$TRAIN_PLY" "$F/train/splat.ply"; fi
 if [ ! -f "$F/train/splat.ply" ]; then
   mkdir -p "$F/train"
   # shellcheck disable=SC2086
