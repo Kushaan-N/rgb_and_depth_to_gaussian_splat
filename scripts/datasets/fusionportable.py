@@ -693,7 +693,10 @@ def cmd_resplit(cx, args):
     src = args.src; te_names = {ln.split()[9] for ln in _model_lines(os.path.join(cx.P, "onpath", "test"))}
     lines = _model_lines(src)
     for sub, want in (("train", False), ("test", True)):
-        d = f"{src}_{sub}"; shutil.rmtree(d, ignore_errors=True); os.makedirs(os.path.join(d, "sparse", "0"))
+        d = f"{src}_{sub}"
+        if os.path.exists(os.path.join(d, "sparse", "0", "images.txt")) and not args.force:
+            print(f"[fp2] resplit: have {d}"); continue            # concurrent arms may be training on it
+        shutil.rmtree(d, ignore_errors=True); os.makedirs(os.path.join(d, "sparse", "0"))
         sel = [ln for ln in lines if (ln.split()[9] in te_names) == want]
         open(os.path.join(d, "sparse", "0", "images.txt"), "w").write("".join(ln + "\n\n" for ln in sel))
         for x in ("cameras.txt", "points3D.txt"):
