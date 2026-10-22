@@ -6,8 +6,9 @@ points  Spires reconstruction-benchmark style (Tao et al. 2025, Sec. 6.2): the s
         export) and, secondary, its centres with opacity >= --min-opacity -- vs the TLS cloud: precision / recall / F-score at 5 and 10 cm (a point is a
         true positive if its nearest neighbour in the other cloud is within the threshold), accuracy (mean
         splat->TLS distance) and completeness (mean TLS->splat distance). Both clouds are restricted to the region
-        the rig observed: within --max-cam-dist of a training camera centre and inside the TLS crop (their protocol
-        instead filters by the TLS occupancy octree; the LiDAR cloud scored the same way is the reference row).
+        the rig observed: within --max-cam-dist of a training camera centre and inside the TLS crop; with --occupancy
+        reconstruction points in the TLS octree's UNKNOWN space are dropped too (their protocol). The LiDAR cloud
+        scored the same way is the reference row.
         --ref-cloud also scores a plain point cloud (e.g. the merged LiDAR) the same way.
 depth   rendered depth at held-out cameras vs the TLS z-buffered into the same cameras: per-pixel ray distance from
         render_ply_depth.py (<stem>_splatdepth.npy) vs build_depth_targets.py --cloud tls.ply (<stem>_depth.npy in
@@ -68,6 +69,24 @@ def depth_cloud(depth_dir, ds, stride=4, vox=0.02):
     return P[i]
 
 
+class Occupancy:
+    """Known space of an OctoMap (leaf dump of scripts/datasets/octomap_leaves.c): known(X_tls) = inside an occupied or
+    free leaf. The Spires benchmark drops reconstruction points in UNKNOWN space (never seen by the TLS)."""
+
+    def __init__(self, leaves, res):
+        L = np.fromfile(leaves, dtype=[("d", "u1"), ("s", "u1"), ("k", "<u2", 3)]); self.res = res; self.levels = []
+        for d in np.unique(L["d"]):
+            k = L["k"][L["d"] == d].astype(np.int64) >> (16 - int(d))
+            self.levels.append((int(d), np.unique((k[:, 0] << 32) | (k[:, 1] << 16) | k[:, 2])))
+
+    def known(self, X):
+        K = (np.floor(X / self.res).astype(np.int64) + 32768).clip(0, 65535); out = np.zeros(len(X), bool)
+        for d, keys in self.levels:
+            k = K >> (16 - d); q = (k[:, 0] << 32) | (k[:, 1] << 16) | k[:, 2]
+            i = np.searchsorted(keys, q).clip(0, len(keys) - 1); out |= keys[i] == q
+        return out
+
+
 def cmd_points(a):
     from scipy.spatial import cKDTree
     gt = read_ply_xyz_opacity(a.tls)[0]; C = cam_centres(a.cams)
@@ -76,14 +95,23 @@ def cmd_points(a):
     if a.max_gt_points and len(gt) > a.max_gt_points:
         gt = gt[np.random.default_rng(0).choice(len(gt), a.max_gt_points, replace=False)]
     res = {"region": {"max_cam_dist_m": a.max_cam_dist, "n_cams": int(len(C))}}
+    if a.occupancy:                                   # world -> TLS frame (world.json offset, tls_align.json rigid)
+        occ = Occupancy(a.occupancy, json.load(open(a.occupancy + ".json"))["res"])
+        off = np.array(json.load(open(a.world))["offset_tls"]); al = json.load(open(a.tls_align)) if a.tls_align else None
+        Ra, ta = (np.array(al["R"]), np.array(al["t"])) if al else (np.eye(3), np.zeros(3))
+        known = lambda X: occ.known((X - ta) @ Ra + off)
+        res["region"]["occupancy_filter"] = a.occupancy
+    else:
+        known = lambda X: np.ones(len(X), bool)
     if a.ply:
-        P, o = read_ply_xyz_opacity(a.ply); P = P[o >= a.min_opacity]; P = P[keep(P)]
+        P, o = read_ply_xyz_opacity(a.ply); P = P[o >= a.min_opacity]; P = P[keep(P)]; P = P[known(P)]
         res["splat_centres"] = {"ply": a.ply, "min_opacity": a.min_opacity, **pr_scores(P, gt)}
     if a.depth_dir:
-        P = depth_cloud(a.depth_dir, a.depth_dataset); P = P[keep(P)]
+        P = depth_cloud(a.depth_dir, a.depth_dataset); P = P[keep(P)]; n0 = len(P); P = P[known(P)]
+        res["region"]["splat_known_fraction"] = len(P) / max(n0, 1)
         res["splat"] = {"depth_dir": a.depth_dir, "dataset": a.depth_dataset, **pr_scores(P, gt)}
     if a.ref_cloud:
-        R = read_ply_xyz_opacity(a.ref_cloud)[0]; R = R[keep(R)]
+        R = read_ply_xyz_opacity(a.ref_cloud)[0]; R = R[keep(R)]; R = R[known(R)]
         res["ref_cloud"] = {"ply": a.ref_cloud, **pr_scores(R, gt)}
     for k in ("splat", "splat_centres", "ref_cloud"):
         if k in res:
@@ -124,6 +152,8 @@ def main():
     p.add_argument("--depth-dir", help="<stem>_splatdepth.npy renders (render_ply_depth.py) -> the scored surface")
     p.add_argument("--depth-dataset", help="pinhole dataset those depths were rendered at (e.g. the training views)")
     p.add_argument("--max-cam-dist", type=float, default=20.0); p.add_argument("--max-gt-points", type=int, default=8_000_000)
+    p.add_argument("--occupancy", help="TLS occupancy leaf dump (spires.py stage occ): drop rec points in unknown space")
+    p.add_argument("--world", help="world.json (offset) for --occupancy"); p.add_argument("--tls-align", help="tls_align.json")
     p.add_argument("--json-out")
     d = s.add_parser("depth"); d.add_argument("--pred-dir", required=True); d.add_argument("--dataset", required=True)
     d.add_argument("--json-out")
