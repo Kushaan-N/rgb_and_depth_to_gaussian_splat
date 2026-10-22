@@ -27,7 +27,16 @@ One section per dataset: source, licence, what was downloaded (size, path), how 
 - Fetch: `python scripts/datasets/spires_fetch.py configs/spires_roq01.yaml` (stdlib only; resumable; files listed in
   the config) or `sbatch/spires_fetch.sbatch`. Other sequences: copy configs/spires_roq01.yaml, change `sequence.name`
   and the file list.
-- Adapter: `sbatch/spires_prepare.sbatch configs/spires_roq01.yaml` (scripts/datasets/spires.py) -> `$MC/outputs/spires/<seq>/`.
+- Adapter: `sbatch/spires_prepare.sbatch configs/spires_roq01.yaml` (scripts/datasets/spires.py) -> `$MC/outputs/spires/<seq>/`:
+  fisheye/{train,test_in,test_out} (OPENCV_FISHEYE from Kalibr, cx/cy +0.5 to COLMAP convention; poses = gt-tum.txt
+  x T_base_lidar x T_cam_lidar^-1; their NVS split: 225 train / 26 in-sequence (every 10th train frame) / 137
+  out-of-sequence), pinhole_center (100x83 deg, 1280x960, scripts/rectify_views.py), pinhole_cube (3x60 deg native
+  res), benchmark/<set>_cam<k> (their own undistorted 1000x5xx eval images at their COLMAP poses, Sim3-aligned),
+  lidar.ply (VILENS keyframe clouds, 5 cm), tls.ply (TLS crop, 2 cm), checks/overlay_*.jpg.
+  Checks: our camera poses vs their independent COLMAP model: 1.3 cm / 0.26 deg median. Caveat found: gt-tum.txt
+  is offset ~0.23 m (mostly constant) from the TLS datum (LiDAR clouds placed with it sit 12 cm from the TLS vs
+  2.5 cm with T_gt_lidar x SLAM poses); the adapter moves the TLS onto the GT datum (tls_align.json) so geometry
+  scores measure the splat. `adapter.pose_source: slam_tls` uses the TLS datum directly (keyframe stamps only).
 
 ## Smaller candidates (multi-camera / 360 / fisheye; web survey 2026-10-19)
 
