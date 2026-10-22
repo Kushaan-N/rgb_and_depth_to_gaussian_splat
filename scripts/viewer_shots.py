@@ -118,12 +118,22 @@ def parse_bg(s):
     return s.replace(",", "_"), v
 
 
+SCENE = "scene.ply"   # served name; keeps the input's extension so SuperSplat picks the right loader (.sog, .compressed.ply, .spz)
+
+
+def scene_name(path):
+    for ext in (".compressed.ply", ".ply", ".sog", ".spz", ".splat", ".ksplat"):
+        if path.lower().endswith(ext):
+            return "scene" + ext
+    return "scene.ply"
+
+
 def open_editor(pw, url, port, timeout_s=600):
     """Today's SuperSplat (WebGPU) with /scene.ply loaded -> (browser, page, frame, info)."""
     browser = pw.chromium.launch(headless=False, args=WEBGPU_FLAGS)
     page = browser.new_page(viewport={"width": 1280, "height": 800})
     page.on("console", lambda m: m.type == "error" and print("[viewer] editor js:", m.text[:300], flush=True))
-    page.goto(f"{url}?load=http://127.0.0.1:{port}/scene.ply", timeout=120000)
+    page.goto(f"{url}?load=http://127.0.0.1:{port}/{SCENE}", timeout=120000)
     t0, info = time.time(), None
     while time.time() - t0 < timeout_s:
         for fr in page.frames:
@@ -199,7 +209,11 @@ def main():
     if args.engine == "pc274" and len(set(geo.values())) > 1:
         raise SystemExit("[viewer] pc274 engine: cameras differ in size/principal point; use --engine current")
     root = tempfile.mkdtemp(prefix="viewer_")
-    os.symlink(os.path.abspath(args.ply), os.path.join(root, "scene.ply"))
+    global SCENE
+    SCENE = scene_name(args.ply)
+    if args.engine == "pc274" and SCENE != "scene.ply":
+        raise SystemExit("[viewer] pc274 engine loads plain .ply only; use --engine current")
+    os.symlink(os.path.abspath(args.ply), os.path.join(root, SCENE))
     open(os.path.join(root, "index.html"), "w").write(PAGE % {"W": CW * K, "H": CH * K, "PC": PC_URL})
     port = serve(root); os.makedirs(args.out_dir, exist_ok=True)
     odir = {n: (args.out_dir if len(bgs) == 1 else os.path.join(args.out_dir, n)) for n, _ in bgs}
@@ -286,7 +300,7 @@ def main():
             except Exception as e:                                        # no WebGPU: whatever the site serves
                 print(f"[viewer] WebGPU editor failed ({str(e)[:200]}); plain screenshot", flush=True)
                 ed = page.context.browser.new_page(viewport={"width": 1280, "height": 800})
-                ed.goto(f"{args.supersplat_url}?load=http://127.0.0.1:{port}/scene.ply")
+                ed.goto(f"{args.supersplat_url}?load=http://127.0.0.1:{port}/{SCENE}")
                 time.sleep(60)
                 ed.screenshot(path=os.path.join(args.out_dir, "_supersplat_editor.png"))
     json.dump({"renderer": renderer, "engine": args.engine, "ply": args.ply, "n": len(imgs), "move": args.move,
