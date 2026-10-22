@@ -76,6 +76,11 @@ json.dump({'n': n, **{k: round(sum(x[k]*x['n'] for x in r)/n, 4) for k in ('psnr
     [ -f "$O/geom_points.json" ] || "$CPUPY" scripts/datasets/spires_geom.py points --ply "$ply" --tls "$ROOT/tls.ply" \
       --depth-dir "$O/sdepth_train" --depth-dataset "$PC/train" --cams "$ROOT/fisheye/train" --ref-cloud "$ROOT/lidar.ply" \
       --json-out "$O/geom_points.json"
+    # their protocol: reconstruction points in the TLS octree's unknown space dropped (spires.py stage occ)
+    [ ! -f "$ROOT/gt_occ_leaves.bin" ] || [ -f "$O/geom_points_occ.json" ] || "$CPUPY" scripts/datasets/spires_geom.py points \
+      --tls "$ROOT/tls.ply" --depth-dir "$O/sdepth_train" --depth-dataset "$PC/train" --cams "$ROOT/fisheye/train" \
+      --ref-cloud "$ROOT/lidar.ply" --occupancy "$ROOT/gt_occ_leaves.bin" --world "$ROOT/world.json" \
+      --tls-align "$ROOT/tls_align.json" --json-out "$O/geom_points_occ.json"
   fi
 done
 
@@ -90,7 +95,7 @@ print(f"{'splat':22s} {'in-seq live (blk)':>20s} {'out-seq live (blk)':>20s} {'o
 for n in names:
     r = {k: J(n, f"{k}.json") for k in ("live_test_in_black", "live_test_out_black", "live_test_out_grey", "bench_test_in",
                                          "bench_test_out", "geom_depth")}
-    g = J(n, "geom_points.json"); r["geom_points"] = g; allres[n] = r
+    g = J(n, "geom_points.json"); r["geom_points"] = g; r["geom_points_occ"] = J(n, "geom_points_occ.json"); allres[n] = r
     f = lambda d, k="psnr": d.get(k, float("nan"))
     sp = g.get("splat", {})
     print(f"{n:22s} {f(r['live_test_in_black']):7.2f}/{f(r['live_test_in_black'],'ssim'):.3f}/{f(r['live_test_in_black'],'lpips'):.3f} "
