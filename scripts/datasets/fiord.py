@@ -11,7 +11,8 @@ model already aligned to a Faro Focus terrestrial laser scan (metric; .e57), ind
            SuperSplat scoring; native/{all,train}: the fisheye frames downsampled by `native.downsample` with
            <stem>_mask.png limiting the loss to `native.max_deg` from the axis (3DGUT reads OPENCV_FISHEYE natively;
            sbatch/omni_native.sbatch)
-  align    Sim3 scan <- model (the .e57 is in the scanner's own frame): FPFH/RANSAC + ICP with scale (venv-e57,
+  align    Sim3 scan <- model: from `tls_align` in the config when present (a stored sim3, or hand-picked point pairs
+           per hypothesis -> Umeyama + ICP, overlays <out>/pipeline/align_manual_<h>_{top,side}.jpg); otherwise (the .e57 is in the scanner's own frame): FPFH/RANSAC + ICP with scale (venv-e57,
            open3d) -> <out>/pipeline/sim3_tls.json; check `fitness` (share of SfM points within 5 cm of the scan)
   geom     splat vs the TLS ground truth (splat mapped by sim3_tls.json when present): accuracy (share of opaque splat centres within --tol of the scan) and
            completeness (share of scan points within --tol of a splat centre), inside the cameras' bounding box
@@ -123,6 +124,62 @@ def _rot_a_to_b(a, b):
     return np.eye(3) + K + K @ K * ((1 - c) / (np.linalg.norm(v) ** 2))
 
 
+def _overlays(P, G, Y, tag, floor_z, glass=None):
+    """Top slices (3 heights above the scan floor) + one side slice of scan (white) and aligned splat (red)."""
+    import cv2
+    lo = np.percentile(G[:, :2], 0.5, 0) - 1.0; hi = np.percentile(G[:, :2], 99.5, 0) + 1.0; cell = 0.02
+    W, H = (np.ceil((hi - lo) / cell)).astype(int); rows = []
+    for z0, z1 in ((0.05, 0.4), (0.6, 1.0), (1.4, 2.0)):
+        a = np.zeros((H, W, 3), np.uint8)
+        for Q, col in ((G, (255, 255, 255)), (Y, (0, 0, 255))):
+            Q = Q[(Q[:, 2] > floor_z + z0) & (Q[:, 2] < floor_z + z1)]; ij = ((Q[:, :2] - lo) / cell).astype(int)
+            ok = (ij >= 0).all(1) & (ij[:, 0] < W) & (ij[:, 1] < H); a[H - 1 - ij[ok, 1], ij[ok, 0]] = col
+        cv2.putText(a, f"{tag} {z0}-{z1} m", (5, 22), 0, 0.7, (0, 255, 0), 2); rows.append(a)
+    cv2.imwrite(os.path.join(P, f"align_{tag}_top.jpg"), np.hstack(rows))
+    mid = np.median(G[:, 1]); b = np.zeros((int(4.0 / cell), W, 3), np.uint8)
+    for Q, col in ((G, (255, 255, 255)), (Y, (0, 0, 255))):
+        Q = Q[np.abs(Q[:, 1] - mid) < 0.3]; ij = np.stack([(Q[:, 0] - lo[0]) / cell, (Q[:, 2] - floor_z + 0.5) / cell], 1).astype(int)
+        ok = (ij >= 0).all(1) & (ij[:, 0] < W) & (ij[:, 1] < b.shape[0]); b[b.shape[0] - 1 - ij[ok, 1], ij[ok, 0]] = col
+    cv2.imwrite(os.path.join(P, f"align_{tag}_side.jpg"), b)
+
+
+def align_manual(cfg, args, P, src, F, tree):
+    """`tls_align` in the config: a stored sim3 (used as is), or hand-picked model<->scan point pairs per hypothesis
+    (Umeyama, then ICP with scale at --voxel on the source points; best hypothesis by F@2 x voxel; overlays written)."""
+    ta = cfg["tls_align"]
+    if "sim3" in ta:
+        T = dict(ta["sim3"]); T.setdefault("scale", T["s"]); T["src"] = "config tls_align.sim3"
+        return T
+    hyps = ta.get("hypotheses") or {"pairs": ta["pairs"]}
+    rng = np.random.default_rng(0); best = None; floor_z = np.percentile(F[:, 2], 2)
+    for h, pairs in hyps.items():
+        A = np.array([q["model"] for q in pairs], float); B = np.array([q["scan"] for q in pairs], float)
+        s, R, t = umeyama(A, B); res = np.linalg.norm(s * A @ R.T + t - B, axis=1)
+        for it in range(40):
+            X = s * src @ R.T + t; d, j = tree.query(X); m = d < max(0.5 * (0.85 ** it), args.voxel)
+            if m.sum() < 100:
+                break
+            s, R, t = umeyama(src[m], F[j[m]])
+        Y = s * src @ R.T + t; d = tree.query(Y)[0]
+        Cb = F[rng.choice(len(F), min(len(F), 200000), replace=False)]
+        lo_b, hi_b = Y.min(0), Y.max(0); Cb = Cb[np.all((Cb >= lo_b) & (Cb <= hi_b), 1)]
+        comp = float((cKDTree_(Y).query(Cb)[0] < 2 * args.voxel).mean()); acc = float((d < 2 * args.voxel).mean())
+        fit = 2 * acc * comp / max(acc + comp, 1e-9)
+        print(f"[fiord] manual {h}: pair residual median {np.median(res):.3f} m (max {res.max():.3f}); after ICP s {s:.4f}, "
+              f"acc/comp/F @{2 * args.voxel} m {acc:.3f}/{comp:.3f}/{fit:.3f}, median {np.median(d):.3f} m", flush=True)
+        _overlays(P, F, Y, f"manual_{h}", floor_z)
+        if best is None or fit > best["fitness"]:
+            best = {"s": float(s), "scale": float(s), "R": R.tolist(), "t": t.tolist(), "fitness": fit, "accuracy": acc,
+                    "completeness": comp, "median_m": float(np.median(d)), "hypothesis": h,
+                    "pair_residual_median_m": float(np.median(res)), "src": "config tls_align pairs + ICP"}
+    return best
+
+
+def cKDTree_(X):
+    from scipy.spatial import cKDTree
+    return cKDTree(X)
+
+
 def align(cfg, args):
     """Sim3 TLS <- model frame. The released .e57 is in the scanner's frame (levelled: +z up) and the COLMAP model is
     neither metric nor levelled, so: (1) level the model with its world up (mean camera up, -y in each camera) and
@@ -153,6 +210,9 @@ def align(cfg, args):
     o3d.io.write_point_cloud(os.path.join(P, "tls_cloud.ply"), fine); F = np.asarray(fine.points); tree = cKDTree(F)
     rng = np.random.default_rng(0)
     src = xyz[rng.choice(len(xyz), min(len(xyz), 300000), replace=False)]
+    if cfg.get("tls_align"):                                          # one-time hand-picked alignment (user decision)
+        best = align_manual(cfg, args, P, src, F, tree)
+        json.dump(best, open(os.path.join(P, "sim3_tls.json"), "w"), indent=1); print(json.dumps(best)); return
     cams_m = np.array([c[:3, 3] for *_, c in imgs])
     up = np.mean([c[:3, :3] @ np.array([0, -1.0, 0]) for *_, c in imgs], 0)
     R0 = _rot_a_to_b(up, np.array([0, 0, 1.0])); L = src @ R0.T            # levelled model, z up
@@ -234,10 +294,14 @@ def geom(cfg, args):
     lo, hi = C.min(0) - args.margin, C.max(0) + args.margin
     inb = lambda X: np.all((X >= lo) & (X <= hi), 1)  # noqa: E731
     S = xyz[(op > args.min_opacity) & inb(xyz)]; G = gt[inb(gt)]
+    zr = None
+    if not args.no_gt_crop:     # score only where the scan has data: FIORD's .e57 is a ~2.2 m slab (no floor/ceiling)
+        zr = np.percentile(G[:, 2], [0.5, 99.5]); S = S[(S[:, 2] >= zr[0] - args.tol) & (S[:, 2] <= zr[1] + args.tol)]
     dS = cKDTree(G).query(S, workers=-1)[0]; dG = cKDTree(S).query(G, workers=-1)[0]
     res = {"ply": args.ply, "tol_m": args.tol, "align_fitness": json.load(open(sj)).get("fitness") if os.path.exists(sj) else None, "n_splat": int(len(S)), "n_gt": int(len(G)),
            "accuracy": float((dS < args.tol).mean()), "completeness": float((dG < args.tol).mean()),
            "acc_median_m": float(np.median(dS)), "comp_median_m": float(np.median(dG))}
+    res["gt_z_range"] = None if zr is None else [float(zr[0]), float(zr[1])]
     res["fscore"] = 2 * res["accuracy"] * res["completeness"] / max(res["accuracy"] + res["completeness"], 1e-9)
     print(json.dumps(res))
     if args.json_out:
@@ -255,6 +319,7 @@ def main():
     ap.add_argument("--min-opacity", type=float, default=0.5); ap.add_argument("--margin", type=float, default=2.0)
     ap.add_argument("--max-points", type=int, default=5_000_000); ap.add_argument("--json-out", default=None)
     ap.add_argument("--voxel", type=float, default=0.05, help="align: fine (ICP / fitness) voxel, m")
+    ap.add_argument("--no-gt-crop", action="store_true", help="geom: also score splats above/below the scan's height range")
     ap.add_argument("--cell", type=float, default=0.05, help="align: 2D occupancy cell, m")
     ap.add_argument("--top", type=int, default=8, help="align: distinct (scale, yaw) candidates refined by ICP")
     ap.add_argument("--trim", type=float, default=0.0, help="align: score candidates on this best-fitting share of points (0 = all)")
