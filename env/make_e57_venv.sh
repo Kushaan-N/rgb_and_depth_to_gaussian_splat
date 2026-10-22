@@ -8,5 +8,5 @@ CEAR_WS="${CEAR_WS:-/scratch4/workspace/${USER}-cear}"; E57_VENV="${E57_VENV:-$C
 export UV_CACHE_DIR="$CEAR_WS/uv-cache" UV_LINK_MODE=copy
 UV="$(command -v uv || echo /modules/opt/linux-ubuntu24.04-x86_64/uv/uv)"
 [ -x "$E57_VENV/bin/python" ] || "$UV" venv --python 3.11 "$E57_VENV"
-"$UV" pip install --python "$E57_VENV/bin/python" "pye57>=0.4" "numpy<2" scipy plyfile open3d pyyaml pycolmap
+"$UV" pip install --python "$E57_VENV/bin/python" "pye57>=0.4" "numpy<2" scipy plyfile open3d pyyaml pycolmap opencv-python-headless
 "$E57_VENV/bin/python" -c "import pye57; print('OK pye57', pye57.__version__ if hasattr(pye57, '__version__') else '')"
