@@ -90,6 +90,12 @@ if [ -f "$CLOUD" ]; then
     VARIANTS="_inpainted _clean"
   fi
 fi
+if [ "${VIEW:-1}" = 1 ]; then
+  echo "== 5. viewer-friendly copies (recentred, gravity -> SuperSplat up; scripts/view_frame.py)"
+  for v in "" $VARIANTS; do
+    "$CPUPY" scripts/view_frame.py --in-ply "$E/$NAME$v.ply" --out-ply "$E/$NAME${v}_view.ply" --dataset "$DATA" | grep -E "^\[view\] (up|[0-9])" || true
+  done
+fi
 ls -la "$E/$NAME"*.ply
 for v in "" $VARIANTS; do md5sum "$E/$NAME$v.ply"; done
 echo FP2_EXPORT_DONE
