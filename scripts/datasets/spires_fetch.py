@@ -6,7 +6,7 @@ against the sha256 the Hub reports (paths-info API), small text files against th
 next to themselves (into <name>/) and kept, so a re-run skips everything already verified. Single stream, resumable
 (HTTP Range), so it is gentle enough for a login node for small sets; use sbatch/spires_fetch.sbatch for GB-scale.
 
-    python scripts/datasets/spires_fetch.py configs/spires_roq01.yaml [--only nvs_roq_01.zip] [--dry-run]
+    python scripts/datasets/spires_fetch.py configs/spires_roq01.yaml [--only nvs_roq_01.zip] [--dry-run] [--extra]
 """
 from __future__ import annotations
 import argparse, hashlib, json, os, sys, time, urllib.request, zipfile
@@ -53,10 +53,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("config"); ap.add_argument("--only", nargs="*", help="substrings: fetch only matching files")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--extra", action="store_true", help="also download.files_extra (e.g. the 6 GB raw 20 Hz frames)")
     a = ap.parse_args()
     cfg = pu.load_config(a.config); dl = cfg["download"]
     root = os.path.join(cfg["sequence"]["data_root"], "raw")
-    files = [f for f in dl["files"] if not a.only or any(s in f for s in a.only)]
+    allf = dl["files"] + (dl.get("files_extra") or [])        # files_extra: only with --extra (large, optional)
+    files = [f for f in (allf if a.extra else dl["files"]) if not a.only or any(s in f for s in a.only)]
     info = paths_info(dl["repo"], dl.get("revision", "main"), files)
     total = sum(info[f]["size"] for f in files if f in info)
     print(f"[fetch] {len(files)} files, {total / 2**30:.2f} GiB -> {root}")
