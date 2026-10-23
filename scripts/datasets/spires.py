@@ -358,6 +358,72 @@ class Spires:
         self.report["init_points"] = {"n": int(len(X)), "coloured_fraction": float((cnt > 0).mean())}
         print(f"[spires] init points: {len(X)} ({100 * (cnt > 0).mean():.0f}% coloured)", flush=True)
 
+    # --- stage: more of the sequence's own frames for training -------------------
+    def stage_extra(self):
+        """fisheye/train_plus + pinhole_<variant>/train_plus: the training frames plus raw 20 Hz frames (raw/images/<cam>,
+        download.files_extra) from the training time window, thinned per camera to one every adapter.extra_spacing m,
+        and DROPPED if within adapter.extra_guard m of ANY held-out camera centre (test_in or test_out, any camera) or
+        within the held-out time spans -> no near-duplicate of a test view can leak into training. Poses as for the
+        NVS frames (GT trajectory + rig). points3D (LiDAR init) copied from train."""
+        import shutil
+        from scipy.spatial import cKDTree
+        from rectify_views import read_images
+        rawd = os.path.join(self.raw, "sequences", self.seq, "raw", "images")
+        if not os.path.isdir(rawd):
+            raise SystemExit(f"no {rawd}: sbatch/spires_fetch.sbatch with EXTRA=1")
+        off = self.world(); sp, guard = float(self.ad.get("extra_spacing", 0.3)), float(self.ad.get("extra_guard", 1.0))
+        fd = os.path.join(self.root, "fisheye")
+        tr = [f for f in self.frames if f["set"] == "train"]; t0, t1 = min(f["t"] for f in tr), max(f["t"] for f in tr)
+        held = [f for f in self.frames if f["set"] != "train"]
+        Ch = np.array([(self.T_tls_cam(f)[:3, 3] - off) for f in held]); kd = cKDTree(Ch)
+        th = np.array(sorted(f["t"] for f in held)); have = {f["name"] for f in self.frames}
+        extra = []
+        for cam in self.cams:
+            last = None
+            for fn in sorted(os.listdir(os.path.join(rawd, cam))):
+                st = fn[:-4]; t = float(st)
+                if not (t0 <= t <= t1) or f"{cam}_{st}.jpg" in have:
+                    continue
+                if np.min(np.abs(th - t)) < 0.5:                         # never next to a held-out frame in time
+                    continue
+                f = dict(cam=cam, stamp=st, t=t, set="train", name=f"{cam}_{st}.jpg", src=os.path.join(rawd, cam, fn))
+                T = self.T_tls_cam(f)
+                if T is None:
+                    continue
+                C = T[:3, 3] - off
+                if kd.query(C)[0] < guard or (last is not None and np.linalg.norm(C - last) < sp):
+                    continue
+                last = C; T = T.copy(); T[:3, 3] -= off; f["T_wc"] = T; extra.append(f)
+        d = os.path.join(fd, "train_plus"); os.makedirs(os.path.join(d, "sparse", "0"), exist_ok=True)
+        os.makedirs(os.path.join(d, "images"), exist_ok=True)
+        for fn in ("cameras.txt", "points3D.txt"):
+            shutil.copyfile(os.path.join(fd, "train", "sparse", "0", fn), os.path.join(d, "sparse", "0", fn))
+        rows = [ln for ln in open(os.path.join(fd, "train", "sparse", "0", "images.txt")) if not ln.startswith("#")]
+        base = [r for r in rows[::2] if len(r.split()) >= 10]
+        with open(os.path.join(d, "sparse", "0", "images.txt"), "w") as fh:
+            fh.write("# IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n"); i = 0
+            for r in base:
+                i += 1; p = r.split(); fh.write(f"{i} {' '.join(p[1:])}\n\n")
+                dst = os.path.join(d, "images", p[9])
+                if not os.path.lexists(dst):
+                    os.symlink(os.path.realpath(os.path.join(fd, "train", "images", p[9])), dst)
+            for f in sorted(extra, key=lambda f: f["name"]):
+                i += 1; Rcw = f["T_wc"][:3, :3].T; t = -Rcw @ f["T_wc"][:3, 3]
+                fh.write(f"{i} {' '.join(f'{v:.12g}' for v in rot2qvec(Rcw))} {' '.join(f'{v:.12g}' for v in t)} "
+                         f"{self.cams[f['cam']]['id']} {f['name']}\n\n")
+                dst = os.path.join(d, "images", f["name"])
+                if not os.path.lexists(dst):
+                    os.symlink(f["src"], dst)
+        Cx = np.array([f["T_wc"][:3, 3] for f in extra])
+        info = {"extra_frames": len(extra), "train_frames": len(base), "spacing_m": sp, "guard_m": guard,
+                "min_dist_to_heldout_m": float(kd.query(Cx)[0].min()) if len(extra) else None,
+                "per_camera": {c: sum(f["cam"] == c for f in extra) for c in self.cams}}
+        self.report["extra"] = info; print(f"[spires] train_plus: {info}", flush=True)
+        variant = self.ad.get("rect_variant", "center"); r = self.ad[f"rect_{variant}"]
+        rectify_dataset(d, os.path.join(self.root, f"pinhole_{variant}", "train_plus"),
+                        make_views(r["fov"], r["width"], r["height"], r.get("yaws", [0]), r.get("pitches", [0])),
+                        ss=int(self.ad.get("rect_ss", 2)), max_invalid=float(self.ad.get("rect_max_invalid", 0.0)))
+
     # --- stage: TLS occupancy octree -> leaf dump -------------------------------
     def stage_occ(self):
         """gt_cloud.bt (their TLS occupancy OctoMap) -> <root>/gt_occ_leaves.bin via scripts/datasets/octomap_leaves.c
@@ -373,8 +439,12 @@ class Spires:
     # --- stage: rig / operator masks -------------------------------------------
     def stage_masks(self):
         """Static-occluder masks (the operator's body / rig parts fixed in the camera frame): per camera, pixels whose
-        colour barely changes over the training frames (temporal std at 1/4 res < masks_std_rel x the median std),
-        kept only as components touching the image border, dilated by masks_dilate px -> fisheye/masks/<cam>.png
+        colour barely changes over the training frames (temporal std at 1/4 res < 0.6 x the median std) AND that a
+        splat of the scene trained on them cannot explain (median |render - frame| > 2 x its median; renders of the
+        training frames in adapter.masks_render_dir, default run_fisheye/renders_gut_mcmc3m_train from
+        sbatch/spires_fisheye.sbatch + eval_views --save-dir; without renders: std < masks_std_rel x median only, which
+        also catches uniform ground), kept only as components touching the image border, dilated by masks_dilate px
+        -> fisheye/masks/<cam>.png
         (255 = ignore). Carried into the rectified training views (nearest, through the exact view maps) as
         pinhole_<variant>/train_masks/<stem>_mask.png for train_viewer_gsplat.py / finetune_ply_viewer.py --mask-dir."""
         import cv2
@@ -383,11 +453,19 @@ class Spires:
         cams = read_cameras(os.path.join(sp, "cameras.txt")); ims = read_images(os.path.join(sp, "images.txt"))
         md = os.path.join(self.root, "fisheye", "masks"); os.makedirs(md, exist_ok=True); M, frac = {}, {}
         rel, dil = float(self.ad.get("masks_std_rel", 0.25)), int(self.ad.get("masks_dilate", 24))
+        rd = self.ad.get("masks_render_dir") or os.path.join(self.root, "run_fisheye", "renders_gut_mcmc3m_train")
+        rd = rd if os.path.isdir(rd) else None
         for cid, cam in cams.items():
             w, h = cam.width // 4, cam.height // 4
             S = np.stack([cv2.resize(cv2.imread(os.path.join(d, "images", n)), (w, h), interpolation=cv2.INTER_AREA)
                           .astype(np.float32) for _, _, _, c, n in ims if c == cid])
             sd = S.std(0).mean(-1); m = (sd < rel * np.median(sd)).astype(np.uint8)
+            if rd:                                   # + persistently unexplained by a splat of the scene (residual)
+                Pr = np.stack([cv2.resize(cv2.imread(os.path.join(rd, os.path.splitext(n)[0] + ".png")), (w, h),
+                                          interpolation=cv2.INTER_AREA).astype(np.float32) for _, _, _, c, n in ims if c == cid])
+                res = np.median(np.abs(S - Pr).mean(-1), 0)
+                m = ((res > 2 * np.median(res)) & (sd < 0.6 * np.median(sd))).astype(np.uint8)
+                m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
             n, lab, st, _ = cv2.connectedComponentsWithStats(m); keep = np.zeros_like(m)
             for i in range(1, n):
                 x, y, ww, hh, a = st[i]
@@ -408,7 +486,7 @@ class Spires:
                         st = os.path.splitext(n)[0]
                         cv2.imwrite(os.path.join(out, (f"{st}_{v.name}" if v.name else st) + "_mask.png"), mv)
                 vf.append(float((mv > 0).mean()))
-        self.report["masks"] = {"fisheye_fraction": frac, "rect_fraction_mean": float(np.mean(vf))}
+        self.report["masks"] = {"fisheye_fraction": frac, "rect_fraction_mean": float(np.mean(vf)), "residual_renders": rd}
         print(f"[spires] rig masks: fisheye {frac}, rectified mean {np.mean(vf):.4f}", flush=True)
 
     # --- stage: LiDAR depth targets for the fisheye training frames -----------
@@ -540,7 +618,8 @@ class Spires:
     def stage_layout(self):
         variant = self.ad.get("rect_variant", "center"); P = os.path.join(self.out_root, "pipeline")
         os.makedirs(os.path.join(P, "onpath"), exist_ok=True)
-        train = os.path.join(self.root, f"pinhole_{variant}", "train"); D = os.path.join(P, "onpath", "data_orig")
+        train = os.path.join(self.root, f"pinhole_{variant}", self.ad.get("train_set", "train"))
+        D = os.path.join(P, "onpath", "data_orig")
         if self.ad.get("layout_own_train") and not os.path.lexists(D):
             # a private training dir (model copied, images linked per file) that per-run sidecars (LiDAR
             # <stem>_depth.npy targets) can be written into without touching the shared rectified set
@@ -558,7 +637,7 @@ class Spires:
         print(f"[spires] export_viewer layout at {P}", flush=True)
 
 
-STAGES = ("fisheye", "lidar", "tls", "rect", "bench", "layout")   # + fdepth, masks, occ (opt-in)
+STAGES = ("fisheye", "lidar", "tls", "rect", "bench", "layout")   # + fdepth, masks, occ, extra (opt-in)
 
 
 def main():
