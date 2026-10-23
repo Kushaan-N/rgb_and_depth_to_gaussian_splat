@@ -1,0 +1,16 @@
+# ROQ-01 with MORE of the sequence's own frames for training (adapter stage `extra`): every raw 20 Hz frame of the
+# training time window, thinned to adapter.extra_spacing, minus frames within adapter.extra_guard of ANY held-out
+# camera (in- or out-of-sequence) -> fisheye/train_plus, pinhole_center/train_plus. Held-out sets are unchanged.
+#   STAGES=extra,layout,fdepth? sbatch/spires_prepare.sbatch configs/spires_roq01_plus.yaml
+#   DEPTH_TARGETS=1 ARM_FLAGS="... --depth-lambda 0.05" sbatch/spires_export.sbatch configs/spires_roq01_plus.yaml
+base: spires_roq01.yaml
+download:
+  files_extra:
+    - sequences/{seq}/raw/images.zip                                          # 6 GB: all 20 Hz frames, 3 cameras
+adapter:
+  train_set: train_plus
+  layout_own_train: true
+  extra_spacing: 0.3        # m between kept extra frames of one camera (the NVS keyframes are ~1 m apart)
+  extra_guard: 1.0          # m: no extra frame closer than this to any held-out camera centre
+paths:
+  out_root: "${CEAR_OUT}/spires/{seq}/run_plus"
