@@ -10,7 +10,7 @@
 #   NAME=cear PLY=<a.ply> TESTS="onpath=<ds>" OUT=<dir> [DELIVER="<b.ply> ..."] \
 #     WHY=... scripts/sub.sh -A pi_donghyunkim_umass_edu --exclude=gpu010 -o logs/%x-%j.out sbatch/compress_check.sbatch
 # Env: STEM (compressed file stem; default the PLY stem), ITERS (SOG -i, 10; several -> one .sog each, e.g. "10 50"), FORMATS ("sog compressed.ply"), MOVE ("0 -0.3 1.0"),
-#      EVERY_OFF (20), SMOKE=1 (every 13th view, no off-path), SKIP_SCORE=1 (convert only)
+#      ST_GPU (splat-transform -g: cpu converts on a CPU node: -p cpu,cpu-preempt --gres=none SKIP_SCORE=1), EVERY_OFF (20), SMOKE=1 (every 13th view, no off-path), SKIP_SCORE=1 (convert only)
 #SBATCH -J compress-check
 #SBATCH -p gpu,gpu-preempt
 #SBATCH --gres=gpu:a100:1
@@ -34,14 +34,14 @@ bash env/make_viewer_venv.sh >/dev/null
 
 stem="${STEM:-$(basename "$PLY" .ply)}"; VARS="orig=$PLY"
 for it in $ITERS; do
-  "$CPUPY" scripts/compress_splat.py convert --ply "$PLY" --stem "$stem" --out-dir "$OUT" --formats $FORMATS --iterations "$it"
+  "$CPUPY" scripts/compress_splat.py convert --ply "$PLY" --stem "$stem" --out-dir "$OUT" --formats $FORMATS --iterations "$it" ${ST_GPU:+--gpu $ST_GPU}
 done
 for f in $FORMATS; do
   if [ "$f" = sog ]; then
-    for it in $ITERS; do s="$stem$([ "$it" != 10 ] && echo "_i$it").sog"; VARS="$VARS sog$([ "$it" != 10 ] && echo "_i$it")=$OUT/$s"; done
+    for it in $ITERS; do sx=""; [ "$it" = 10 ] || sx="_i$it"; VARS="$VARS sog$sx=$OUT/$stem$sx.sog"; done
   else VARS="$VARS cply=$OUT/$stem.compressed.ply"; fi
 done
-for d in ${DELIVER:-}; do "$CPUPY" scripts/compress_splat.py convert --ply "$d" --out-dir "$OUT" --formats $FORMATS --iterations "${ITERS%% *}"; done
+for d in ${DELIVER:-}; do "$CPUPY" scripts/compress_splat.py convert --ply "$d" --out-dir "$OUT" --formats $FORMATS --iterations "${ITERS%% *}" ${ST_GPU:+--gpu $ST_GPU}; done
 ls -la "$OUT"
 [ "${SKIP_SCORE:-0}" = 1 ] && { echo COMPRESS_CHECK_DONE; exit 0; }
 
