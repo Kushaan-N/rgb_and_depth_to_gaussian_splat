@@ -11,6 +11,7 @@
 #              auto-exposure; the exported PLY is the ISP-free radiance)
 #   gut_mcmc3m gut_mcmc with a 3M cap (default 1M; outdoor scenes are larger)
 #   gut_edgs3m gut_mcmc3m initialised from the EDGS dense points of the rectified-pinhole export run (+ LiDAR seeds)
+#   gut_mask3m gut_mcmc3m with the adapter's rig / operator masks (stage masks) excluded from the loss
 #   gut_depth3m gut_mcmc3m + LiDAR ray-distance loss (patched worktree $CEAR_WS/3dgrut-depth; needs the adapter's
 #              fdepth stage: <stem>_depth.npy next to the fisheye training images), LAMBDA (0.05)
 # Env: ITERS (30000), EXTRA_OVR (extra hydra overrides for every arm).
@@ -46,6 +47,21 @@ for arm in ${ARMS:-gut_mcmc}; do
                [ -f "$ED" ] || { echo "no EDGS init $ED (run sbatch/spires_export.sbatch first)"; exit 1; }
                T="$FD/train_edgs"; mkdir -p "$T/sparse/0"; ln -sfn "$FD/train/images" "$T/images"
                cp "$FD/train/sparse/0/cameras.txt" "$FD/train/sparse/0/images.txt" "$T/sparse/0/"; cp "$ED" "$T/sparse/0/points3D.txt"; TRAIN="$T" ;;
+    gut_mask3m) APP=apps/colmap_3dgut_mcmc.yaml; OVR=(strategy.add.max_n_gaussians=3000000)
+               # rig / operator masks (adapter stage masks; 3DGRUT reads <image>_mask.png, 255 = valid -> inverted here)
+               T="$FD/train_mask"; mkdir -p "$T/sparse/0" "$T/images"; cp "$FD/train/sparse/0/"*.txt "$T/sparse/0/"
+               "$CPUPY" - "$FD" "$T" <<'PY'
+import os, sys, cv2
+FD, T = sys.argv[1:3]
+for ln in open(os.path.join(FD, "train", "sparse", "0", "images.txt")):
+    p = ln.split()
+    if len(p) >= 10 and not ln.startswith("#"):
+        n = p[9]; s = os.path.join(T, "images", n)
+        if not os.path.lexists(s): os.symlink(os.path.realpath(os.path.join(FD, "train", "images", n)), s)
+        m = cv2.imread(os.path.join(FD, "masks", f"cam{p[8]}.png"), 0)
+        cv2.imwrite(os.path.join(T, "images", os.path.splitext(n)[0] + "_mask.png"), 255 - m)
+PY
+               TRAIN="$T" ;;
     gut_depth3m) APP=apps/colmap_3dgut_mcmc.yaml; DIR="${THREEDGRUT_DEPTH_DIR:-$CEAR_WS/3dgrut-depth}"
                OVR=(strategy.add.max_n_gaussians=3000000 loss.use_depth=true loss.lambda_depth="${LAMBDA:-0.05}") ;;
     *) echo "unknown arm $arm"; exit 1 ;;
