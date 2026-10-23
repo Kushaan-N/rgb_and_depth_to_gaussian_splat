@@ -1,0 +1,10 @@
+# ROQ-01 trained on rectified views at the fisheye's native pixel density (fx 698 = the sensor's px/rad at the centre,
+# 100 deg -> 1664x1248) instead of 1280x960 (fx 537); LiDAR depth targets in its own training dir. Held-out frames
+# unchanged (rect_center).   STAGES=rect,layout sbatch/spires_prepare.sbatch <this>; DEPTH_TARGETS=1 ... spires_export
+base: spires_roq01.yaml
+adapter:
+  rect_variant: hi
+  rect_hi: {fov: 100, width: 1664, height: 1248}
+  layout_own_train: true
+paths:
+  out_root: "${CEAR_OUT}/spires/{seq}/run_hi"
