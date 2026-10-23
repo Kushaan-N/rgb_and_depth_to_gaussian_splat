@@ -27,7 +27,13 @@ Subcommands:
             viewer's own renders of it (viewer_shots.py output) -> renderer agreement (PSNR, dB)
   finetune  the optimisation; --test-split-interval N excludes frame k (name order) iff k % N == 0, exactly
             3DGRUT's dataset_colmap.py split; optional LiDAR depth term where <image>_depth.npy exists
-  render    write <out-dir>/<stem>.png of a .ply through the matched renderer (debug / quick scoring)
+  render    write <out-dir>/<stem>.png of a .ply through the matched renderer (debug / quick scoring); --ply may be a
+            .compressed.ply (decoded as SuperSplat does); --quant-format cply simulates compressing --ply
+  cply-check  quantise_cply(--ply) vs splat-transform's real .compressed.ply of it (bit-exactness of the simulation)
+Compression-aware fine-tune (finetune --quant-format cply): the user opens splat-transform's .compressed.ply (chunks
+of 256 Morton-ordered splats, 11/10/11-bit positions and log-scales within each chunk's box, 8-bit colour/opacity,
+10-bit smallest-three quaternions, 8-bit SH over [-4, 4]); rendering the decoded values with straight-through
+gradients makes the float .ply optimise for what that file shows.
 
     python finetune_ply_viewer.py compare --ply s.ply --dataset TEST --viewer-dir shots/ [--every 4] --json-out a.json
     python finetune_ply_viewer.py finetune --ply s.ply --dataset DS --out ft.ply --test-split-interval 8 \
@@ -138,6 +144,141 @@ def quantise_pc274(p):
         deq = torch.where(mx > 0, deq, torch.zeros_like(deq))
         q["shN"] = deq.reshape(s.shape)
     return q
+
+
+# ---------------------------------------------------------------- PlayCanvas .compressed.ply (splat-transform 2.7.x)
+CPLY_CHUNK = 256
+CPLY_PARTS = ("pos", "rot", "scale", "color", "opacity", "sh")
+
+
+def _part1by2(x):
+    x = x.astype(np.uint32) & np.uint32(0x3FF)
+    for s, m in ((16, 0xFF0000FF), (8, 0x0300F00F), (4, 0x030C30C3), (2, 0x09249249)):
+        x = (x ^ (x << np.uint32(s))) & np.uint32(m)
+    return x
+
+
+def cply_order(means):
+    """splat-transform's sortMortonOrder: 10-bit Morton code over the bounding box (float64 maths on the float32
+    centres), stable sort, buckets of > 256 equal codes re-sorted recursively over their own box -> row order (N,)."""
+    xyz = np.asarray(means, dtype=np.float32).astype(np.float64)
+    idx = np.arange(len(xyz), dtype=np.int64)
+
+    def gen(ix):
+        if len(ix) == 0:
+            return ix
+        p = xyz[ix]; lo, hi = p.min(0), p.max(0); ln = hi - lo
+        if not np.isfinite(ln).all() or (ln == 0).all():
+            return ix
+        mul = np.where(ln == 0, 0.0, 1024.0 / np.where(ln == 0, 1.0, ln))
+        q = np.minimum(1023.0, (p - lo) * mul).astype(np.uint32)
+        code = (_part1by2(q[:, 2]) << np.uint32(2)) + (_part1by2(q[:, 1]) << np.uint32(1)) + _part1by2(q[:, 0])
+        o = np.argsort(code, kind="stable"); ix, code = ix[o], code[o]
+        b = np.flatnonzero(np.r_[True, code[1:] != code[:-1], True])
+        for s, e in zip(b[:-1], b[1:]):
+            if e - s > CPLY_CHUNK:
+                ix[s:e] = gen(ix[s:e])
+        return ix
+    return gen(idx)
+
+
+def quantise_cply(p, order, parts=CPLY_PARTS, ste=True):
+    """What SuperSplat draws after `splat-transform x.ply x.compressed.ply` (writeCompressedPly / CompressedChunk.pack
+    and the reader's decompressPly): rows in `order` (cply_order) cut into chunks of 256; per chunk min/max of x/y/z,
+    log-scales (clamped to +-20) and SH-dc colour (dc C0 + 0.5) with 11-10-11 / 11-10-11 / 8-8-8 bit unorm codes;
+    opacity sigmoid in 8 bits; quaternion smallest-three 2+10+10+10 bits; f_rest 8 bits over [-4, 4] (truncating
+    encoder, centred decoder). ste: straight-through (forward = decoded values, gradient = identity; chunk bounds are
+    constants). parts: subset of CPLY_PARTS to quantise (attribution)."""
+    import torch
+    q = dict(p)
+    N = len(p["means"]); inv = None
+    nch = (N + CPLY_CHUNK - 1) // CPLY_CHUNK
+    o = torch.as_tensor(order, device=p["means"].device)
+    pad = nch * CPLY_CHUNK - N                                   # the encoder repeats the last row: bounds unchanged
+
+    def chunked(x):                                              # (N,C) -> (nch,256,C) in file order
+        y = x[o]
+        if pad:
+            y = torch.cat([y, y[-1:].expand(pad, -1)], 0)
+        return y.reshape(nch, CPLY_CHUNK, -1)
+
+    def unchunk(y):
+        nonlocal inv
+        if inv is None:
+            inv = torch.empty_like(o); inv[o] = torch.arange(N, device=o.device)
+        return y.reshape(nch * CPLY_CHUNK, -1)[:N][inv]
+
+    def unorm(x, bits, lo=None, hi=None):                        # chunk min/max + packUnorm + lerp decode (float64)
+        c = chunked(x.detach().double())
+        mn = c.amin(1, keepdim=True) if lo is None else c.amin(1, keepdim=True).clamp(lo, hi)
+        mx = c.amax(1, keepdim=True) if lo is None else c.amax(1, keepdim=True).clamp(lo, hi)
+        r = mx - mn
+        t = torch.where(r < 1e-5, torch.zeros_like(c), ((c - mn) / torch.where(r < 1e-5, torch.ones_like(r), r)).clamp(0, 1))
+        t = torch.where(c <= mn, torch.zeros_like(t), torch.where(c >= mx, torch.ones_like(t), t))
+        L = torch.tensor(bits, dtype=torch.float64, device=x.device)
+        k = torch.floor(t * L + 0.5).clamp(min=torch.zeros_like(L), max=L) / L
+        return unchunk((mn * (1 - k) + mx * k).float())
+
+    def st(x, xq):
+        return x + (xq - x).detach() if ste else xq.detach()
+    if "pos" in parts:
+        q["means"] = st(p["means"], unorm(p["means"], [2047.0, 1023.0, 2047.0]))
+    if "scale" in parts:
+        q["scales"] = st(p["scales"], unorm(p["scales"], [2047.0, 1023.0, 2047.0], -20.0, 20.0))
+    if "color" in parts:
+        c = p["sh0"][:, 0] * C0 + 0.5
+        q["sh0"] = st(p["sh0"], ((unorm(c, [255.0] * 3) - 0.5) / C0)[:, None])
+    if "opacity" in parts:
+        a = torch.floor(torch.sigmoid(p["opacities"].detach().double()) * 255 + 0.5).clamp(0, 255) / 255
+        q["opacities"] = st(p["opacities"], torch.logit(a.clamp(1e-7, 1 - 1e-7)).float())
+    if "rot" in parts:
+        v = p["quats"].detach().double(); v = v / v.norm(dim=-1, keepdim=True).clamp_min(1e-30)
+        big = v.abs().argmax(-1, keepdim=True)                   # first index of the largest |component|
+        v = torch.where(torch.gather(v, 1, big) < 0, -v, v)
+        k = torch.floor((v * (math.sqrt(2) * 0.5) + 0.5) * 1023 + 0.5).clamp(0, 1023)
+        d = (k / 1023 - 0.5) * math.sqrt(2)
+        oh = torch.zeros_like(d, dtype=torch.bool).scatter_(1, big, True)
+        d = torch.where(oh, torch.zeros_like(d), d)
+        m = torch.sqrt((1 - (d * d).sum(-1, keepdim=True)).clamp_min(0))
+        d = torch.where(oh, m.expand_as(d), d)
+        pn = p["quats"] / p["quats"].norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        sgn = torch.where(torch.gather(p["quats"].detach(), 1, big) < 0, -1.0, 1.0)
+        q["quats"] = st(pn, (d * sgn).float())                  # same rotation as the input's sign convention
+    if "sh" in parts and p["shN"].shape[1]:
+        k = torch.floor((p["shN"].detach().double() / 8 + 0.5) * 256).clamp(0, 255)
+        n = torch.where(k == 0, torch.zeros_like(k), torch.where(k == 255, torch.ones_like(k), (k + 0.5) / 256))
+        q["shN"] = st(p["shN"], ((n - 0.5) * 8).float())
+    return q
+
+
+def read_cply(path):
+    """Decode a .compressed.ply exactly like splat-transform's decompressPly -> dict of float arrays in FILE order."""
+    from plyfile import PlyData
+    d = PlyData.read(path); ch = d["chunk"].data; v = d["vertex"].data
+    ci = np.arange(len(v)) // CPLY_CHUNK
+    lerp = lambda a, b, t: a[ci] * (1 - t) + b[ci] * t                      # noqa: E731
+    un = lambda x, s, bits: ((x.astype(np.uint64) >> np.uint64(s)) & np.uint64((1 << bits) - 1)).astype(np.float64) / ((1 << bits) - 1)  # noqa: E731
+    pp, ps, pc, pr = (v[k] for k in ("packed_position", "packed_scale", "packed_color", "packed_rotation"))
+    out = {"means": np.stack([lerp(ch["min_" + a], ch["max_" + a], un(pp, s, b)) for a, s, b in (("x", 21, 11), ("y", 11, 10), ("z", 0, 11))], 1),
+           "scales": np.stack([lerp(ch[f"min_scale_{a}"], ch[f"max_scale_{a}"], un(ps, s, b)) for a, s, b in (("x", 21, 11), ("y", 11, 10), ("z", 0, 11))], 1)}
+    col = np.stack([lerp(ch["min_" + a], ch["max_" + a], un(pc, s, 8)) for a, s in (("r", 24), ("g", 16), ("b", 8))], 1)
+    out["sh0"] = ((col - 0.5) / C0)[:, None]
+    a = un(pc, 0, 8)
+    with np.errstate(divide="ignore"):
+        out["opacities"] = -np.log(1 / a - 1)
+    abc = np.stack([(un(pr, s, 10) - 0.5) * math.sqrt(2) for s in (20, 10, 0)], 1)
+    m = np.sqrt(np.maximum(0, 1 - (abc ** 2).sum(1))); w = (pr.astype(np.uint64) >> np.uint64(30)).astype(int)
+    qq = np.zeros((len(v), 4))
+    for which in range(4):
+        s = w == which; rest = [i for i in range(4) if i != which]
+        qq[s, which] = m[s]; qq[np.ix_(s, rest)] = abc[s]
+    out["quats"] = qq
+    if "sh" in d:
+        sh = d["sh"].data; names = sh.dtype.names; K = len(names) // 3
+        r = np.stack([sh[n] for n in names], 1).astype(np.float64)
+        n = np.where(r == 0, 0, np.where(r == 255, 1, (r + 0.5) / 256))
+        out["shN"] = ((n - 0.5) * 8).reshape(len(v), 3, K).transpose(0, 2, 1)
+    return out
 
 
 class ViewerRaster:
@@ -413,10 +554,47 @@ def compare(args):
 
 
 # ---------------------------------------------------------------- render
+def load_any(path, dev):
+    """.ply params, or a decoded .compressed.ply (read_cply, file order) -> dict of tensors."""
+    import torch
+    if path.endswith(".compressed.ply"):
+        return {k: torch.tensor(np.ascontiguousarray(v), dtype=torch.float32, device=dev) for k, v in read_cply(path).items()}
+    return load_ply(path, dev)[1]
+
+
+def cply_check(args):
+    """Simulation (quantise_cply of --ply) vs the real splat-transform output (--cply): per-attribute max |diff|."""
+    import torch
+    _, p = load_ply(args.ply, "cpu"); order = cply_order(p["means"].numpy())
+    sim = quantise_cply(p, order, ste=False); real = read_cply(args.cply)
+    res = {"n": len(order), "max_abs_diff": {}, "frac_rows_differing": {}}
+    for k in ("means", "scales", "sh0", "opacities", "quats", "shN"):
+        if k not in real:
+            continue
+        a = sim[k][torch.as_tensor(order)].double().numpy().reshape(len(order), -1); b = np.asarray(real[k], np.float64).reshape(len(order), -1)
+        if k == "opacities":                           # compare in alpha (logit of 0 / 255 is -inf / inf)
+            a, b = 1 / (1 + np.exp(-a)), 1 / (1 + np.exp(-b))
+        if k == "quats":                               # q and -q are the same rotation
+            a = a / np.linalg.norm(a, axis=1, keepdims=True); a = a * np.sign((a * b).sum(1, keepdims=True) + 1e-30)
+        d = np.abs(a - b); res["max_abs_diff"][k] = float(d.max()); res["frac_rows_differing"][k] = float((d.max(1) > 1e-4).mean())
+        o = np.asarray(p[k], np.float64)[order].reshape(len(order), -1)
+        if k == "opacities":
+            o = 1 / (1 + np.exp(-o))
+        if k == "quats":
+            o = o / np.linalg.norm(o, axis=1, keepdims=True); o = o * np.sign((o * b).sum(1, keepdims=True) + 1e-30)
+        res.setdefault("encode_err_mean", {})[k] = float(np.abs(o - b).mean()); res.setdefault("encode_err_max", {})[k] = float(np.abs(o - b).max())
+    print(json.dumps(res, indent=1))
+    if args.json_out:
+        json.dump(res, open(args.json_out, "w"), indent=2)
+    print("FTV_CPLY_CHECK_DONE")
+
+
 def render(args):
     import torch
     dev = "cuda"
-    _, p = load_ply(args.ply, dev); deg = sh_deg(p)
+    p = load_any(args.ply, dev); deg = sh_deg(p)
+    if args.quant_format == "cply":                    # simulate splat-transform's .compressed.ply of this .ply
+        p = quantise_cply(p, cply_order(p["means"].cpu().numpy()), args.quant_parts.split(","), ste=False)
     r = ViewerRaster(args.viewer, args.raster, quant=args.quant, display_scale=args.display_scale)
     bgs = {b: torch.tensor([float(x) for x in b.split(",")] if "," in b else
                            {"black": [0.0] * 3, "grey": [0.5] * 3, "white": [1.0] * 3}[b], device=dev) for b in args.bg}
@@ -490,6 +668,8 @@ def finetune(args):
 
     def report(step):
         p = {k: v.detach() for k, v in params.items()}
+        if args.quant_format != "none":
+            p = quantise_cply(p, cply_order(p["means"].cpu().numpy()), args.quant_parts.split(","), ste=False)
         e = {"step": step, "train_psnr": round(evaluate(raster, p, trs, dev, deg), 3)}
         if ev:
             e["heldout_psnr"] = round(evaluate(raster, p, ev, dev, deg, viewer_cam=raster.viewer), 3)
@@ -507,6 +687,18 @@ def finetune(args):
         lpnet = _NoTrainLpips(net="vgg").to(dev).eval()
         for q in lpnet.parameters():
             q.requires_grad_(False)
+    qparts = args.quant_parts.split(",")
+    qstate = {"order": None}
+
+    def qp(prm, step=0):                                # what the viewer draws: the compressed file's decoded values
+        if args.quant_format == "none":
+            return prm
+        if qstate["order"] is None or (args.quant_reorder_every and step % args.quant_reorder_every == 0):
+            qstate["order"] = cply_order(prm["means"].detach().cpu().numpy())
+        return quantise_cply(prm, qstate["order"], qparts)
+    if args.quant_format != "none":
+        print(f"[ftv] quantisation-aware: {args.quant_format} ({','.join(qparts)}), straight-through, chunk order "
+              f"recomputed every {args.quant_reorder_every} steps", flush=True)
     report(0)
     order, t0 = [], time.time()
     for step in range(1, args.iters + 1):
@@ -521,7 +713,7 @@ def finetune(args):
         for g in opt.param_groups:
             g["lr"] = lr[g["name"]] * wu
         gm["lr"] = lr["means"] * decay ** frac * wu    # log-linear decay (3DGS position schedule)
-        img, alpha, d = raster.render(params, to_t(np.linalg.inv(c2w), dev), fx, fy, cx, cy, W, H, sh_degree=deg,
+        img, alpha, d = raster.render(qp(params, step), to_t(np.linalg.inv(c2w), dev), fx, fy, cx, cy, W, H, sh_degree=deg,
                                       depth=dep[k] is not None)
         gt = rgb[k].float() / 255
         if k in masks:
@@ -602,9 +794,15 @@ def main():
     r.add_argument("--ply", required=True); r.add_argument("--dataset", required=True); r.add_argument("--out-dir", required=True)
     r.add_argument("--viewer", default="ss352", choices=("pc274", "ss352")); r.add_argument("--raster", default="exact", choices=("exact", "cuda"))
     r.add_argument("--quant", action="store_true"); r.add_argument("--viewer-cam", action="store_true")
+    r.add_argument("--quant-format", default="none", choices=("none", "cply"), help="cply: simulate splat-transform's "
+                   ".compressed.ply of --ply (--ply may also be a .compressed.ply: decoded as SuperSplat does)")
+    r.add_argument("--quant-parts", default=",".join(CPLY_PARTS), help="subset of " + ",".join(CPLY_PARTS))
     r.add_argument("--display-scale", type=float, default=1.0, help="ss352: on-screen canvas px per image px")
     r.add_argument("--bg", nargs="+", default=["black"], help="black|grey|white|R,G,B; several -> <out-dir>/<bg>/")
     r.add_argument("--every", type=int, default=1); r.add_argument("--offset", type=int, default=0)
+    k = sub.add_parser("cply-check")
+    k.add_argument("--ply", required=True); k.add_argument("--cply", required=True, help="splat-transform output of --ply")
+    k.add_argument("--json-out", default=None)
     f = sub.add_parser("finetune")
     f.add_argument("--ply", required=True); f.add_argument("--dataset", required=True, help="COLMAP text dataset, PLY's frame")
     f.add_argument("--out", required=True)
@@ -636,9 +834,15 @@ def main():
     f.add_argument("--log-every", type=int, default=500)
     f.add_argument("--freeze-color-last", type=int, default=0, help="keep SH (f_dc, f_rest) of the last N gaussians fixed")
     f.add_argument("--warmup", type=int, default=300, help="linear LR warm-up steps")
+    f.add_argument("--quant-format", default="none", choices=("none", "cply"),
+                   help="quantisation-aware fine-tune: render what the viewer draws from the compressed file (cply = "
+                        "splat-transform's .compressed.ply, quantise_cply) with straight-through gradients; the output "
+                        ".ply stays float (compress it afterwards)")
+    f.add_argument("--quant-parts", default=",".join(CPLY_PARTS), help="quantised attributes (subset of " + ",".join(CPLY_PARTS) + ")")
+    f.add_argument("--quant-reorder-every", type=int, default=500, help="recompute the Morton chunking every N steps")
     f.add_argument("--overfit-one", action="store_true", help="debug: train on the first training frame only")
     args = ap.parse_args()
-    {"compare": compare, "render": render, "finetune": finetune}[args.cmd](args)
+    {"compare": compare, "render": render, "finetune": finetune, "cply-check": cply_check}[args.cmd](args)
 
 
 if __name__ == "__main__":
