@@ -148,3 +148,17 @@ sbatch/omni_{rect,native,score}.sbatch, env/make_{odgs,e57}_venv.sh.
 - Adapter: `sbatch/fp2_prep.sbatch configs/fp2_<seq>.yaml` (scripts/datasets/fusionportable.py: extract / prepare /
   sfm / lidar / split, no ROS) -> `$MC/outputs/fp2_<seq>/pipeline/{dataset,onpath/{train,test},lidar_static.ply}`;
   splat: `sbatch/fp2_export.sbatch`, live-SuperSplat score: `sbatch/fp2_check.sbatch`.
+
+### Fisheye / 360 results (2026-10-24; live SuperSplat 3.5.2 on held-out rectified views)
+
+| Dataset | Best arm (export) | PSNR | SSIM | LPIPS | holes | geometry vs TLS F@5/10 cm |
+|---|---|---|---|---|---|---|
+| FIORD MeetingRoom (135 views) | rect_igs_long_ds1 ft (rectify + EDGS + Improved-GS 6M/60k + viewer FT 1:4) | 28.42 | 0.898 | 0.264 | 0 | 0.49 / 0.66 |
+| FIORD, native 3DGUT 160 deg + EDGS init + viewer FT | native_3dgut_fov80_edgs_ft | 27.96 | 0.891 | 0.284 | 0.09% | 0.38 / 0.54 |
+| Ricoh360 bricks (250 views) | rect_igs_long_wd ft (6M/60k + WD FT 13k, 1:4) | 28.38 | 0.893 | 0.174 | 0.05% | - |
+| Ricoh360, native ODGS + viewer FT | native_odgs_ft | 25.16 | 0.828 | 0.290 | 23% | - |
+
+FIORD geometry uses the one-time hand-picked scan alignment stored in configs/fiord_meetingroom.yaml (`tls_align`,
+user decision 2026-10-22), scored inside the scan's height range. Exports for the viewer:
+`<out>/exports/<seq>_best_view.ply` (scripts/view_frame.py: recentred, gravity-up; FIORD's camera was mounted upside
+down, so --up +y).
