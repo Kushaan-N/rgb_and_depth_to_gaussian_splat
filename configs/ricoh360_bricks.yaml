@@ -27,3 +27,24 @@ rect:                       # virtual pinhole views per panorama (degrees; yaw r
 rect_variants:              # `ricoh360.py prepare --rig <name>` -> pipeline/rect_<name>/
   grav:                     # same 5 views, levelled: about the world up (mean camera up) and each frame's heading
     gravity: true
+  dense:                    # 17 overlapping views: 8 horizontal (45 deg steps, 100 deg), 4 at +45 deg, zenith, 4 at -30 deg
+                            # (90 deg; reach -75 deg, short of the operator at the nadir). Closes the orientation gaps the
+                            # 5-view rig leaves (levelled vs tilted test rigs differed by 1.3 dB each way)
+    views:
+      - {yaw: 0, pitch: 0, fov: 100, name: h0}
+      - {yaw: 45, pitch: 0, fov: 100, name: h45}
+      - {yaw: 90, pitch: 0, fov: 100, name: h90}
+      - {yaw: 135, pitch: 0, fov: 100, name: h135}
+      - {yaw: 180, pitch: 0, fov: 100, name: h180}
+      - {yaw: 225, pitch: 0, fov: 100, name: h225}
+      - {yaw: 270, pitch: 0, fov: 100, name: h270}
+      - {yaw: 315, pitch: 0, fov: 100, name: h315}
+      - {yaw: 0, pitch: 45, fov: 90, name: u0}
+      - {yaw: 90, pitch: 45, fov: 90, name: u90}
+      - {yaw: 180, pitch: 45, fov: 90, name: u180}
+      - {yaw: 270, pitch: 45, fov: 90, name: u270}
+      - {yaw: 0, pitch: 90, fov: 90, name: up}
+      - {yaw: 45, pitch: -30, fov: 90, name: d45}
+      - {yaw: 135, pitch: -30, fov: 90, name: d135}
+      - {yaw: 225, pitch: -30, fov: 90, name: d225}
+      - {yaw: 315, pitch: -30, fov: 90, name: d315}
