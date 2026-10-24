@@ -1,0 +1,30 @@
+# FIORD Building (parakennus) (indoor): Insta360 One RS 1-Inch dual 200 deg fisheye, COLMAP OPENCV_FISHEYE model per lens, Faro TLS
+# scan (.e57, scanner frame). Same pipeline as configs/fiord_meetingroom.yaml (scripts/datasets/fiord.py,
+# sbatch/omni_rect.sbatch). No hand-picked scan alignment yet (tls_align), so geometry is not scored.
+# Set CEAR_DATA / CEAR_OUT to the multicam workspace before use (see docs/DATASETS.md).
+sequence:
+  name: fiord_building
+  adapter: fiord               # scripts/datasets/fiord.py
+  camera: fisheye              # native arm: 3DGUT (sbatch/omni_native.sbatch)
+  folder: parakennus
+  model: colmap/model
+  images: images               # cam1/, cam2/ (JPEG)
+  tls: parakennus.e57
+paths:
+  data_root: "${CEAR_DATA}/fiord"
+  out_root: "${CEAR_OUT}/{seq}"
+download:
+  url: https://zenodo.org/api/records/15181976/files/Building_In.zip/content
+  file: Building_In.zip
+  md5: 2ebd5f87f2cfc67af2f6f2b247cedaf9
+  bytes: 6655250034
+  extract: [images/, colmap/model/, parakennus.e57]
+split:
+  every: 8                     # every 8th capture (both lenses) held out
+  capture_regex: "_(\\d+_\\d+_\\d+)_fisheye"   # timestamp + index: several capture sessions per scene
+rect:
+  size: 1000                   # every view 1000x1000: centre 90 deg f=500, sides f=714 (as MeetingRoom)
+  ext: .png
+native:
+  downsample: 2
+  max_deg: 90
