@@ -24,10 +24,11 @@ std = sqrt(s^2 + floor^2), recomputed after densification, baked into the export
 removes a trained splat), --depth-lambda (LiDAR ray-distance L1 where <image>_depth.npy exists), --bg random
 (default: a random background per step, so the opaque real frames force full coverage; with black, transparent
 holes cost nothing in training and show on a grey viewer background).
---appearance gain|affine: per-training-frame colour transform (auto-exposure / white balance) applied to the RENDER
+--appearance gain|affine|bilagrid: per-training-frame colour transform (auto-exposure / white balance) applied to the RENDER
 before the loss only -- gain: c' = exp(g) * c + b per channel (6 numbers), affine: c' = (I + A) c + b (12) --
 re-centred to the mean identity after every step (the splat keeps the average exposure; no gauge drift) and pulled
-toward identity (--app-reg). The exported PLY is a standard splat; transforms -> <out>/appearance.json. Held-out
+toward identity (--app-reg); bilagrid = a 16x16x8 bilateral grid of such affines per frame (BilagridAppearance,
+spatially varying: vignetting / local tone, + --bilagrid-tv). The exported PLY is a standard splat; transforms -> <out>/appearance.json. Held-out
 scores are also reported with a per-frame least-squares colour affine fitted on the frame itself (heldout_*_fit;
 leaks 12 numbers per frame; sbatch/viewer_train_bench.sbatch does the same on the viewer's renders).
 --mask-dir DIR: <DIR>/<image stem>_mask.png (255 = transient, e.g. people from scripts/datasets/fusionportable_masks.py)
@@ -289,6 +290,48 @@ class Appearance:
                 "frames": {n: {"M": np.round(m, 5).tolist(), "b": np.round(c, 5).tolist()} for n, m, c in zip(names, M, b)}}
 
 
+class BilagridAppearance:
+    """--appearance bilagrid: per-training-frame bilateral grid of colour affines (Wang et al. 2024, gsplat's
+    examples/lib_bilagrid.py; $BILAGRID_LIB, default $CEAR_WS/gsplat/examples), sliced by pixel position and luminance:
+    spatially varying exposure / vignetting / tone. Same contract as Appearance: the 'w' returned for the identity pull
+    is the frame's deviation from the identity grid scaled so app_reg * |w|^2 = app_reg * mean sq deviation, plus
+    --bilagrid-tv x total variation; recentred to the mean identity after every step (no gauge drift)."""
+
+    def __init__(self, n, lr, dev, shape=(16, 16, 8), tv=10.0):
+        import torch
+        sys.path.insert(0, os.environ.get("BILAGRID_LIB") or os.path.join(os.environ.get("CEAR_WS", ""), "gsplat", "examples"))
+        from lib_bilagrid import BilateralGrid, slice as bslice
+        self.grid = BilateralGrid(n, grid_X=shape[0], grid_Y=shape[1], grid_W=shape[2]).to(dev)
+        self.ident = self.grid.grids[:1].detach().clone()
+        self.opt = torch.optim.Adam(self.grid.parameters(), lr=lr, eps=1e-15)
+        self.slice, self.tv, self._xy, self.mode = bslice, tv, {}, "bilagrid"
+
+    def __call__(self, img, k):
+        import torch
+        H, W = img.shape[:2]
+        if (H, W) not in self._xy:
+            yy, xx = torch.meshgrid((torch.arange(H, device=img.device) + 0.5) / H, (torch.arange(W, device=img.device) + 0.5) / W, indexing="ij")
+            self._xy[(H, W)] = torch.stack([xx, yy], -1)
+        idx = torch.full((H, W, 1), k, device=img.device, dtype=torch.long)
+        out = self.slice(self.grid, self._xy[(H, W)], img, idx)["rgb"]
+        dev_ = (self.grid.grids[k] - self.ident[0]).flatten() / math.sqrt(self.ident.numel())
+        reg = torch.sqrt((self.tv * self.grid.tv_loss()).clamp_min(0) + 1e-20)
+        return out, torch.cat([dev_, reg[None]])
+
+    def recentre(self):
+        import torch
+        with torch.no_grad():
+            G = self.grid.grids; G.sub_(G.mean(0, keepdim=True) - self.ident)
+
+    def summary(self, names):
+        import torch
+        with torch.no_grad():
+            d = (self.grid.grids - self.ident).abs().mean((1, 2, 3, 4)).cpu().numpy()
+        pct = [round(float(v), 4) for v in np.percentile(d, [0, 5, 25, 50, 75, 95, 100])]
+        return {"mode": "bilagrid", "gain_pct_0_5_25_50_75_95_100": {"lum": pct}, "gain_std": [0, 0, 0], "bias_std": [0, 0, 0],
+                "tv": float(self.grid.tv_loss()), "frames": {}}
+
+
 def fit_affine(pred, gt):
     """Least-squares colour affine pred -> gt on one image (H,W,3 float in [0,1]); -> fitted image, M (3,3), b (3)."""
     import torch
@@ -455,7 +498,8 @@ def main():
     ap.add_argument("--mask-dir", default=None, help="<stem>_mask.png per training frame (255 = ignore in the loss)")
     ap.add_argument("--depth-trim", type=float, default=0.95)
     ap.add_argument("--ssim-lambda", type=float, default=0.2)
-    ap.add_argument("--appearance", choices=("none", "gain", "affine"), default="none",
+    ap.add_argument("--bilagrid-tv", type=float, default=10.0, help="--appearance bilagrid: total-variation weight")
+    ap.add_argument("--appearance", choices=("none", "gain", "affine", "bilagrid"), default="none",
                     help="per-training-frame colour transform on the render before the loss (exposure / white balance)")
     ap.add_argument("--app-reg", type=float, default=0.01, help="L2 pull of the frame's transform toward identity")
     ap.add_argument("--app-lr", type=float, default=2e-3, help="SparseAdam lr (decays 10x over training)")
@@ -560,7 +604,8 @@ def main():
             edges[i] = e.half()
         return rast.edge_weights(params, v, edges[i].float())
 
-    app = Appearance(args.appearance, len(tr), args.app_lr, dev) if args.appearance != "none" else None
+    app = (BilagridAppearance(len(tr), args.app_lr, dev, tv=args.bilagrid_tv) if args.appearance == "bilagrid" else
+           Appearance(args.appearance, len(tr), args.app_lr, dev)) if args.appearance != "none" else None
     app_start = args.app_start if args.app_start is not None else int(1000 * f_it)
     app_sched = torch.optim.lr_scheduler.ExponentialLR(app.opt, gamma=0.1 ** (1.0 / args.iters)) if app else None
     rn = {}
