@@ -191,6 +191,9 @@ def align(cfg, args):
     camera box + --margin m (accuracy alone rewards shrinking the model onto one dense surface).
     -> <out>/pipeline/sim3_tls.json {s/scale, R, t, fitness, median_m}: x_tls = s R x_model + t;
        <out>/pipeline/tls_cloud.ply (scan at --voxel; the metric cloud for clean_haze.py --cloud)."""
+    if not cfg.get("tls_align") and not cfg.get("tls_auto_align"):
+        print("[fiord] no tls_align in the config (and tls_auto_align not set): the automatic search is unreliable on "
+              "near-symmetric rooms (FIORD MeetingRoom) - skipping; geometry is not scored"); return
     import open3d as o3d
     from scipy.spatial import cKDTree
     data, sdir, P = cfg_paths(cfg)
@@ -275,6 +278,8 @@ def geom(cfg, args):
     from scipy.spatial import cKDTree
     from plyfile import PlyData
     data, sdir, P = cfg_paths(cfg)
+    if not os.path.exists(os.path.join(P, "sim3_tls.json")):
+        print("[fiord] no scan alignment (sim3_tls.json): geometry not scored"); return
     gt_npy = os.path.join(P, "gt_tls.npy")
     if not os.path.exists(gt_npy):
         gt = read_e57(os.path.join(sdir, cfg["sequence"]["tls"]), max_points=args.max_points)
@@ -285,7 +290,7 @@ def geom(cfg, args):
     op = 1 / (1 + np.exp(-np.asarray(v["opacity"], np.float64)))
     _, imgs, _ = oc.read_model(os.path.join(sdir, cfg["sequence"].get("model", "model")))
     C = np.array([x[3][:3, 3] for x in imgs])
-    sj = os.path.join(P, "sim3_tls.json")                     # scan frame <- model frame (align); else identity
+    sj = os.path.join(P, "sim3_tls.json")                     # scan frame <- model frame (align)
     if os.path.exists(sj):
         T = json.load(open(sj)); s, R, t = T["s"], np.array(T["R"]), np.array(T["t"])
         if T.get("fitness", 0) < 0.2:
