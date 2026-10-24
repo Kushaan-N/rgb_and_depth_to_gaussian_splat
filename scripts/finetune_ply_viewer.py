@@ -651,7 +651,7 @@ def finetune(args):
     params = torch.nn.ParameterDict({k: torch.nn.Parameter(v.clone()) for k, v in p0.items()})
     m = args.lr_mult
     lr = {"means": args.means_lr * scene_scale * m, "scales": 5e-3 * m, "quats": 1e-3 * m, "opacities": args.opacity_lr * m,
-          "sh0": 2.5e-3 * m, "shN": 2.5e-3 / 20 * m}
+          "sh0": 2.5e-3 * m, "shN": 2.5e-3 / 20 * m * args.shn_lr_mult}
     opt = torch.optim.Adam([{"params": [params[k]], "lr": lr[k], "name": k} for k in params], eps=1e-15)
     decay = args.means_lr_final / args.means_lr
     gm = next(g for g in opt.param_groups if g["name"] == "means")
@@ -839,6 +839,8 @@ def main():
                         "splat-transform's .compressed.ply, quantise_cply) with straight-through gradients; the output "
                         ".ply stays float (compress it afterwards)")
     f.add_argument("--quant-parts", default=",".join(CPLY_PARTS), help="quantised attributes (subset of " + ",".join(CPLY_PARTS) + ")")
+    f.add_argument("--shn-lr-mult", type=float, default=1.0, help="extra factor on the f_rest learning rate (e.g. QAT: "
+                   "8-bit SH steps of 1/32 need larger moves)")
     f.add_argument("--quant-reorder-every", type=int, default=500, help="recompute the Morton chunking every N steps")
     f.add_argument("--overfit-one", action="store_true", help="debug: train on the first training frame only")
     args = ap.parse_args()
