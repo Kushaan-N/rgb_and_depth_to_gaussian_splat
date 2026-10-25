@@ -2,8 +2,8 @@
 # Quantisation-aware final fine-tune of a delivered viewer-frame PLY (<x>_view.ply from scripts/view_frame.py) for
 # splat-transform's .compressed.ply (scripts/finetune_ply_viewer.py finetune --quant-format cply; see sbatch/qat_bench.sbatch
 # for the CEAR study). The quantisation depends on the frame (Morton chunks, SH rotation), so the fine-tune runs IN the
-# view frame: the training / test COLMAP models are moved by the view PLY's T_new_old (<x>_view.json; images, masks and
-# depth symlinked), then
+# view frame: the training / test COLMAP models are moved by the view PLY's T_new_old (<x>_view.json, rigid or a sim3,
+# e.g. a *_refaxes.ply with a json from `fit_sim3` below; images, masks and depth symlinked), then
 #   <x>_view.ply -> <x>_view_qat.ply (float, kept for reference) -> <x>_view_qat.compressed.ply (the file to deliver)
 # and both <x>_view.compressed.ply and <x>_view_qat.compressed.ply are scored in the live SuperSplat at every test set
 # (black bg; *_static too where the test images carry *_mask.png person masks), gated (qat vs previous compressed, and
@@ -43,12 +43,12 @@ move_ds() {  # <orig-frame COLMAP ds> <out ds>: cameras moved by T_new_old of th
 import json, os, sys, shutil, numpy as np
 from scipy.spatial.transform import Rotation
 sys.path.insert(0, "scripts"); from view_frame import read_cams
-T = np.array(json.load(open(sys.argv[1]))["T_new_old"]); R = T[:3, :3]
+T = np.array(json.load(open(sys.argv[1]))["T_new_old"]); sc = float(np.cbrt(np.linalg.det(T[:3, :3]))); R = T[:3, :3] / sc  # rigid or sim3
 src, dst = sys.argv[2], sys.argv[3]; s0 = os.path.join(dst, "sparse", "0"); shutil.rmtree(dst, ignore_errors=True); os.makedirs(s0)
 shutil.copy(os.path.join(src, "sparse", "0", "cameras.txt"), s0); open(os.path.join(s0, "points3D.txt"), "w").close()
 with open(os.path.join(s0, "images.txt"), "w") as f:
     for p, Rcw, t in read_cams(src):
-        Rn = Rcw @ R.T; Cn = R @ (-Rcw.T @ t) + T[:3, 3]; tn = -Rn @ Cn; x, y, z, w = Rotation.from_matrix(Rn).as_quat()
+        Rn = Rcw @ R.T; Cn = sc * R @ (-Rcw.T @ t) + T[:3, 3]; tn = -Rn @ Cn; x, y, z, w = Rotation.from_matrix(Rn).as_quat()
         f.write(" ".join([p[0], *map(str, (w, x, y, z, *tn)), p[8], p[9]]) + "\n\n")
 os.symlink(os.path.realpath(os.path.join(src, "images")), os.path.join(dst, "images"))
 print(f"[qat-view] {src} -> {dst} (view frame)")
