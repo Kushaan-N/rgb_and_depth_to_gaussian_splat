@@ -10,11 +10,13 @@
 #   MODE=report ARMS="..." sbatch ... sbatch/fidelity_methods_bench.sbatch configs/<seq>.yaml   # table only
 # Arm = fm_<token>[_<token>...]; tokens: seed<n> | ema[<decay>] (0.999) | ann[<final>] (cosine LR anneal from 0.75,
 #   final x0.1) | freq[<lambda>] (0.1) | hard[<lambda>] (0.4) | grad[<lambda>] (0.1) | pixgs | pixgsd<x> |
-#   shn<lambda> (--shn-reg) | c2f<a> (--c2f) | emul / eerr (--eas-error mul / err) | gt<threshold> (--grad-threshold) | bilag (--appearance bilagrid) | ss352 (viewer profile; default pc274).
+#   shn<lambda> (--shn-reg) | c2f<a> (--c2f) | emul / eerr (--eas-error mul / err) | aniso<lambda> (--aniso-reg, ratio 10) | ssl<x> (--ssim-lambda) | gt<threshold> (--grad-threshold) | bilag (--appearance bilagrid) | ss352 (viewer profile; default pc274).
 # fm_ens[_jt<x>][_jr<deg>][_pf<frac>][_it<n>][_lr<x>]: multi-seed ensemble distillation (scripts/methods/ensemble_distill.py)
 #   of the arms in $TEACHERS (default "igs4m_pc274 fm_seed1 fm_seed2", which must exist) into one splat.
 # Outputs: $VT/<arm>/{splat.ply,train.json,train.log,methods.json}, $VT/shots/{onpath,offpath}/<arm>/,
-#   $VT/report_fm/<arm>_<bg>.json, gate_<arm>{,_perc}.json, summary_fm.md.
+#   $VT/report_fm/<arm>_<bg>.json, gate_<arm>{,_perc,_reg}.json, summary_fm.md. Also "registered" scores <arm>_<bg>_reg.json:
+#   the same renders vs the real frames resampled into the viewer_shots camera (scripts/register_gt.py; removes the
+#   ~0.2 px principal-point rounding of the centred canvas that costs every splat ~1.4 dB on CEAR).
 #SBATCH -J fm-bench
 #SBATCH -c 6
 #SBATCH --mem=48G
@@ -29,6 +31,7 @@ export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$CEAR_WS/playwright
 OUT="$("$CPUPY" scripts/cfg_get.py "$CFG" paths.out_root)"; P="$OUT/pipeline"
 VT="${VT_OUT:-$P/viewer_train_60k}"; REP="$VT/report_fm"; DS="${VT_DATASET:-$P/edgs/on/data}"; TEST="$P/onpath/test"
 ITERS="${ITERS:-60000}"; BASE="${BASE_ARM:-igs4m_pc274}"; ARMS="${ARMS:-fm_ema}"
+REG="${REG_GT:-$P/onpath/test_viewreg_current}"   # real frames resampled into the viewer_shots camera (scripts/register_gt.py)
 MODE="${MODE:-$([ -n "${SLURM_ARRAY_TASK_ID:-}" ] && echo arms || echo all)}"
 hostname; date; mkdir -p "$REP"
 module load cuda/12.4.1 gcc/9.4.0 2>/dev/null || true
@@ -47,7 +50,8 @@ arm_args() {  # fm_<tokens> -> A (extra trainer flags), PROF
       grad|grad[0-9]*) A+=(--grad-lambda "$([ "$t" = grad ] && echo 0.1 || echo "${t#grad}")") ;;
       pixgs) A+=(--pixelgs) ;;                   pixgsd*) A+=(--pixelgs --pixelgs-depth "${t#pixgsd}") ;;
       shn*) A+=(--shn-reg "${t#shn}") ;;    c2f*) A+=(--c2f "${t#c2f}") ;;
-      eerr|emul) A+=(--eas-error "${t#e}") ;;
+      eerr|emul) A+=(--eas-error "${t#e}") ;;     aniso*) A+=(--aniso-reg "${t#aniso}") ;;
+      ssl*) A+=(--ssim-lambda "${t#ssl}") ;;
       gt*) A+=(--grad-threshold "${t#gt}") ;;   bilag) A+=(--appearance bilagrid) ;;
       ss352|pc274) PROF="$t" ;;
       *) echo "unknown token $t in $1"; return 1 ;;
@@ -55,8 +59,8 @@ arm_args() {  # fm_<tokens> -> A (extra trainer flags), PROF
   done
 }
 
-dists() {  # renderdir json: add DISTS (piq) in place
-  PYTHONPATH="$PIQ_LIB" "$GPY" - "$1" "$TEST/images" "$2" <<'PY'
+dists() {  # renderdir json [gt dir]: add DISTS (piq) in place
+  PYTHONPATH="$PIQ_LIB" "$GPY" - "$1" "${3:-$TEST/images}" "$2" <<'PY'
 import json, os, sys, numpy as np, torch, piq
 from PIL import Image
 pred, gt, js = sys.argv[1:4]; r = json.load(open(js))
@@ -79,6 +83,9 @@ score() {  # <name> <ply>: live SuperSplat at the held-out cameras (black, grey)
     [ -f "$REP/${n}_$bg.json" ] || "$GPY" scripts/eval_views.py --pred-dir "$VT/shots/onpath/$n/$bg" --dataset "$TEST" \
       --tag "${n}_$bg" --json-out "$REP/${n}_$bg.json" | tail -1
     dists "$VT/shots/onpath/$n/$bg" "$REP/${n}_$bg.json"
+    [ -f "$REP/${n}_${bg}_reg.json" ] || "$GPY" scripts/eval_views.py --pred-dir "$VT/shots/onpath/$n/$bg" --gt-dir "$REG" \
+      --tag "${n}_${bg}_reg" --json-out "$REP/${n}_${bg}_reg.json" | tail -1
+    dists "$VT/shots/onpath/$n/$bg" "$REP/${n}_${bg}_reg.json" "$REG"
   done
   [ -f "$VT/shots/offpath/$n/_viewer.json" ] || "$VPY" scripts/viewer_shots.py --engine current --bg black --ply "$ply" \
     --dataset "$TEST" --every 8 --move 0 -0.3 1.0 --out-dir "$VT/shots/offpath/$n" | tail -1 || true
@@ -88,6 +95,10 @@ gate() {  # <arm>: strict + perceptual gate vs the baseline
   local pr=(--pair black "$REP/${BASE}_black.json" "$REP/$1_black.json" --pair grey "$REP/${BASE}_grey.json" "$REP/$1_grey.json")
   "$CPUPY" scripts/accept_gate.py "${pr[@]}" --out "$REP/gate_$1.json" | tail -1 || true
   "$CPUPY" scripts/accept_gate.py "${pr[@]}" --perceptual --out "$REP/gate_$1_perc.json" | tail -1 || true
+  [ -f "$REP/$1_grey_reg.json" ] && [ -f "$REP/${BASE}_grey_reg.json" ] && { "$CPUPY" scripts/accept_gate.py \
+    --pair black_reg "$REP/${BASE}_black_reg.json" "$REP/$1_black_reg.json" --pair grey_reg "$REP/${BASE}_grey_reg.json" \
+    "$REP/$1_grey_reg.json" --out "$REP/gate_$1_reg.json" | tail -1 || true; }
+  return 0
 }
 
 base_scores() {  # baseline arm: reuse its live renders, copy the scores here, add DISTS (lock: array tasks race)
@@ -129,6 +140,7 @@ run_arm() {
   score "$arm" "$R/splat.ply"; gate "$arm"
 }
 
+[ -f "$REG/_register.json" ] || "$CPUPY" scripts/register_gt.py --dataset "$TEST" --out "$REG" --engine current | tail -1
 if [ "$MODE" != report ]; then
   bash env/make_viewer_venv.sh | tail -1
   base_scores
@@ -136,23 +148,29 @@ if [ "$MODE" != report ]; then
   rc=0; for arm in "${AL[@]}"; do run_arm "$arm" || { echo "[$arm] FAILED"; rc=1; }; done
   [ "$MODE" = arms ] && { echo "FM_BENCH_ARMS_DONE rc=$rc"; exit $rc; }
 fi
-for arm in $ARMS; do [ -f "$REP/${arm}_grey.json" ] && gate "$arm" > /dev/null; done
+for arm in $BASE $ARMS; do                       # (re)score what is missing (e.g. registered metrics added later) and re-gate
+  [ -f "$VT/$arm/splat.ply" ] && [ -f "$VT/shots/onpath/$arm/_viewer.json" ] && { score "$arm" "$VT/$arm/splat.ply" > /dev/null || true; }
+  [ "$arm" != "$BASE" ] && [ -f "$REP/${arm}_grey.json" ] && { gate "$arm" > /dev/null || true; }
+done
 "$CPUPY" - "$VT" "$REP" "$BASE" $ARMS <<'PY'
 import json, os, sys
 VT, REP, base, arms = sys.argv[1], sys.argv[2], sys.argv[3], list(dict.fromkeys(sys.argv[4:]))
 ld = lambda f: json.load(open(f)) if os.path.isfile(f) else None
 B = {bg: ld(f"{REP}/{base}_{bg}.json") for bg in ("black", "grey")}
-L = ["| arm | black PSNR / SSIM / LPIPS / DISTS | dPSNR | dLPIPS | grey PSNR / SSIM / LPIPS / DISTS | gaussians | train min | gate | gate perc |",
-     "|---|---|---|---|---|---|---|---|---|"]
+L = ["| arm | black PSNR / SSIM / LPIPS / DISTS | dPSNR | dLPIPS | grey PSNR / SSIM / LPIPS / DISTS | registered black PSNR / SSIM / LPIPS / DISTS | dPSNR reg | gaussians | train min | gate | gate perc | gate reg |",
+     "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+BR = ld(f"{REP}/{base}_black_reg.json")
 for a in [base] + [a for a in arms if a != base]:
     r = {bg: ld(f"{REP}/{a}_{bg}.json") for bg in ("black", "grey")}
     if not r["black"]: continue
-    t = ld(f"{VT}/{a}/train.json") or {}; g, gp = ld(f"{REP}/gate_{a}.json"), ld(f"{REP}/gate_{a}_perc.json")
+    t = ld(f"{VT}/{a}/train.json") or {}; g, gp, gr = ld(f"{REP}/gate_{a}.json"), ld(f"{REP}/gate_{a}_perc.json"), ld(f"{REP}/gate_{a}_reg.json")
+    rr = ld(f"{REP}/{a}_black_reg.json")
     f = lambda x: " / ".join("-" if x.get(k) is None else str(x.get(k)) for k in ("psnr", "ssim", "lpips", "dists")) if x else "-"
     d = lambda k: f"{r['black'][k] - B['black'][k]:+.3f}" if B["black"] and r["black"].get(k) is not None else "-"
     v = lambda x: "-" if x is None else ("ACCEPT" if x["accept"] else "reject")
-    L.append(f"| {a} | {f(r['black'])} | {d('psnr')} | {d('lpips')} | {f(r['grey'])} | {t.get('n_gaussians', '-')} | "
-             f"{round(t['train_seconds'] / 60, 1) if t.get('train_seconds') else '-'} | {v(g)} | {v(gp)} |")
+    dr = f"{rr['psnr'] - BR['psnr']:+.3f}" if rr and BR else "-"
+    L.append(f"| {a} | {f(r['black'])} | {d('psnr')} | {d('lpips')} | {f(r['grey'])} | {f(rr)} | {dr} | {t.get('n_gaussians', '-')} | "
+             f"{round(t['train_seconds'] / 60, 1) if t.get('train_seconds') else '-'} | {v(g)} | {v(gp)} | {v(gr)} |")
 open(f"{REP}/summary_fm.md", "w").write("\n".join(L) + "\n"); print("\n".join(L))
 PY
 echo FM_BENCH_DONE
