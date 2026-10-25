@@ -10,7 +10,8 @@
 #      DSCALE (1.5:4), FT_ITERS (7000), FT_ARGS ("--lambda-wd 0.025 --wd-log2-sigma 4" = the WD fine-tune),
 #      TRAIN_PLY (reuse a trained stage-1 splat, e.g. to test fine-tune variants), TRAIN_DATA (default <P>/onpath/train), TEST_DATA (default <P>/onpath/test), EDGS_ARGS, CLEAN (1), CHECK (1),
 #      MASK=1 (person masks on the train frames, scripts/datasets/fusionportable_masks.py, excluded from the training and
-#      fine-tune losses via --mask-dir), VIEW (1: also <NAME>*_view.ply, scripts/view_frame.py), FP2_WS
+#      fine-tune losses via --mask-dir; MASK_PERSIST=1 first unmasks people who stay put, fusionportable_masks.py
+#      persist, PERSIST_ARGS), VIEW (1: also <NAME>*_view.ply, scripts/view_frame.py), FP2_WS
 #SBATCH -J fp2-export
 #SBATCH -p gpu,gpu-preempt
 #SBATCH --gres=gpu:a100:1
@@ -44,6 +45,10 @@ if [ "${MASK:-0}" = 1 ]; then
   echo "== 0a. transient (person) masks on the training frames"
   TORCH_HOME="$TORCH_HOME" "${MASK_PY:-$CEAR_WS/venv-edgs/bin/python}" scripts/datasets/fusionportable_masks.py mask --dataset "$DATA"
   MASK_FLAGS="--mask-dir $DATA/images"
+  if [ "${MASK_PERSIST:-0}" = 1 ]; then              # people who stay put are scene, not transients: unmask them
+    "$CPUPY" scripts/datasets/fusionportable_masks.py persist --dataset "$DATA" --out-dir "$DATA/masks_persist" ${PERSIST_ARGS:-}
+    MASK_FLAGS="--mask-dir $DATA/masks_persist"
+  fi
 fi
 echo "== 0. EDGS dense-correspondence init (train frames)"
 # shellcheck disable=SC2086
