@@ -26,3 +26,4 @@ venv*/
 *.swp
 *.out
 logs/
+scripts/methods/__pycache__/
