@@ -2,7 +2,8 @@
 splat, SH degree 3; nothing here changes the image formation the viewer uses). The trainer calls, in order:
     methods.add_args(ap)                                   # before parse_args
     fm = methods.Hooks(args, params, opts, strat, scene_scale)   # after the strategy is built (may patch it)
-    loss = loss + fm.loss(img, gt, step)                   # extra loss terms on the step's render
+    v = fm.view(tr[k], step, k in masks)                   # training view at the step's resolution (--c2f)
+    loss = loss + fm.loss(img, gt, step, info)             # extra loss terms on the step's render
     fm.after_step(step, stepping)                          # after the optimizer step (EMA, LR anneal)
     fm.finalize(out_dir)                                   # before the held-out eval / export (EMA swap; methods.json)
 Methods (module, flag):
@@ -19,6 +20,8 @@ Methods (module, flag):
                                 averaged with the gaussian's pixel footprint as weight (sum_k pix_k |g_k| / sum_k pix_k)
                                 instead of the visible-view count, so large splats seen big in few views can split;
                 --pixelgs-depth x: gradient scaled by min(1, z / (x scene_scale)) (near-camera floater damping)
+                --eas-error     error-aware EAS: candidates ranked on the current error map (x edges) of sampled views
+  schedule.py   --c2f a         coarse-to-fine resolution: 1/4 res for a/3 x iters, 1/2 until 2a/3, then full
   (here)        --shn-reg       L2 pull of the view-dependent SH bands (shN) of the step's visible gaussians toward 0:
                                 less view-dependent overfitting to the training trajectory (train PSNR >> held-out)
 """
@@ -28,22 +31,24 @@ import json, os
 from .losses import ExtraLosses, add_loss_args
 from .average import ParamAverager, add_average_args
 from .densify import add_densify_args, patch_strategy
+from .schedule import ResSchedule, add_schedule_args
 
 
 def add_args(ap):
     g = ap.add_argument_group("fidelity methods (scripts/methods, default off)")
-    add_loss_args(g); add_average_args(g); add_densify_args(g)
+    add_loss_args(g); add_average_args(g); add_densify_args(g); add_schedule_args(g)
     g.add_argument("--shn-reg", type=float, default=0.0, help="L2 weight on the visible gaussians' shN (0 = off)")
 
 
 class Hooks:
-    def __init__(self, args, params, opts, strat, scene_scale):
+    def __init__(self, args, params, opts, strat, scene_scale, rast=None, views=None):
         self.args, self.params = args, params
         self.losses = ExtraLosses(args)
         self.avg = ParamAverager(args, params, opts)
-        self.densify = patch_strategy(strat, args, scene_scale)
-        on = [k for k in ("freq_lambda", "hard_lambda", "grad_lambda", "ema_decay", "anneal_start", "pixelgs", "shn_reg")
-              if getattr(args, k)]
+        self.densify = patch_strategy(strat, args, scene_scale, rast, views, params)
+        self.res = ResSchedule(args)
+        on = [k for k in ("freq_lambda", "hard_lambda", "grad_lambda", "ema_decay", "anneal_start", "pixelgs", "shn_reg", "c2f", "eas_error")
+              if getattr(args, k) not in (0, False, None, "off")]
         if on:
             print(f"[methods] on: " + ", ".join(f"{k}={getattr(args, k)}" for k in on), flush=True)
 
@@ -55,11 +60,14 @@ class Hooks:
                 l = l + self.args.shn_reg * self.params["shN"][vis].pow(2).sum((1, 2)).mean()
         return l
 
+    def view(self, v, step, masked=False):
+        return self.res.view(v, step, masked)
+
     def after_step(self, step, stepping):
         self.avg.after_step(step, stepping)
 
     def finalize(self, out_dir):
-        rec = {"losses": self.losses.summary(), "average": self.avg.finalize(), "densify": self.densify}
+        rec = {"losses": self.losses.summary(), "average": self.avg.finalize(), "densify": self.densify, "schedule": self.res.summary()}
         if out_dir and any(v for v in rec.values()):
             json.dump(rec, open(os.path.join(out_dir, "methods.json"), "w"), indent=1)
             print(f"[methods] {json.dumps(rec)}", flush=True)
