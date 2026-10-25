@@ -19,6 +19,9 @@
 #      = all frames + extra low-blur frames, with ARM_FLAGS "... --iters 120000").
 #      CLEAN (1; 0 skips stage 4), CLEAN_DATA (harm-check frames, default the fine-tune frames; several datasets =
 #      union by image name, e.g. "$DATA <DF>/data" for a densified run), CLEAN_ARGS (extra clean_haze.py flags).
+#      QAT=1 (stage 6): quantisation-aware fine-tune of the last export in the delivered frame (sbatch/qat_view.sbatch,
+#      QAT_ITERS 8000) -> <E>/<NAME><last variant>_refaxes_qat.ply + .compressed.ply (the laptop file), scored in the live
+#      SuperSplat at $P/onpath/test (in-sample for an all-frames export) and gated against the plain .compressed.ply.
 #SBATCH -J export-viewer
 #SBATCH -p gpu
 #SBATCH --gres=gpu:a100:1
@@ -87,5 +90,11 @@ for v in "" $VARIANTS; do
       --in-ply "$E/$NAME$v.ply" --out-ply "$E/$NAME${v}_refaxes.ply"
   fi
 done
+if [ "${QAT:-0}" = 1 ]; then      # the user opens splat-transform's .compressed.ply: fit what it decodes to, in the delivered frame
+  v="${VARIANTS##* }"; src="$E/$NAME$v.ply"; dl="$src"; [ -n "$FRAME" ] && dl="$E/$NAME${v}_refaxes.ply"
+  echo "== 6. compression-aware fine-tune of $(basename "$dl") (sbatch/qat_view.sbatch, ${QAT_ITERS:-8000} steps)"
+  NAME="$NAME" VIEW_PLY="$dl" SRC_PLY="$src" TRAIN="$DATA" TESTS="onpath=$P/onpath/test" QITERS="${QAT_ITERS:-8000}" \
+    OUT="$F/qat" bash sbatch/qat_view.sbatch 2>&1 | grep -E "GATE|eval \{|^\S+ +onpath|QAT_VIEW_DONE|rror" || echo "QAT stage FAILED"
+fi
 ls -la "$E/$NAME"*.ply
 echo EXPORT_VIEWER_DONE
