@@ -594,7 +594,7 @@ def main():
                                 refine_start_iter=int(500 * f_it), reset_every=int(3000 * f_it), verbose=False)
         state = strat.initialize_state(scene_scale=scene_scale)
     strat.check_sanity(params, opts)
-    fm = methods.Hooks(args, params, opts, strat, scene_scale)
+    fm = methods.Hooks(args, params, opts, strat, scene_scale, rast, tr)
     edges = {}
 
     def edge_fn(i):
@@ -640,7 +640,7 @@ def main():
     for step in range(args.iters):
         if not order:
             order = list(np.random.permutation(len(tr)))
-        k = int(order.pop()); v = tr[k]
+        k = int(order.pop()); v = fm.view(tr[k], step, k in masks)
         deg = min(step // 1000, args.sh_degree)
         if args.min_px > 0 and (rast.floor is None or len(rast.floor) != len(params["means"]) or step % 1000 == 0):
             rast.floor = ViewerGS.floors(params, tr, args.min_px)
