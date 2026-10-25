@@ -530,6 +530,7 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--log-every", type=int, default=1000)
     ap.add_argument("--eval-every", type=int, default=0, help="held-out eval interval (0: end only)")
+    import methods; methods.add_args(ap)                    # scripts/methods: optional fidelity methods (default off)
     args = ap.parse_args()
 
     import torch
@@ -593,6 +594,7 @@ def main():
                                 refine_start_iter=int(500 * f_it), reset_every=int(3000 * f_it), verbose=False)
         state = strat.initialize_state(scene_scale=scene_scale)
     strat.check_sanity(params, opts)
+    fm = methods.Hooks(args, params, opts, strat, scene_scale)
     edges = {}
 
     def edge_fn(i):
@@ -656,6 +658,7 @@ def main():
             img = img * (1 - masks[k]) + gt * masks[k]
         loss = (1 - args.ssim_lambda) * (img - gt).abs().mean() + \
             args.ssim_lambda * (1 - ssim(img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None]))
+        loss = loss + fm.loss(img, gt, step, info)
         ld = torch.zeros((), device=dev)
         if v[6] is not None:
             key = (v[2], v[3], tuple(v[1].flatten().tolist()))
@@ -683,7 +686,7 @@ def main():
         if stepping:
             for o in opts.values():
                 o.step(); o.zero_grad(set_to_none=True)
-        sched.step()
+        sched.step(); fm.after_step(step, stepping)
         if lapp is not None:
             app.opt.step(); app.opt.zero_grad(set_to_none=True); app.recentre()
         if app_sched is not None:
@@ -708,6 +711,7 @@ def main():
     if cleaning:
         clean(args.iters)
     train_s = time.time() - t0
+    fm.finalize(args.out)                                   # EMA swap-in before eval / export
     if args.min_px > 0:
         rast.floor = ViewerGS.floors(params, tr, args.min_px)
     deg = min(args.iters // 1000, args.sh_degree)
