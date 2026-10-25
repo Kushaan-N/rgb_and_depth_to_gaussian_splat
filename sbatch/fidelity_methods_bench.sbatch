@@ -10,7 +10,9 @@
 #   MODE=report ARMS="..." sbatch ... sbatch/fidelity_methods_bench.sbatch configs/<seq>.yaml   # table only
 # Arm = fm_<token>[_<token>...]; tokens: seed<n> | ema[<decay>] (0.999) | ann[<final>] (cosine LR anneal from 0.75,
 #   final x0.1) | freq[<lambda>] (0.1) | hard[<lambda>] (0.4) | grad[<lambda>] (0.1) | pixgs | pixgsd<x> |
-#   shn<lambda> (--shn-reg) | gt<threshold> (--grad-threshold) | bilag (--appearance bilagrid) | ss352 (viewer profile; default pc274).
+#   shn<lambda> (--shn-reg) | c2f<a> (--c2f) | emul / eerr (--eas-error mul / err) | gt<threshold> (--grad-threshold) | bilag (--appearance bilagrid) | ss352 (viewer profile; default pc274).
+# fm_ens[_jt<x>][_jr<deg>][_pf<frac>][_it<n>][_lr<x>]: multi-seed ensemble distillation (scripts/methods/ensemble_distill.py)
+#   of the arms in $TEACHERS (default "igs4m_pc274 fm_seed1 fm_seed2", which must exist) into one splat.
 # Outputs: $VT/<arm>/{splat.ply,train.json,train.log,methods.json}, $VT/shots/{onpath,offpath}/<arm>/,
 #   $VT/report_fm/<arm>_<bg>.json, gate_<arm>{,_perc}.json, summary_fm.md.
 #SBATCH -J fm-bench
@@ -44,7 +46,8 @@ arm_args() {  # fm_<tokens> -> A (extra trainer flags), PROF
       hard|hard[0-9]*) A+=(--hard-lambda "$([ "$t" = hard ] && echo 0.4 || echo "${t#hard}")") ;;
       grad|grad[0-9]*) A+=(--grad-lambda "$([ "$t" = grad ] && echo 0.1 || echo "${t#grad}")") ;;
       pixgs) A+=(--pixelgs) ;;                   pixgsd*) A+=(--pixelgs --pixelgs-depth "${t#pixgsd}") ;;
-      shn*) A+=(--shn-reg "${t#shn}") ;;
+      shn*) A+=(--shn-reg "${t#shn}") ;;    c2f*) A+=(--c2f "${t#c2f}") ;;
+      eerr|emul) A+=(--eas-error "${t#e}") ;;
       gt*) A+=(--grad-threshold "${t#gt}") ;;   bilag) A+=(--appearance bilagrid) ;;
       ss352|pc274) PROF="$t" ;;
       *) echo "unknown token $t in $1"; return 1 ;;
@@ -92,11 +95,29 @@ base_scores() {  # baseline arm: reuse its live renders, copy the scores here, a
   for bg in black grey; do
     [ -f "$REP/${BASE}_$bg.json" ] || { [ -f "$VT/report/${BASE}_$bg.json" ] && cp "$VT/report/${BASE}_$bg.json" "$REP/"; } || true
   done
-  score "$BASE" "$VT/$BASE/splat.ply" || true; rmdir "$REP/.base_lock"
+  [ -f "$VT/$BASE/splat.ply" ] && { score "$BASE" "$VT/$BASE/splat.ply" || true; }; rmdir "$REP/.base_lock"
+}
+
+distill_arm() {  # fm_ens[_jt<x>][_jr<deg>][_pf<frac>][_it<iters>]: scripts/methods/ensemble_distill.py over $TEACHERS (arm names)
+  local arm="$1" R="$VT/$1" t D=(); IFS=_ read -ra T <<< "${1#fm_ens}"
+  for t in "${T[@]}"; do case "$t" in
+    "") ;; jt*) D+=(--jitter-t "${t#jt}") ;; jr*) D+=(--jitter-r "${t#jr}") ;; pf*) D+=(--pseudo-frac "${t#pf}") ;;
+    it*) D+=(--iters "${t#it}") ;; lr*) D+=(--lr-mult "${t#lr}") ;; *) echo "unknown token $t in $1"; return 1 ;; esac; done
+  local TP=(); for t in ${TEACHERS:-igs4m_pc274 fm_seed1 fm_seed2}; do TP+=("$VT/$t/splat.ply"); done
+  if [ ! -f "$R/splat.ply" ]; then
+    mkdir -p "$R"; echo "== [$arm] distill: ${TP[*]} ${D[*]}"; date
+    PATH="$(dirname "$SPY"):$PATH" PYTHONPATH="$CEAR_WS/gsplat-viewer-pc274" TORCH_EXTENSIONS_DIR="$CEAR_WS/torch-ext-gsplat-viewer-pc274" \
+      "$SPY" scripts/methods/ensemble_distill.py --teachers "${TP[@]}" --dataset "$DS" --test-split-interval 8 --eval-dataset "$TEST" \
+      --out "$R" --viewer pc274 "${D[@]}" > "$R/train.log" 2>&1 || { tail -40 "$R/train.log"; return 1; }
+  fi
+  grep -E 'held-out' "$R/train.log" || true
+  score "$arm" "$R/splat.ply"; gate "$arm"
 }
 
 run_arm() {
-  local arm="$1" R="$VT/$1"; arm_args "$arm"
+  local arm="$1" R="$VT/$1"
+  [[ "$arm" == fm_ens* ]] && { distill_arm "$arm"; return; }
+  arm_args "$arm"
   if [ ! -f "$R/splat.ply" ]; then
     mkdir -p "$R"; echo "== [$arm] train: ${A[*]}"; date
     PATH="$(dirname "$SPY"):$PATH" PYTHONPATH="$CEAR_WS/gsplat-viewer-$PROF" TORCH_EXTENSIONS_DIR="$CEAR_WS/torch-ext-gsplat-viewer-$PROF" \
