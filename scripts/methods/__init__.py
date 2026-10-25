@@ -24,6 +24,8 @@ Methods (module, flag):
   schedule.py   --c2f a         coarse-to-fine resolution: 1/4 res for a/3 x iters, 1/2 until 2a/3, then full
   (here)        --shn-reg       L2 pull of the view-dependent SH bands (shN) of the step's visible gaussians toward 0:
                                 less view-dependent overfitting to the training trajectory (train PSNR >> held-out)
+  (here)        --aniso-reg     anti-needle: lambda x mean relu(s_max / s_min - --aniso-max) over the step's visible
+                                gaussians (PhysGaussian's anisotropy regulariser, Xie et al. CVPR 2024): no spikes off-path
 """
 from __future__ import annotations
 import json, os
@@ -38,6 +40,8 @@ def add_args(ap):
     g = ap.add_argument_group("fidelity methods (scripts/methods, default off)")
     add_loss_args(g); add_average_args(g); add_densify_args(g); add_schedule_args(g)
     g.add_argument("--shn-reg", type=float, default=0.0, help="L2 weight on the visible gaussians' shN (0 = off)")
+    g.add_argument("--aniso-reg", type=float, default=0.0, help="anti-needle scale-ratio penalty weight (0 = off)")
+    g.add_argument("--aniso-max", type=float, default=10.0, help="allowed max/min scale ratio")
 
 
 class Hooks:
@@ -47,17 +51,23 @@ class Hooks:
         self.avg = ParamAverager(args, params, opts)
         self.densify = patch_strategy(strat, args, scene_scale, rast, views, params)
         self.res = ResSchedule(args)
-        on = [k for k in ("freq_lambda", "hard_lambda", "grad_lambda", "ema_decay", "anneal_start", "pixelgs", "shn_reg", "c2f", "eas_error")
+        on = [k for k in ("freq_lambda", "hard_lambda", "grad_lambda", "ema_decay", "anneal_start", "pixelgs", "shn_reg", "c2f", "eas_error", "aniso_reg")
               if getattr(args, k) not in (0, False, None, "off")]
         if on:
             print(f"[methods] on: " + ", ".join(f"{k}={getattr(args, k)}" for k in on), flush=True)
 
     def loss(self, img, gt, step, info=None):
+        import torch
         l = self.losses(img, gt, step)
-        if self.args.shn_reg > 0 and info is not None:
+        a = self.args
+        if (a.shn_reg > 0 or a.aniso_reg > 0) and info is not None:
             vis = (info["radii"][0] > 0).all(-1)
             if bool(vis.any()):
-                l = l + self.args.shn_reg * self.params["shN"][vis].pow(2).sum((1, 2)).mean()
+                if a.shn_reg > 0:
+                    l = l + a.shn_reg * self.params["shN"][vis].pow(2).sum((1, 2)).mean()
+                if a.aniso_reg > 0:                         # log-space ratio: s_max / s_min = exp(max - min)
+                    ls = self.params["scales"][vis]
+                    l = l + a.aniso_reg * torch.relu(torch.exp(ls.max(-1).values - ls.min(-1).values) - a.aniso_max).mean()
         return l
 
     def view(self, v, step, masked=False):
