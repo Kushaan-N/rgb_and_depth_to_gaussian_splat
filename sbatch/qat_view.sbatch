@@ -11,7 +11,9 @@
 #   NAME=fiord VIEW_PLY=<exports/x_view.ply> TRAIN=<orig-frame train ds> TESTS="rect=<orig-frame test ds>" \
 #     WHY=... scripts/sub.sh -A pi_donghyunkim_umass_edu --gres=gpu:1 --constraint="a100|a40|l40s" --exclude=gpu010 \
 #     -o logs/%x-%j.out sbatch/qat_view.sbatch
-# Env: TSI (0: hold-out interval within TRAIN), MASKS (1: --mask-dir <train>/images when *_mask.png exist), QITERS (3000),
+# Env: SRC_PLY (the PLY in TRAIN's frame that VIEW_PLY is a rigid / sim3 copy of: the json is fitted by
+#      scripts/fit_sim3_ply.py when missing or older than VIEW_PLY; otherwise <x>_view.json must exist),
+#      TSI (0: hold-out interval within TRAIN), MASKS (1: --mask-dir <train>/images when *_mask.png exist), QITERS (3000),
 #      FT_ARGS ("--lambda-wd 0.025 --wd-log2-sigma 4"), DSCALE (1.5:4), QARGS (extra), OUT (<view dir>/qat_<stem>),
 #      MOVE ("0 -0.3 1.0"), EVERY_OFF (20)
 #SBATCH -J qat-view
@@ -57,6 +59,10 @@ PY
 cply() { [ -f "${1%.ply}.compressed.ply" ] || "$CPUPY" scripts/compress_splat.py convert --ply "$1" --out-dir "$(dirname "$1")" \
   --formats compressed.ply --gpu cpu | tail -1; }
 
+if [ -n "${SRC_PLY:-}" ] && { [ ! -f "${VIEW_PLY%.ply}.json" ] || [ "$VIEW_PLY" -nt "${VIEW_PLY%.ply}.json" ]; }; then
+  "$CPUPY" scripts/fit_sim3_ply.py --src "$SRC_PLY" --dst "$VIEW_PLY"     # T_new_old of the delivered copy
+fi
+[ -f "${VIEW_PLY%.ply}.json" ] || { echo "no ${VIEW_PLY%.ply}.json (T_new_old): set SRC_PLY=<the frame of TRAIN's PLY>"; exit 1; }
 echo "== view-frame datasets"
 [ -f "$O/ds/train/sparse/0/images.txt" ] || move_ds "$TRAIN" "$O/ds/train"
 TNAMES=""
