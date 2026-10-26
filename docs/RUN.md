@@ -179,3 +179,16 @@ unchanged scene): `scripts/accept_gate.py` compares baseline vs candidate `eval_
 set and rejects any drop in PSNR (overall, observed, completed regions) > 0.05 dB, SSIM > 0.002 or rise in
 LPIPS > 0.002; on rejection the baseline stays the deliverable. Results that failed are kept only as
 `exports/*_REJECTED.ply` (see `exports/README.txt`).
+
+
+## Laptop delivery: compressed splats
+
+SuperSplat opens splat-transform's `.compressed.ply` (~4x smaller than the PLY). Its 8-bit SH storage costs
+up to ~0.5 dB on sharp scenes, so the export can fine-tune *through* that quantisation in the delivered frame:
+
+    QAT=1 sbatch -A $CEAR_SLURM_ACCOUNT sbatch/export_viewer.sbatch configs/<seq>.yaml
+    # stage 6 -> exports/<NAME><variant>_refaxes_qat.compressed.ply, gated against the plain .compressed.ply
+
+Verified end to end 2026-10-26 (CEAR mocap2: plain compressed 36.65 -> QAT compressed 37.09 dB, original 37.22).
+For an existing export use `sbatch/qat_view.sbatch` (VIEW_PLY, SRC_PLY, TRAIN, TESTS); `scripts/deliver.sh`
+prints scp + size + md5, and `scripts/serve_ply.py` streams any splat into the live editor without a download.
