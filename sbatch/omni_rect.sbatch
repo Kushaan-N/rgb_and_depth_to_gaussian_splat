@@ -15,7 +15,8 @@
 #      EDGS_DATA (reuse an existing EDGS init dir, e.g. <out>/pipeline/rect_igs/edgs_data), TRAIN_PLY (reuse a trained
 #      stage-2 splat, e.g. to try fine-tune variants), RIG (train on the config's rect_variants.<RIG> views,
 #      pipeline/rect_<RIG>/train; scoring stays on the standard rect/test), CLEAN=1 (stage 3b, scripts/clean_haze.py,
-#      when <out>/pipeline/tls_cloud.ply + sim3_tls.json with fitness >= 0.2 exist), CLEAN_ARGS
+#      with <out>/pipeline/tls_cloud.ply + sim3_tls.json (fitness >= 0.2) as the cloud; otherwise cloud-free classes
+#      only), CLEAN_ARGS
 #SBATCH -J omni-rect
 #SBATCH -p gpu
 #SBATCH --gres=gpu:a100:1
@@ -88,7 +89,14 @@ if [ "${CLEAN:-0}" = 1 ]; then
     [ -f "$F/ft_clean.ply" ] || "$SPY" scripts/clean_haze.py clean --ply "$F/ft.ply" --dataset "$TRAIN" --cloud "$CLOUD" \
       --sim3-json "$SIM" --stats "$F/clean_stats.npz" --out "$F/ft_clean.ply" ${CLEAN_ARGS:-} | tail -6
     CANDS="$CANDS ${NAME}_ft_clean=$F/ft_clean.ply"
-  else echo "== 3b. haze cleanup skipped: no metric cloud with a valid alignment (fitness $FIT)"; fi
+  else
+    # no aligned scan: the cloud-free classes only (gaussians no training view supports, giant splats), with the same
+    # measured harm restore; gaussian scales in model units
+    echo "== 3b. haze cleanup without a cloud (no aligned scan; fitness $FIT): unsupported + giant splats"
+    [ -f "$F/ft_clean.ply" ] || "$SPY" scripts/clean_haze.py clean --ply "$F/ft.ply" --dataset "$TRAIN" \
+      --stats "$F/clean_stats.npz" --out "$F/ft_clean.ply" ${CLEAN_ARGS:-} | tail -6
+    CANDS="$CANDS ${NAME}_ft_clean=$F/ft_clean.ply"
+  fi
 fi
 if [ "${SCORE:-1}" = 1 ]; then
   echo "== 4. live SuperSplat scoring (held-out rectified views, off-path, editor)"
