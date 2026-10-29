@@ -18,8 +18,10 @@
 #      CMP_REPORT (another run's live_<TAG>/report: gate this TAG's on-path black+grey against it),
 #      EVERY_OFF (40), BASE_JSON (on-path live score of IN; default supersplat_check_current/report/<NAME>_inpainted.json)
 #SBATCH -J clean-haze
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=96G
 #SBATCH -t 04:00:00
