@@ -17,8 +17,10 @@
 # Env: ITERS (30000), EXTRA_OVR (extra hydra overrides for every arm).
 # Out: <adapter.root>/run_fisheye/<arm>/ (+ <arm>_{test_in,test_out}.json), exports/<arm>.ply
 #SBATCH -J spires-fisheye
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH -t 06:00:00
