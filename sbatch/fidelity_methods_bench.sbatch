@@ -11,7 +11,7 @@
 # Arm = fm_<token>[_<token>...]; tokens: seed<n> | ema[<decay>] (0.999) | ann[<final>] (cosine LR anneal from 0.75,
 #   final x0.1) | freq[<lambda>] (0.1) | hard[<lambda>] (0.4) | grad[<lambda>] (0.1) | pixgs | pixgsd<x> |
 #   shn<lambda> (--shn-reg) | c2f<a> (--c2f) | emul / eerr (--eas-error mul / err) | aniso<lambda> (--aniso-reg, ratio 10) | ssl<x> (--ssim-lambda) | gt<threshold> (--grad-threshold) | bilag (--appearance bilagrid) | ss352 (viewer profile; default pc274).
-# fm_ens[_jt<x>][_jr<deg>][_pf<frac>][_it<n>][_lr<x>]: multi-seed ensemble distillation (scripts/methods/ensemble_distill.py)
+# fm_ens[_jt<x>][_jr<deg>][_pf<frac>][_it<n>][_lr<x>][_t<label>]: multi-seed ensemble distillation (scripts/methods/ensemble_distill.py)
 #   of the arms in $TEACHERS (default "igs4m_pc274 fm_seed1 fm_seed2", which must exist) into one splat.
 # Outputs: $VT/<arm>/{splat.ply,train.json,train.log,methods.json}, $VT/shots/{onpath,offpath}/<arm>/,
 #   $VT/report_fm/<arm>_<bg>.json, gate_<arm>{,_perc,_reg}.json, summary_fm.md. Also "registered" scores <arm>_<bg>_reg.json:
@@ -113,7 +113,8 @@ distill_arm() {  # fm_ens[_jt<x>][_jr<deg>][_pf<frac>][_it<iters>]: scripts/meth
   local arm="$1" R="$VT/$1" t D=(); IFS=_ read -ra T <<< "${1#fm_ens}"
   for t in "${T[@]}"; do case "$t" in
     "") ;; jt*) D+=(--jitter-t "${t#jt}") ;; jr*) D+=(--jitter-r "${t#jr}") ;; pf*) D+=(--pseudo-frac "${t#pf}") ;;
-    it*) D+=(--iters "${t#it}") ;; lr*) D+=(--lr-mult "${t#lr}") ;; *) echo "unknown token $t in $1"; return 1 ;; esac; done
+    it*) D+=(--iters "${t#it}") ;; lr*) D+=(--lr-mult "${t#lr}") ;; t*) ;;  # t<label>: name only (e.g. which TEACHERS)
+    *) echo "unknown token $t in $1"; return 1 ;; esac; done
   local TP=(); for t in ${TEACHERS:-igs4m_pc274 fm_seed1 fm_seed2}; do TP+=("$VT/$t/splat.ply"); done
   if [ ! -f "$R/splat.ply" ]; then
     mkdir -p "$R"; echo "== [$arm] distill: ${TP[*]} ${D[*]}"; date
