@@ -12,8 +12,10 @@
 # Env: PLYS (name=ply ...), MOVE ("0 -0.3 1.0"), EVERY_OFF (10), SKIP ("" | e.g. "bench geom")
 # Out: <adapter.root>/score/<name>/..., score/<name>/summary.json; score/summary.json (all names)
 #SBATCH -J spires-score
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH -t 04:00:00
