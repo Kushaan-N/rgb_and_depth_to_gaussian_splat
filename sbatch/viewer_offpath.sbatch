@@ -7,8 +7,10 @@
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o <log> sbatch/viewer_offpath.sbatch configs/<seq>.yaml
 # Env: NAMES ("igs igs_depth"), MOVE ("0 -0.3 1.0"), EVERY (40).
 #SBATCH -J viewer-offpath
-#SBATCH -p gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=48G
 #SBATCH -t 01:00:00
