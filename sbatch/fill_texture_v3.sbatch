@@ -11,8 +11,10 @@
 #      MOVES ("0 -0.6 1.5;0 -0.3 1.0"), EVERY_OFF (40), SMOKE=1 (first MAXP=15 patches, debug textures only),
 #      V3_ARGS (extra fill_texture_v3.py flags).
 #SBATCH -J fill-v3
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH -t 03:00:00
