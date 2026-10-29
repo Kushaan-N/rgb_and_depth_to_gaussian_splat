@@ -7,8 +7,10 @@
 # Needs offpath_depthloss.sbatch to have built <out>/pipeline/offpath/depth/lidar_static.ply.
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o <log> sbatch/onpath_ablation.sbatch configs/<seq>.yaml
 #SBATCH -J onpath-ablation
-#SBATCH -p gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=64G
 #SBATCH -t 04:00:00
