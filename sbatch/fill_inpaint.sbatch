@@ -9,8 +9,10 @@
 # Env: NAME (edgs_igs), BASE (exports/<NAME>.ply), ARM (igs_full/<ARM>_depth: edgs_igs), METHOD (lama|shiftmap|telea), MOVE ("0 -0.6 1.5"),
 #      EVERY_OFF (40), TAG (inpainted), ENGINE (current = live SuperSplat on WebGPU | pc274), BGS ("black grey"), SMOKE=1 (round trip + inpaint + debug textures only).
 #SBATCH -J fill-inpaint
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH -t 02:00:00
