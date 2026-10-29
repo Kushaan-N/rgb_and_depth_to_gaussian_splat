@@ -3,8 +3,10 @@
 # install lacks) — renders the NuRec splat + drives a rover. L40S.
 #   sbatch sbatch/isaac_container.sbatch mocap1_well-lit_trot nav
 #SBATCH -J cear-isaacC
-#SBATCH -p gpu
-#SBATCH --gres=gpu:l40s:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH -t 01:30:00
