@@ -4,8 +4,10 @@
 #   CEAR_SIF=.../isaac-sim-6.1.0.sif sbatch -A pi_donghyunkim_umass_edu \
 #     sbatch/nav_in_splat.sbatch mocap1_well-lit_trot walkthrough.tum navsplat
 #SBATCH -J cear-navsplat
-#SBATCH -p gpu
-#SBATCH --gres=gpu:l40s:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=48G
 #SBATCH -t 00:40:00
