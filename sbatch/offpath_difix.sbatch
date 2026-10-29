@@ -11,8 +11,10 @@
 #   difix3d+       difix3d renders cleaned by Difix
 # Needs the Difix venv (env/make_difix_venv.sh). Results: <out>/pipeline/offpath/report/summary.json
 #SBATCH -J offpath-difix
-#SBATCH -p gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=64G
 #SBATCH -t 03:00:00
