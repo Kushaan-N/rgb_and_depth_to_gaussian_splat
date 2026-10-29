@@ -18,8 +18,9 @@
 #      FT_ARGS ("--lambda-wd 0.025 --wd-log2-sigma 4"), DSCALE (1.5:4), QARGS (extra), OUT (<view dir>/qat_<stem>),
 #      MOVE ("0 -0.3 1.0"), EVERY_OFF (20)
 #SBATCH -J qat-view
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 6
 #SBATCH --mem=48G
 #SBATCH -t 03:00:00
