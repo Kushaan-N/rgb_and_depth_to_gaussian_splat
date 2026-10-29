@@ -3,8 +3,9 @@
 # and the held-out rectified views moved into the same frame (scored, so the export must match its source PLY).
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o logs/omni-view-%j.out sbatch/omni_view_check.sbatch <view.ply> <view_test dataset> <out dir>
 #SBATCH -J omni-view
-#SBATCH -p gpu
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
 #SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
 #SBATCH -c 8
 #SBATCH --mem=48G
 #SBATCH -t 01:30:00
