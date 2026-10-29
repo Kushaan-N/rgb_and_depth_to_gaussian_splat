@@ -10,8 +10,10 @@
 #  5. acceptance gate (accept_gate.py): exports <out>/exports/objects_completed{,_metric}.ply ONLY if the
 #     completed splat is not worse than the base on real images; otherwise the base stays the deliverable
 #SBATCH -J object-completion
-#SBATCH -p gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=64G
 #SBATCH -t 03:00:00
