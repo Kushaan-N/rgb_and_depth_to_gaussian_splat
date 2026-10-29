@@ -4,8 +4,10 @@
 # Requires the 3DGRUT env built first:  sbatch sbatch/build_3dgrut.sbatch
 # Adjust partition/account to your Unity allocation before submitting.
 #SBATCH -J cear-train
-#SBATCH -p gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=64G
 #SBATCH -t 08:00:00
