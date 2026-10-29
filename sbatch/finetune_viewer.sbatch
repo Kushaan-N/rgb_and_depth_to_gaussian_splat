@@ -12,8 +12,10 @@
 # viewer_shots' headless editor, fitted: 52.7 dB agreement), DSCALE_TRAIN ($DSCALE, or a:b = random per step), VIEWER (ss352 for current, pc274 for pc274: the fine-tune target), RASTER (exact), DEPTH (0 = no LiDAR term), FTARGS (extra finetune flags), TAG (output suffix),
 # MOVE ("0 -0.3 1.0"), EVERY_OFF (40), DELIV ("edgs_igs edgs_igs_complete": exports/<name>.ply).
 #SBATCH -J finetune-viewer
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH -t 06:00:00
