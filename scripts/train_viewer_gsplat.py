@@ -654,6 +654,7 @@ def main():
         if app is not None and step >= app_start:          # the camera's exposure / WB for this frame, render side only
             img, w = app(img, k)
             lapp = (w * w).sum()
+        img = fm.post(img, v[0], step)                     # scripts/methods render-side transforms (--blur-kernel)
         if k in masks:                                      # transient pixels: the render copies the real image there
             img = img * (1 - masks[k]) + gt * masks[k]
         loss = (1 - args.ssim_lambda) * (img - gt).abs().mean() + \
