@@ -15,8 +15,10 @@
 # Env: TAG (default v1), GEN_ARGS (extra `generate` flags, e.g. "--views 8 --mode multidiffusion"), MERGE_ARGS,
 #      HARM_ARGS (extra harm_filter.py flags), TRELLIS_VENV ($CEAR_WS/venv-trellis, env/make_trellis_venv.sh).
 #SBATCH -J trellis-complete
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH -t 04:00:00
