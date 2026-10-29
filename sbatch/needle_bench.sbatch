@@ -17,8 +17,10 @@
 #   EVERY_OFF (40), ITERS / NEEDLE_OUT (smoke tests: ITERS=500 NEEDLE_OUT=$P/needle_smoke ARMS=needle_both).
 # Needs edgs_bench.sbatch (ARMS=edgs_igs4m) to have run (EDGS init + baseline checkpoint) and env/make_viewer_venv.sh.
 #SBATCH -J needle-bench
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=64G
 #SBATCH -t 06:00:00
