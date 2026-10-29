@@ -16,8 +16,9 @@
 #      deliverable's WD recipe), QARGS (extra flags of the QAT arm only), DSCALE (1.5:4 train; scored at 1.8), TAG (qat),
 #      Q (out dir, $P/qat), MOVE ("0 -0.3 1.0"), EVERY_OFF (20).
 #SBATCH -J qat-bench
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH -t 06:00:00
