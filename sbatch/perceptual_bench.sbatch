@@ -24,8 +24,10 @@
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o logs/perceptual-bench-%j.out sbatch/perceptual_bench.sbatch configs/<seq>.yaml
 #   SMOKE=1 ARMS="wdr0.3" sbatch -A ... sbatch/perceptual_bench.sbatch configs/<seq>.yaml
 #SBATCH -J perceptual-bench
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH -t 06:00:00
