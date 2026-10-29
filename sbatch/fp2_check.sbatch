@@ -8,8 +8,10 @@
 #   PLYS="a=<x.ply> b=<y.ply>" sbatch -A $CEAR_SLURM_ACCOUNT -o logs/%x-%j.out sbatch/fp2_check.sbatch configs/fp2_<seq>.yaml
 # Env: PLYS (required), MASKS (1: person masks + *_static scores), MOVE ("0 -0.3 1.0"), EVERY_OFF (24), TAGDIR (supersplat_check), FP2_WS
 #SBATCH -J fp2-check
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=48G
 #SBATCH -t 02:00:00
