@@ -14,8 +14,10 @@
 # Env: SMOKE=1 (reference + edgs_igs4m only, no training), STAGES ("B A"), CANDS (viewer_bench/<name>.ply candidates,
 #      default "edgs_igs4m edgs_igs_all edgs_igs_complete"), MOVE ("0 -0.3 1.0"), EVERY_OFF (40), ARM (edgs_igs4m_rbg).
 #SBATCH -J viewer-engines
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH -t 05:00:00
