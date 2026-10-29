@@ -24,8 +24,10 @@
 #      REFERENCE (member kept fully supervised; default fuse.members[0]), BUDGET (4000000), APP_MODEL (affine),
 #      FORCE_MASKS=1 (recompute masks), MOVE ("0 -0.3 1.0", reference dataset units), EVERY_OFF (40).
 #SBATCH -J fusion-masked
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=64G
 #SBATCH -t 06:00:00
