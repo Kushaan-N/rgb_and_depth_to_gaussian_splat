@@ -18,8 +18,10 @@
 #   densify/report/<split>_<arm>.json, floor_<split>_<arm>.json, gate_<split>_<arm>[_vsdepth].json,
 #   densify_summary.{json,md}, preview_<split>.jpg (real | baseline | best arm).
 #SBATCH -J densify-bench
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=64G
 #SBATCH -t 06:00:00
