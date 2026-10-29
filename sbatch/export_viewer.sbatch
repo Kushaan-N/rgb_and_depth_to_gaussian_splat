@@ -23,8 +23,10 @@
 #      QAT_ITERS 8000) -> <E>/<NAME><last variant>_refaxes_qat.ply + .compressed.ply (the laptop file), scored in the live
 #      SuperSplat at $P/onpath/test (in-sample for an all-frames export) and gated against the plain .compressed.ply.
 #SBATCH -J export-viewer
-#SBATCH -p gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=96G
 #SBATCH -t 06:00:00
