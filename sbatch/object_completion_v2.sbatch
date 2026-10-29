@@ -19,8 +19,10 @@
 #  6. acceptance gate        exports <out>/exports/objects_completed{,_metric}.ply ONLY on a pass
 # Env: TAG (output subdir, default v2), COMPLETE_ARGS, FINETUNE (1), FINETUNE_ARGS, HARM_ARGS, JITTER (1), XEVERY (2).
 #SBATCH -J object-completion-v2
-#SBATCH -p gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=64G
 #SBATCH -t 03:00:00
