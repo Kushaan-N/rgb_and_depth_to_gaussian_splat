@@ -10,14 +10,14 @@
 #           --iters 12" -> <E>/<NAME>_clean_ft2_solid3{,_refaxes}.ply
 #   qat     sbatch/qat_view.sbatch on the solid3 _refaxes export (QITERS 8000) -> <E>/..._solid3_refaxes_qat.compressed.ply
 #   score   live SuperSplat (black, grey) at $P/onpath/test of the solid3 PLY (+DISTS), gated vs REF (default the current
-#           deliverable's $P/qat/report/deliv_{black,grey}.json); the QAT .compressed.ply vs REF_QAT
-#           ($P/qat/report/deliv_qat8k_cply_{black,grey}.json). onpath/test is IN-SAMPLE for an all-frames export.
+#           deliverable's $P/qat/report/deliv_{black,grey}.json); qat_view's delivered-frame scores (onpath_orig /
+#           onpath_qat_cply.json) vs REF_QAT ($P/qat/refaxes/report = solid3's). onpath/test is IN-SAMPLE (all-frames export).
 #   for s in export ft2 solid solid3 qat score; do J=$(STAGE=$s NAME=viewer_fa60k_wd ARM_FLAGS="..." \
 #     scripts/sub.sh -A ... ${J:+-d afterok:$J} sbatch/solid_chain.sbatch configs/mocap2_well-lit_trot.yaml); done
 # Env: STAGE, NAME, ARM_FLAGS (default "--strategy improved --budget 4000000 --iters 60000"), FT_ARGS (WD:
 #      "--lambda-wd 0.025 --wd-log2-sigma 4"), DSCALE (1.5:4), FT_ITERS (7000), QITERS (8000), REF, REF_QAT.
 #SBATCH -J solid-chain
-#SBATCH -p gpu,gpu-preempt
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
 #SBATCH -c 12
 #SBATCH --mem=96G
 #SBATCH -t 06:00:00
@@ -56,13 +56,10 @@ case "$STAGE" in
     NAME="$NAME" VIEW_PLY="$V" SRC_PLY="$S3" TRAIN="$DATA" TESTS="onpath=$TEST" QITERS="${QITERS:-8000}" OUT="$R/qat" \
       bash sbatch/qat_view.sbatch 2>&1 | grep -E "GATE|eval \{|onpath|QAT_VIEW_DONE|rror" || echo "QAT stage FAILED" ;;
   score)
-    REF="${REF:-$P/qat/report/deliv}"; REF_QAT="${REF_QAT:-$P/qat/report/deliv_qat8k_cply}"; REP="$R/report"; mkdir -p "$REP"
+    REF="${REF:-$P/qat/report/deliv}"; REF_QAT="${REF_QAT:-$P/qat/refaxes/report}"; REP="$R/report"; mkdir -p "$REP"
     [ -f "$R/shots/_viewer.json" ] || "$VPY" scripts/viewer_shots.py --engine current --bg black grey --ply "$S3" --dataset "$TEST" \
       --out-dir "$R/shots" | tail -1
-    V="$S3R"; [ -f "$V" ] || V="$S3"; Q="${V%.ply}_qat.compressed.ply"; [ -f "$Q" ] || Q=""
-    [ -z "$Q" ] || [ -f "$R/shots_qat/_viewer.json" ] || "$VPY" scripts/viewer_shots.py --engine current --bg black grey --ply "$Q" \
-      --dataset "$TEST" --out-dir "$R/shots_qat" | tail -1
-    for v in "solid3:$R/shots" "solid3_qat_cply:$R/shots_qat"; do
+    for v in "solid3:$R/shots"; do
       t="${v%%:*}"; d="${v#*:}"; [ -d "$d/black" ] || continue
       for bg in black grey; do
         [ -f "$REP/${t}_$bg.json" ] || "$GPY" scripts/eval_views.py --pred-dir "$d/$bg" --dataset "$TEST" --tag "${t}_$bg" \
@@ -83,9 +80,9 @@ PY
     done
     "$CPUPY" scripts/accept_gate.py --pair black "${REF}_black.json" "$REP/solid3_black.json" --pair grey "${REF}_grey.json" \
       "$REP/solid3_grey.json" --out "$REP/gate_solid3_vs_ref.json" | tail -1 || true
-    [ -f "$REP/solid3_qat_cply_grey.json" ] && { "$CPUPY" scripts/accept_gate.py --pair black "${REF_QAT}_black.json" \
-      "$REP/solid3_qat_cply_black.json" --pair grey "${REF_QAT}_grey.json" "$REP/solid3_qat_cply_grey.json" \
-      --out "$REP/gate_qat_vs_ref.json" | tail -1 || true; }
+    # the QAT file lives in the delivered (refaxes) frame: compare qat_view's own scores (cameras moved into that frame)
+    for v in orig qat_cply; do [ -f "$R/qat/report/onpath_$v.json" ] && { "$CPUPY" scripts/accept_gate.py --pair onpath \
+      "$REF_QAT/onpath_$v.json" "$R/qat/report/onpath_$v.json" --out "$REP/gate_${v}_vs_ref.json" | tail -1 || true; }; done
     ls -la "$E/$F2"*.ply 2>/dev/null || true ;;
   *) echo "unknown STAGE $STAGE"; exit 1 ;;
 esac
