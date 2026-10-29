@@ -4,8 +4,9 @@
 # forward-compat with Isaac 6.0. Short GPU job.
 #   sbatch sbatch/export_usd.sbatch mocap1_well-lit_trot
 #SBATCH -J cear-export
-#SBATCH -p gpu-preempt
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
 #SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
 #SBATCH -c 8
 #SBATCH --mem=48G
 #SBATCH -t 00:30:00
