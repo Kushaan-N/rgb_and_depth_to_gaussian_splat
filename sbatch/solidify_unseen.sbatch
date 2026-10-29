@@ -19,8 +19,10 @@
 #      JOINT=1 (after a TAG=$BASETAG run): joint refit incl. the input's gaussians (lr x0.1 + anchor, REFIT_ARGS e.g.
 #      "--lam-anchor 1e-3") and a per-view visibility budget (solidify_unseen.py budget, BUDGET_ARGS) instead of harm.
 #SBATCH -J solidify
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=96G
 #SBATCH -t 06:00:00
