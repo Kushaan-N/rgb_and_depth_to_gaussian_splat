@@ -5,8 +5,10 @@
 # loop is the bug; if it's black -> the exported .nurec asset itself is the problem.
 #   CEAR_SIF=.../isaac-sim-6.1.0.sif sbatch -A pi_donghyunkim_umass_edu sbatch/nurec_render_test.sbatch mocap1_well-lit_trot
 #SBATCH -J cear-nrtest
-#SBATCH -p gpu
-#SBATCH --gres=gpu:l40s:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=48G
 #SBATCH -t 00:25:00
