@@ -4,8 +4,9 @@
 # WebRTC/UDP). Resumes the finished checkpoint with 0 extra training, then serves the viewer.
 #   sbatch -A pi_donghyunkim_umass_edu sbatch/viser_viewer.sbatch mocap1_well-lit_trot
 #SBATCH -J cear-viser
-#SBATCH -p gpu-preempt
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
 #SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
 #SBATCH -c 8
 #SBATCH --mem=48G
 #SBATCH -t 02:00:00
