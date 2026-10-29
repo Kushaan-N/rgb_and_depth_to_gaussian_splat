@@ -13,8 +13,9 @@
 # (dynamic-free cloud) and offpath_artifixer.sbatch (captions + a base reconstruction to replace).
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o <log> sbatch/worldmodel_full.sbatch configs/<seq>.yaml
 #SBATCH -J worldmodel-full
-#SBATCH -p gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
 #SBATCH --constraint=a100-80g
 #SBATCH -c 16
 #SBATCH --mem=128G
