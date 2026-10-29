@@ -3,8 +3,10 @@
 # into <out>/exports/. These are benchmark splats: the held-out frames were NOT trained on.
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o <log> sbatch/export_offpath_splats.sbatch configs/<seq>.yaml
 #SBATCH -J export-splats
-#SBATCH -p gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 4
 #SBATCH --mem=32G
 #SBATCH -t 01:00:00
