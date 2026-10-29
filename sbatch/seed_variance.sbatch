@@ -5,8 +5,10 @@
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o <log> sbatch/seed_variance.sbatch configs/<seq>.yaml
 # Env: SEEDS ("1 2"), DEPTH (false|true: LiDAR depth loss arms).
 #SBATCH -J seed-variance
-#SBATCH -p gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=64G
 #SBATCH -t 03:00:00
