@@ -12,8 +12,9 @@
 # The metric scale is ours (mocap/LiDAR Sim3), not MoGe's monocular estimate.
 # Needs env/make_artifixer_venv.sh. Results: <out>/pipeline/offpath/report/artifixer_summary.json
 #SBATCH -J offpath-afx
-#SBATCH -p gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
 #SBATCH --constraint=a100-80g
 #SBATCH -c 16
 #SBATCH --mem=128G
