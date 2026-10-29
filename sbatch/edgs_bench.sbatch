@@ -23,8 +23,10 @@
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o logs/edgs-bench-%j.out sbatch/edgs_bench.sbatch configs/<seq>.yaml
 #   ARMS="edgs_igs edgs_igs_depth" sbatch -A ... sbatch/edgs_bench.sbatch configs/<seq>.yaml
 #SBATCH -J edgs-bench
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=64G
 #SBATCH -t 06:00:00
