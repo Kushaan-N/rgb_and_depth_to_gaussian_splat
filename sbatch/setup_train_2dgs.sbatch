@@ -3,8 +3,10 @@
 # Idempotent setup (isolated venv + CUDA submodules) + train + TSDF mesh extract + gravity-align.
 #   sbatch -A pi_donghyunkim_umass_edu sbatch/setup_train_2dgs.sbatch mocap2_well-lit_trot [iters]
 #SBATCH -J cear-2dgs
-#SBATCH -p gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=64G
 #SBATCH -t 02:30:00
