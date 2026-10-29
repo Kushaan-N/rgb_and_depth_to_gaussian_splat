@@ -10,7 +10,7 @@
 #   MODE=report ARMS="..." sbatch ... sbatch/fidelity_methods_bench.sbatch configs/<seq>.yaml   # table only
 # Arm = fm_<token>[_<token>...]; tokens: seed<n> | ema[<decay>] (0.999) | ann[<final>] (cosine LR anneal from 0.75,
 #   final x0.1) | freq[<lambda>] (0.1) | hard[<lambda>] (0.4) | grad[<lambda>] (0.1) | pixgs | pixgsd<x> |
-#   shn<lambda> (--shn-reg) | c2f<a> (--c2f) | emul / eerr (--eas-error mul / err) | aniso<lambda> (--aniso-reg, ratio 10) | ssl<x> (--ssim-lambda) | gt<threshold> (--grad-threshold) | bilag (--appearance bilagrid) | ss352 (viewer profile; default pc274).
+#   shn<lambda> (--shn-reg) | c2f<a> (--c2f) | emul / eerr (--eas-error mul / err) | aniso<lambda> (--aniso-reg, ratio 10) | ssl<x> (--ssim-lambda) | ms<lambda> (--msssim-lambda) | blur<K> (--blur-kernel) | blr<x> (--blur-lr) | gt<threshold> (--grad-threshold) | bilag (--appearance bilagrid) | ss352 (viewer profile; default pc274).
 # fm_ens[_jt<x>][_jr<deg>][_pf<frac>][_it<n>][_lr<x>][_t<label>]: multi-seed ensemble distillation (scripts/methods/ensemble_distill.py)
 #   of the arms in $TEACHERS (default "igs4m_pc274 fm_seed1 fm_seed2", which must exist) into one splat.
 # Outputs: $VT/<arm>/{splat.ply,train.json,train.log,methods.json}, $VT/shots/{onpath,offpath}/<arm>/,
@@ -51,7 +51,7 @@ arm_args() {  # fm_<tokens> -> A (extra trainer flags), PROF
       pixgs) A+=(--pixelgs) ;;                   pixgsd*) A+=(--pixelgs --pixelgs-depth "${t#pixgsd}") ;;
       shn*) A+=(--shn-reg "${t#shn}") ;;    c2f*) A+=(--c2f "${t#c2f}") ;;
       eerr|emul) A+=(--eas-error "${t#e}") ;;     aniso*) A+=(--aniso-reg "${t#aniso}") ;;
-      ssl*) A+=(--ssim-lambda "${t#ssl}") ;;
+      ssl*) A+=(--ssim-lambda "${t#ssl}") ;;    ms*) A+=(--msssim-lambda "${t#ms}") ;;    blur*) A+=(--blur-kernel "${t#blur}") ;;    blr*) A+=(--blur-lr "${t#blr}") ;;
       gt*) A+=(--grad-threshold "${t#gt}") ;;   bilag) A+=(--appearance bilagrid) ;;
       ss352|pc274) PROF="$t" ;;
       *) echo "unknown token $t in $1"; return 1 ;;
