@@ -80,7 +80,9 @@ SS_FIND = """() => { const s = window.scene; if (!s || !s.events) return null;
           bands: s.events.invoke('view.bands'), minPixelSize: s.events.invoke('view.minPixelSize'),
           targetSize: s.targetSize ? {width: s.targetSize.width, height: s.targetSize.height} : null,
           devicePixelRatio: window.devicePixelRatio}; }"""
-SS_SETUP = """() => { const s = window.scene; s.events.fire('view.setStochastic', 'disabled'); return s.events.invoke('view.stochastic'); }"""
+SS_SETUP = """(sort) => { const s = window.scene; s.events.fire('view.setStochastic', 'disabled');
+  if (sort) s.events.fire('view.setSortMode', sort);      // v3.7.0+: 'radial' (its default) | 'depth' (v3.6 behaviour)
+  return {stochastic: s.events.invoke('view.stochastic'), sortMode: s.events.invoke('view.sortMode') || 'depth'}; }"""
 SS_SHOT = """async ([p, q, fov, W, H]) => {
   const s = window.scene, V = s.camera.position.constructor, Q = s.camera.mainCamera.getRotation().constructor;
   const pos = new V(p[0], p[1], p[2]), rot = new Q(q[0], q[1], q[2], q[3]);
@@ -184,6 +186,9 @@ def main():
     ap.add_argument("--editor", action="store_true", help="also screenshot the SuperSplat editor's default view")
     ap.add_argument("--engine", choices=("pc274", "current"), default="pc274")
     ap.add_argument("--supersplat-url", default=SUPERSPLAT_URL, help="--engine current: the editor build to drive")
+    ap.add_argument("--sort-mode", choices=("radial", "depth"), default=None,
+                    help="--engine current: force the editor's blend order (v3.7.0 added view.sortMode, default radial = "
+                         "distance to the camera; depth = along the view axis, as v3.6 and earlier); default: the editor's own")
     ap.add_argument("--bg", nargs="+", default=["black"], help="black|grey|white|R,G,B; several -> <out-dir>/<bg>/")
     ap.add_argument("--scale", type=int, default=1, help="render at K x resolution (same FOV), area-downsample")
     args = ap.parse_args()
@@ -246,10 +251,10 @@ def main():
             print(f"[viewer] WebGL renderer: {renderer}", flush=True)
         else:
             browser, page, frame, info = open_editor(pw, args.supersplat_url, port)
-            meta = {k: v for k, v in info.items() if k != "M"}; meta["stochastic"] = frame.evaluate(SS_SETUP)
+            meta = {k: v for k, v in info.items() if k != "M"}; meta.update(frame.evaluate(SS_SETUP, args.sort_mode))
             renderer = f"SuperSplat {info['version'] or '?'} WebGPU={info['webgpu']} on {info['gpu']}"
             print(f"[viewer] {renderer}; {info['n']} splats, bands {info['bands']}, min px {info['minPixelSize']}, "
-                  f"stochastic {meta['stochastic']}", flush=True)
+                  f"stochastic {meta['stochastic']}, sort {meta['sortMode']}", flush=True)
             if not info["webgpu"]:
                 raise SystemExit("[viewer] SuperSplat is not on WebGPU: not today's renderer")
             M = np.asarray(info["M"], dtype=np.float64).reshape(4, 4).T   # splat entity world transform (column-major)
