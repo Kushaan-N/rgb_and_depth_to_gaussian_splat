@@ -8,8 +8,10 @@
 # Env: SMOKE=1 (reference only, 4 views), MOVE ("0 -0.3 1.0"), EVERY_OFF (40), EXTRA (more candidates),
 #      ENGINE (current = the live SuperSplat editor on WebGPU, default | pc274 = old PlayCanvas 2.7.4 page)
 #SBATCH -J supersplat-check
-#SBATCH -p gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=48G
 #SBATCH -t 02:00:00
