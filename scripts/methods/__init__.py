@@ -21,6 +21,8 @@ Methods (module, flag):
                                 instead of the visible-view count, so large splats seen big in few views can split;
                 --pixelgs-depth x: gradient scaled by min(1, z / (x scene_scale)) (near-camera floater damping)
                 --eas-error     error-aware EAS: candidates ranked on the current error map (x edges) of sampled views
+  blur.py       --blur-kernel K per-frame learned K x K blur kernel on the render (training only; deblur-aware)
+  losses.py     --msssim-lambda multi-scale D-SSIM term
   schedule.py   --c2f a         coarse-to-fine resolution: 1/4 res for a/3 x iters, 1/2 until 2a/3, then full
   (here)        --shn-reg       L2 pull of the view-dependent SH bands (shN) of the step's visible gaussians toward 0:
                                 less view-dependent overfitting to the training trajectory (train PSNR >> held-out)
@@ -34,11 +36,12 @@ from .losses import ExtraLosses, add_loss_args
 from .average import ParamAverager, add_average_args
 from .densify import add_densify_args, patch_strategy
 from .schedule import ResSchedule, add_schedule_args
+from .blur import FrameBlur, add_blur_args
 
 
 def add_args(ap):
     g = ap.add_argument_group("fidelity methods (scripts/methods, default off)")
-    add_loss_args(g); add_average_args(g); add_densify_args(g); add_schedule_args(g)
+    add_loss_args(g); add_average_args(g); add_densify_args(g); add_schedule_args(g); add_blur_args(g)
     g.add_argument("--shn-reg", type=float, default=0.0, help="L2 weight on the visible gaussians' shN (0 = off)")
     g.add_argument("--aniso-reg", type=float, default=0.0, help="anti-needle scale-ratio penalty weight (0 = off)")
     g.add_argument("--aniso-max", type=float, default=10.0, help="allowed max/min scale ratio")
@@ -51,14 +54,23 @@ class Hooks:
         self.avg = ParamAverager(args, params, opts)
         self.densify = patch_strategy(strat, args, scene_scale, rast, views, params)
         self.res = ResSchedule(args)
-        on = [k for k in ("freq_lambda", "hard_lambda", "grad_lambda", "ema_decay", "anneal_start", "pixelgs", "shn_reg", "c2f", "eas_error", "aniso_reg")
+        self.blur = FrameBlur(args, [v[0] for v in views] if views else [], params["means"].device)
+        self._blur_reg = None
+        on = [k for k in ("freq_lambda", "hard_lambda", "grad_lambda", "ema_decay", "anneal_start", "pixelgs", "shn_reg", "c2f", "eas_error", "aniso_reg", "msssim_lambda", "blur_kernel")
               if getattr(args, k) not in (0, False, None, "off")]
         if on:
             print(f"[methods] on: " + ", ".join(f"{k}={getattr(args, k)}" for k in on), flush=True)
 
+    def post(self, img, name, step):
+        """Render -> what the loss compares (--blur-kernel: the frame's learned blur); identity when off."""
+        img, self._blur_reg = self.blur(img, name, step)
+        return img
+
     def loss(self, img, gt, step, info=None):
         import torch
         l = self.losses(img, gt, step)
+        if self._blur_reg is not None:
+            l = l + self._blur_reg
         a = self.args
         if (a.shn_reg > 0 or a.aniso_reg > 0) and info is not None:
             vis = (info["radii"][0] > 0).all(-1)
@@ -74,10 +86,10 @@ class Hooks:
         return self.res.view(v, step, masked)
 
     def after_step(self, step, stepping):
-        self.avg.after_step(step, stepping)
+        self.avg.after_step(step, stepping); self.blur.step()
 
     def finalize(self, out_dir):
-        rec = {"losses": self.losses.summary(), "average": self.avg.finalize(), "densify": self.densify, "schedule": self.res.summary()}
+        rec = {"losses": self.losses.summary(), "average": self.avg.finalize(), "densify": self.densify, "schedule": self.res.summary(), "blur": self.blur.summary()}
         if out_dir and any(v for v in rec.values()):
             json.dump(rec, open(os.path.join(out_dir, "methods.json"), "w"), indent=1)
             print(f"[methods] {json.dumps(rec)}", flush=True)
