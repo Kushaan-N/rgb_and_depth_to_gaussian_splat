@@ -3,8 +3,10 @@
 # Prints the SSH tunnel + client URL you need to connect. Runs until you cancel or walltime.
 #   CEAR_SIF=.../isaac-sim-6.1.0.sif sbatch -A pi_donghyunkim_umass_edu sbatch/isaac_live.sbatch mocap1_well-lit_trot
 #SBATCH -J cear-live
-#SBATCH -p gpu
-#SBATCH --gres=gpu:l40s:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=48G
 #SBATCH -t 02:00:00
