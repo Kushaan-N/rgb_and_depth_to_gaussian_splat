@@ -13,8 +13,10 @@
 # Env: ARMS ("fixtest ho_ctrl ho_difix dl_ctrl dl_difix"), ROUNDS (0:0,0.1:5,0.2:10), IPR (iters per round, 2000),
 #      DFX_ARGS (extra diffix_refine.py flags), SCORE (0 = refine only), DX (work dir, $P/difix_refine), GATE_FLAGS (--perceptual).
 #SBATCH -J diffix-refine
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH -t 05:00:00
