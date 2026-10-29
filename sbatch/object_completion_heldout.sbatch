@@ -22,8 +22,10 @@
 # Env: ARC_FRAC (0.2), TAG (output subdir, default v5), COMPLETE_ARGS (extra complete_objects.py flags, e.g.
 # "--color-source nearest"), FINETUNE (1), FINETUNE_ARGS, HARM_ARGS, JITTER (1 copy per training pose).
 #SBATCH -J object-completion-heldout
-#SBATCH -p gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=64G
 #SBATCH -t 03:00:00
