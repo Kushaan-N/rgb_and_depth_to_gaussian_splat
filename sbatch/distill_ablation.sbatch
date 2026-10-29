@@ -10,8 +10,9 @@
 # Generated views = ArtiFixer from our splat + visibility mask (offpath_artifixer_ours.sbatch, covis).
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o <log> sbatch/distill_ablation.sbatch configs/<seq>.yaml
 #SBATCH -J distill-ablation
-#SBATCH -p gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
 #SBATCH --constraint=a100-80g
 #SBATCH -c 12
 #SBATCH --mem=96G
