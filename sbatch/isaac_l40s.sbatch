@@ -4,8 +4,10 @@
 #   sbatch sbatch/isaac_l40s.sbatch mocap1_well-lit_trot drop   # Gate 5 (physics only)
 #   sbatch sbatch/isaac_l40s.sbatch mocap1_well-lit_trot nav    # drive a wheeled robot in the splat
 #SBATCH -J cear-isaac
-#SBATCH -p gpu
-#SBATCH --gres=gpu:l40s:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=48G
 #SBATCH -t 02:00:00
