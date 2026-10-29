@@ -3,8 +3,10 @@
 # Stage 1 (A100 = 3dgrut arch): export gaussians -> .ply. Stage 2 (CPU): Poisson -> collider.
 #   sbatch -A pi_donghyunkim_umass_edu sbatch/collider_from_gaussians.sbatch mocap2_well-lit_trot [poisson_depth]
 #SBATCH -J cear-gaussmesh
-#SBATCH -p gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=64G
 #SBATCH -t 00:40:00
