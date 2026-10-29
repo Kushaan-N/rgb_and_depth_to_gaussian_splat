@@ -5,8 +5,10 @@
 #   PLYS="<a.ply> <b.ply>" sbatch -A $CEAR_SLURM_ACCOUNT -o logs/%x-%j.out sbatch/fp2_view.sbatch configs/fp2_<seq>.yaml
 # Env: PLYS (required; each -> <same dir>/<name>_view.ply), UP (auto), TRAIN_DATA / TEST_DATA, SCORE (1), FP2_WS
 #SBATCH -J fp2-view
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=48G
 #SBATCH -t 02:00:00
