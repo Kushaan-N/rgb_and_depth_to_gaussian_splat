@@ -21,8 +21,10 @@
 #   <split>_<best>_nofilter.json (best checkpoint rendered without its filter),
 #   mip_summary.{json,md}, preview_<split>.jpg (real | baseline | igs1m | igs1m+mip).
 #SBATCH -J mip-bench
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=64G
 #SBATCH -t 04:00:00
