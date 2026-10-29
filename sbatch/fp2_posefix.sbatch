@@ -9,8 +9,10 @@
 # Env: POSE_LR (1e-5), POSE_ITERS (15000), REFINE_ARGS (e.g. "--rig-group _([0-9]+)[.]png$" = one correction per
 #      stereo frame), PF_TAG (refinement dir <P>/posefix<PF_TAG>), NAME (viewer_igs_posefix), + fp2_export.sbatch vars.
 #SBATCH -J fp2-posefix
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=96G
 #SBATCH -t 08:00:00
