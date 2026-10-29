@@ -23,8 +23,10 @@
 #   train.log,renders_trainer/}, shots/{onpath,off<i>,editor}/<arm>/, report/<arm>_<bg>.json, report/gate_<arm>.json,
 #   report/summary.{json,md}, montage_*.jpg.
 #SBATCH -J distill-viewer
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH -t 04:00:00
