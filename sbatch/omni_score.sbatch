@@ -12,8 +12,10 @@
 # TEST_SET (score on <out>/pipeline/<TEST_SET>/test instead of rect/test, e.g. a levelled rig rect_grav; results ->
 # <out>/pipeline/supersplat_<TEST_SET>/)
 #SBATCH -J omni-score
-#SBATCH -p gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=48G
 #SBATCH -t 02:00:00
