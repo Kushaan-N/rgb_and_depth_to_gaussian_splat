@@ -18,8 +18,10 @@
 #      with <out>/pipeline/tls_cloud.ply + sim3_tls.json (fitness >= 0.2) as the cloud; otherwise cloud-free classes
 #      only), CLEAN_ARGS
 #SBATCH -J omni-rect
-#SBATCH -p gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=96G
 #SBATCH -t 06:00:00
