@@ -13,7 +13,8 @@
 #     -o logs/%x-%j.out sbatch/qat_view.sbatch
 # Env: SRC_PLY (the PLY in TRAIN's frame that VIEW_PLY is a rigid / sim3 copy of: the json is fitted by
 #      scripts/fit_sim3_ply.py when missing or older than VIEW_PLY; otherwise <x>_view.json must exist),
-#      TSI (0: hold-out interval within TRAIN), MASKS (1: --mask-dir <train>/images when *_mask.png exist), QITERS (3000),
+#      TSI (0: hold-out interval within TRAIN), MASKS (1: --mask-dir <train>/images when *_mask.png exist),
+#      MASK_DIR (a <stem>_mask.png dir used instead, e.g. <train>/masks_persist from fusionportable_masks.py persist; unset = as before), QITERS (3000),
 #      FT_ARGS ("--lambda-wd 0.025 --wd-log2-sigma 4"), DSCALE (1.5:4), QARGS (extra), OUT (<view dir>/qat_<stem>),
 #      MOVE ("0 -0.3 1.0"), EVERY_OFF (20)
 #SBATCH -J qat-view
@@ -69,6 +70,10 @@ TNAMES=""
 for spec in $TESTS; do t="${spec%%=*}"; TNAMES="$TNAMES $t"; [ -f "$O/ds/$t/sparse/0/images.txt" ] || move_ds "${spec#*=}" "$O/ds/$t"; done
 first="$(echo $TNAMES | cut -d' ' -f1)"
 MK=(); if [ "${MASKS:-1}" = 1 ] && ls "$TRAIN"/images/*_mask.png >/dev/null 2>&1; then MK=(--mask-dir "$O/ds/train/images"); fi
+if [ -n "${MASK_DIR:-}" ]; then                     # masks are image-space (<stem>_mask.png): any dir works in the view frame
+  ls "$MASK_DIR"/*_mask.png >/dev/null 2>&1 || { echo "MASK_DIR=$MASK_DIR has no *_mask.png"; exit 1; }
+  MK=(--mask-dir "$MASK_DIR")
+fi
 
 echo "== QAT fine-tune ($QITERS steps, $FT_ARGS ${MK[*]})"
 [ -f "$QPLY" ] || "$SPY" scripts/finetune_ply_viewer.py finetune --ply "$VIEW_PLY" --out "$QPLY" --dataset "$O/ds/train" \
