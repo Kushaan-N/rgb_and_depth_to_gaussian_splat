@@ -17,8 +17,10 @@
 #      INIT_POINTS (fisheye: a points3D.txt in the same frame to initialise 3DGUT from, e.g. the rect arm's EDGS
 #      init <out>/pipeline/rect_igs/edgs_data/sparse/0/points3D.txt; arm suffix _<INIT_TAG>, default edgs)
 #SBATCH -J omni-native
-#SBATCH -p gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=96G
 #SBATCH -t 06:00:00
