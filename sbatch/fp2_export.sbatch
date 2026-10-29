@@ -13,8 +13,10 @@
 #      fine-tune losses via --mask-dir; MASK_PERSIST=1 first unmasks people who stay put, fusionportable_masks.py
 #      persist, PERSIST_ARGS), VIEW (1: also <NAME>*_view.ply, scripts/view_frame.py), FP2_WS
 #SBATCH -J fp2-export
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=96G
 #SBATCH -t 06:00:00
