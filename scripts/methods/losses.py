@@ -6,6 +6,8 @@ in [0,1], the render after background / appearance / mask handling, i.e. exactly
     --freq-open x iters: low frequencies first, then the full band (FreGS' progressive annealing).
   hard-pixel mining: lambda x mean(w |img - gt|), w = (e / mean e) ^ gamma capped, e = detached 3x3-blurred error.
   image-gradient loss: lambda x L1 between the Sobel x/y gradients of render and target (per channel).
+  multi-scale D-SSIM: lambda x mean over --msssim-scales dyadic scales (2x2 area pooling) of (1 - SSIM): structure at
+    coarser scales too (an additive, MS-SSIM-like term; the base L1 + D-SSIM stays).
 """
 from __future__ import annotations
 
@@ -18,12 +20,14 @@ def add_loss_args(g):
     g.add_argument("--hard-gamma", type=float, default=1.0)
     g.add_argument("--hard-cap", type=float, default=8.0)
     g.add_argument("--grad-lambda", type=float, default=0.0, help="image-gradient (Sobel) L1 weight (0 = off)")
+    g.add_argument("--msssim-lambda", type=float, default=0.0, help="multi-scale D-SSIM weight (0 = off)")
+    g.add_argument("--msssim-scales", type=int, default=3)
 
 
 class ExtraLosses:
     def __init__(self, args):
         self.a = args; self.iters = max(args.iters, 1); self._rad = {}; self._sob = None
-        self.acc = {"freq": [0.0, 0], "hard": [0.0, 0], "grad": [0.0, 0]}
+        self.acc = {"freq": [0.0, 0], "hard": [0.0, 0], "grad": [0.0, 0], "msssim": [0.0, 0]}
 
     def _radius(self, H, W, dev):
         import torch
@@ -63,6 +67,17 @@ class ExtraLosses:
             gg = F.conv2d(gt.permute(2, 0, 1)[None], self._sob, padding=1, groups=3)
             lg = (gi - gg).abs().mean(); tot = tot + a.grad_lambda * lg
             if step % 100 == 0: self._rec("grad", lg.detach())
+        if a.msssim_lambda > 0:
+            from refine_poses_gsplat import ssim
+            x, y, ls = img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None], []
+            for s in range(a.msssim_scales):
+                if s:
+                    x, y = F.avg_pool2d(x, 2), F.avg_pool2d(y, 2)
+                if min(x.shape[-2:]) < 16:
+                    break
+                ls.append(1 - ssim(x, y))
+            lm = torch.stack(ls).mean(); tot = tot + a.msssim_lambda * lm
+            if step % 100 == 0: self._rec("msssim", lm.detach())
         return tot
 
     def summary(self):
