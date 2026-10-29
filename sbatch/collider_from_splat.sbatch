@@ -4,8 +4,10 @@
 # Stage 2 (fuse_splat_collider.py, CPU): TSDF-fuse + floor-align -> collider.
 #   sbatch -A pi_donghyunkim_umass_edu sbatch/collider_from_splat.sbatch mocap2_well-lit_trot [stride] [yaw] [limit]
 #SBATCH -J cear-splatdepth
-#SBATCH -p gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=64G
 #SBATCH -t 00:40:00
