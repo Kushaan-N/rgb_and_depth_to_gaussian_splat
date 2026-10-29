@@ -10,8 +10,10 @@
 #      its LiDAR check and --depth-lambda in ARM_FLAGS / FT_ARGS has targets; needs adapter.layout_own_train),
 #      DEPTH_MAX_RANGE (40 m).
 #SBATCH -J spires-export
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=96G
 #SBATCH -t 06:00:00
