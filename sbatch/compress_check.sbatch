@@ -12,8 +12,9 @@
 # Env: STEM (compressed file stem; default the PLY stem), ITERS (SOG -i, 10; several -> one .sog each, e.g. "10 50"), FORMATS ("sog compressed.ply"), MOVE ("0 -0.3 1.0"),
 #      ST_GPU (splat-transform -g: cpu converts on a CPU node: -p cpu,cpu-preempt --gres=none SKIP_SCORE=1), EVERY_OFF (20), SMOKE=1 (every 13th view, no off-path), SKIP_SCORE=1 (convert only)
 #SBATCH -J compress-check
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH -t 03:00:00
