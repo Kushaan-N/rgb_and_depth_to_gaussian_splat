@@ -15,8 +15,10 @@
 #   sbatch -A $CEAR_SLURM_ACCOUNT -o logs/posefix-%j.out sbatch/posefix_bench.sbatch configs/<seq>.yaml
 # Env: SPLITS="onpath offpath", REFINE_ITERS=15000, POSE_LR=1e-5, REFINE_DEPTH=0.05, LAMBDA=0.05, TTA=1
 #SBATCH -J posefix-bench
-#SBATCH -p gpu,gpu-preempt
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=gpu010
+#SBATCH --constraint=a100|a40|l40s
 #SBATCH -c 12
 #SBATCH --mem=64G
 #SBATCH -t 06:00:00
