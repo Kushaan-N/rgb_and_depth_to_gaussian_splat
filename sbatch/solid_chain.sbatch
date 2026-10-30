@@ -54,12 +54,21 @@ case "$STAGE" in
   qat)
     V="$S3R"; [ -f "$V" ] || V="$S3"
     NAME="$NAME" VIEW_PLY="$V" SRC_PLY="$S3" TRAIN="$DATA" TESTS="onpath=$TEST" QITERS="${QITERS:-8000}" OUT="$R/qat" \
-      bash sbatch/qat_view.sbatch 2>&1 | grep -E "GATE|eval \{|onpath|QAT_VIEW_DONE|rror" || echo "QAT stage FAILED" ;;
+      SORT_MODE="${SORT_MODE:-depth}" bash sbatch/qat_view.sbatch 2>&1 | grep -E "GATE|eval \{|onpath|QAT_VIEW_DONE|rror" || echo "QAT stage FAILED" ;;
   score)
     REF="${REF:-$P/qat/report/deliv}"; REF_QAT="${REF_QAT:-$P/qat/refaxes/report}"; REP="$R/report"; mkdir -p "$REP"
-    [ -f "$R/shots/_viewer.json" ] || "$VPY" scripts/viewer_shots.py --engine current --bg black grey --ply "$S3" --dataset "$TEST" \
-      --out-dir "$R/shots" | tail -1
-    for v in "solid3:$R/shots"; do
+    # Sort Mode (SuperSplat >= 3.7): depth = the pre-3.7 image formation (gated), radial = 3.7's default (reported)
+    for m in depth radial; do
+      [ -f "$R/shots_$m/_viewer.json" ] || "$VPY" scripts/viewer_shots.py --engine current --bg black grey --sort-mode $m --ply "$S3" \
+        --dataset "$TEST" --out-dir "$R/shots_$m" | tail -1
+    done
+    RS3="${REF_PLY:-$E/viewer_igs60k_wd_clean_ft2_solid3.ply}"                      # the reference, radial (for the report)
+    [ -f "$R/ref_shots_radial/_viewer.json" ] || "$VPY" scripts/viewer_shots.py --engine current --bg black grey --sort-mode radial \
+      --ply "$RS3" --dataset "$TEST" --out-dir "$R/ref_shots_radial" | tail -1
+    QP="${S3R%.ply}_qat.compressed.ply"; [ -f "$S3R" ] || QP="${S3%.ply}_qat.compressed.ply"
+    [ -f "$QP" ] && [ -d "$R/qat/ds/onpath" ] && { [ -f "$R/qat_shots_radial/_viewer.json" ] || "$VPY" scripts/viewer_shots.py \
+      --engine current --bg black grey --sort-mode radial --ply "$QP" --dataset "$R/qat/ds/onpath" --out-dir "$R/qat_shots_radial" | tail -1; }
+    for v in "solid3:$R/shots_depth" "solid3_rad:$R/shots_radial" "ref_rad:$R/ref_shots_radial" "qat_cply_rad:$R/qat_shots_radial"; do
       t="${v%%:*}"; d="${v#*:}"; [ -d "$d/black" ] || continue
       for bg in black grey; do
         [ -f "$REP/${t}_$bg.json" ] || "$GPY" scripts/eval_views.py --pred-dir "$d/$bg" --dataset "$TEST" --tag "${t}_$bg" \
@@ -80,6 +89,10 @@ PY
     done
     "$CPUPY" scripts/accept_gate.py --pair black "${REF}_black.json" "$REP/solid3_black.json" --pair grey "${REF}_grey.json" \
       "$REP/solid3_grey.json" --out "$REP/gate_solid3_vs_ref.json" | tail -1 || true
+    "$CPUPY" scripts/accept_gate.py --perceptual --pair black "${REF}_black.json" "$REP/solid3_black.json" --pair grey "${REF}_grey.json" \
+      "$REP/solid3_grey.json" --out "$REP/gate_solid3_vs_ref_perc.json" | tail -1 || true
+    [ -f "$REP/ref_rad_grey.json" ] && { "$CPUPY" scripts/accept_gate.py --pair black "$REP/ref_rad_black.json" "$REP/solid3_rad_black.json" \
+      --pair grey "$REP/ref_rad_grey.json" "$REP/solid3_rad_grey.json" --out "$REP/gate_solid3_vs_ref_radial.json" | tail -1 || true; }
     # the QAT file lives in the delivered (refaxes) frame: compare qat_view's own scores (cameras moved into that frame)
     for v in orig qat_cply; do [ -f "$R/qat/report/onpath_$v.json" ] && { "$CPUPY" scripts/accept_gate.py --pair onpath \
       "$REF_QAT/onpath_$v.json" "$R/qat/report/onpath_$v.json" --out "$REP/gate_${v}_vs_ref.json" | tail -1 || true; }; done
