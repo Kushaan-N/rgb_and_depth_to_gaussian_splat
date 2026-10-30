@@ -16,7 +16,8 @@
 #      TSI (0: hold-out interval within TRAIN), MASKS (1: --mask-dir <train>/images when *_mask.png exist),
 #      MASK_DIR (a <stem>_mask.png dir used instead, e.g. <train>/masks_persist from fusionportable_masks.py persist; unset = as before), QITERS (3000),
 #      FT_ARGS ("--lambda-wd 0.025 --wd-log2-sigma 4"), DSCALE (1.5:4), QARGS (extra), OUT (<view dir>/qat_<stem>),
-#      MOVE ("0 -0.3 1.0"), EVERY_OFF (20)
+#      MOVE ("0 -0.3 1.0"), EVERY_OFF (20), SORT_MODE (depth|radial: SuperSplat 3.7 Sort Mode forced in the live scores;
+#      default the editor's own = radial since 3.7.0; add --sort to FT_ARGS / QARGS to train for it)
 #SBATCH -J qat-view
 #SBATCH -p gpu-highvram,gpu-preempt-highvram
 #SBATCH --gres=gpu:1
@@ -89,7 +90,7 @@ for t in $TNAMES; do
   ds="$O/ds/$t"; masks=0; ls "$ds"/images/*_mask.png >/dev/null 2>&1 && masks=1
   for vs in "orig=$VIEW_PLY" "cply=${VIEW_PLY%.ply}.compressed.ply" "qat_cply=${QPLY%.ply}.compressed.ply"; do
     v="${vs%%=*}"; f="${vs#*=}"; d="$O/shots/$t/$v"
-    [ -f "$d/_viewer.json" ] || "$VPY" scripts/viewer_shots.py --engine current --bg black --ply "$f" --dataset "$ds" --out-dir "$d" 2>&1 | tail -1
+    [ -f "$d/_viewer.json" ] || "$VPY" scripts/viewer_shots.py --engine current --bg black ${SORT_MODE:+--sort-mode $SORT_MODE} --ply "$f" --dataset "$ds" --out-dir "$d" 2>&1 | tail -1
     [ -f "$REP/${t}_$v.json" ] || "$GPY" scripts/eval_views.py --pred-dir "$d" --dataset "$ds" --tag "${t}_$v" --json-out "$REP/${t}_$v.json" | tail -1
     if [ "$masks" = 1 ]; then
       "$CPUPY" scripts/datasets/fusionportable_masks.py composite --dataset "$ds" --pred-dir "$d" --out-dir "${d}_static" >/dev/null
@@ -100,7 +101,7 @@ for t in $TNAMES; do
 done
 for vs in "cply=${VIEW_PLY%.ply}.compressed.ply" "qat_cply=${QPLY%.ply}.compressed.ply"; do
   v="${vs%%=*}"; f="${vs#*=}"
-  [ -f "$O/offpath/$v/_viewer.json" ] || "$VPY" scripts/viewer_shots.py --engine current --bg black --ply "$f" --dataset "$O/ds/$first" \
+  [ -f "$O/offpath/$v/_viewer.json" ] || "$VPY" scripts/viewer_shots.py --engine current --bg black ${SORT_MODE:+--sort-mode $SORT_MODE} --ply "$f" --dataset "$O/ds/$first" \
     --every "$EVERY_OFF" --move $MOVE --out-dir "$O/offpath/$v" --editor 2>&1 | tail -1
 done
 
