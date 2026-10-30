@@ -10,7 +10,7 @@
 #   MODE=report ARMS="..." sbatch ... sbatch/fidelity_methods_bench.sbatch configs/<seq>.yaml   # table only
 # Arm = fm_<token>[_<token>...]; tokens: seed<n> | ema[<decay>] (0.999) | ann[<final>] (cosine LR anneal from 0.75,
 #   final x0.1) | freq[<lambda>] (0.1) | hard[<lambda>] (0.4) | grad[<lambda>] (0.1) | pixgs | pixgsd<x> |
-#   shn<lambda> (--shn-reg) | c2f<a> (--c2f) | emul / eerr (--eas-error mul / err) | aniso<lambda> (--aniso-reg, ratio 10) | ssl<x> (--ssim-lambda) | ms<lambda> (--msssim-lambda) | blur<K> (--blur-kernel) | blr<x> (--blur-lr) | gt<threshold> (--grad-threshold) | bilag (--appearance bilagrid) | ss352 (viewer profile; default pc274).
+#   shn<lambda> (--shn-reg) | c2f<a> (--c2f) | emul / eerr (--eas-error mul / err) | aniso<lambda> (--aniso-reg, ratio 10) | ssl<x> (--ssim-lambda) | srad / sdual (--sort radial / dual) | ms<lambda> (--msssim-lambda) | blur<K> (--blur-kernel) | blr<x> (--blur-lr) | gt<threshold> (--grad-threshold) | bilag (--appearance bilagrid) | ss352 (viewer profile; default pc274).
 # fm_ens[_jt<x>][_jr<deg>][_pf<frac>][_it<n>][_lr<x>][_t<label>]: multi-seed ensemble distillation (scripts/methods/ensemble_distill.py)
 #   of the arms in $TEACHERS (default "igs4m_pc274 fm_seed1 fm_seed2", which must exist) into one splat.
 # Outputs: $VT/<arm>/{splat.ply,train.json,train.log,methods.json}, $VT/shots/{onpath,offpath}/<arm>/,
@@ -31,6 +31,7 @@ export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$CEAR_WS/playwright
 OUT="$("$CPUPY" scripts/cfg_get.py "$CFG" paths.out_root)"; P="$OUT/pipeline"
 VT="${VT_OUT:-$P/viewer_train_60k}"; REP="$VT/report_fm"; DS="${VT_DATASET:-$P/edgs/on/data}"; TEST="$P/onpath/test"
 ITERS="${ITERS:-60000}"; BASE="${BASE_ARM:-igs4m_pc274}"; ARMS="${ARMS:-fm_ema}"
+SORTS="${SORTS:-depth radial}"   # SuperSplat Sort Modes scored (see score())
 REG="${REG_GT:-$P/onpath/test_viewreg_current}"   # real frames resampled into the viewer_shots camera (scripts/register_gt.py)
 MODE="${MODE:-$([ -n "${SLURM_ARRAY_TASK_ID:-}" ] && echo arms || echo all)}"
 hostname; date; mkdir -p "$REP"
@@ -52,7 +53,7 @@ arm_args() {  # fm_<tokens> -> A (extra trainer flags), PROF
       shn*) A+=(--shn-reg "${t#shn}") ;;    c2f*) A+=(--c2f "${t#c2f}") ;;
       eerr|emul) A+=(--eas-error "${t#e}") ;;     aniso*) A+=(--aniso-reg "${t#aniso}") ;;
       ssl*) A+=(--ssim-lambda "${t#ssl}") ;;    ms*) A+=(--msssim-lambda "${t#ms}") ;;    blur*) A+=(--blur-kernel "${t#blur}") ;;    blr*) A+=(--blur-lr "${t#blr}") ;;
-      gt*) A+=(--grad-threshold "${t#gt}") ;;   bilag) A+=(--appearance bilagrid) ;;
+      gt*) A+=(--grad-threshold "${t#gt}") ;;   srad) A+=(--sort radial) ;;   sdual) A+=(--sort dual) ;;   bilag) A+=(--appearance bilagrid) ;;
       ss352|pc274) PROF="$t" ;;
       *) echo "unknown token $t in $1"; return 1 ;;
     esac
@@ -75,22 +76,29 @@ PY
 }
 
 score() {  # <name> <ply>: live SuperSplat at the held-out cameras (black, grey) -> $REP/<name>_<bg>.json (+DISTS); off-path
-  local n="$1" ply="$2" bg
-  [ -f "$VT/shots/onpath/$n/_viewer.json" ] || "$VPY" scripts/viewer_shots.py --engine current --bg black grey --ply "$ply" \
-    --dataset "$TEST" --out-dir "$VT/shots/onpath/$n" | tail -1 || { sleep 60; "$VPY" scripts/viewer_shots.py --engine current \
-    --bg black grey --ply "$ply" --dataset "$TEST" --out-dir "$VT/shots/onpath/$n" | tail -1; }
-  for bg in black grey; do
-    [ -f "$REP/${n}_$bg.json" ] || "$GPY" scripts/eval_views.py --pred-dir "$VT/shots/onpath/$n/$bg" --dataset "$TEST" \
-      --tag "${n}_$bg" --json-out "$REP/${n}_$bg.json" | tail -1
-    dists "$VT/shots/onpath/$n/$bg" "$REP/${n}_$bg.json"
-    [ -f "$REP/${n}_${bg}_reg.json" ] || "$GPY" scripts/eval_views.py --pred-dir "$VT/shots/onpath/$n/$bg" --gt-dir "$REG" \
-      --tag "${n}_${bg}_reg" --json-out "$REP/${n}_${bg}_reg.json" | tail -1
-    dists "$VT/shots/onpath/$n/$bg" "$REP/${n}_${bg}_reg.json" "$REG"
+  # Sort Mode (SuperSplat >= 3.7.0) is forced per mode in $SORTS: depth -> shots/onpath/<name>, <name>_<bg>.json (the
+  # pre-3.7 image formation); radial -> shots/onpath_rad/<name>, <name>_rad_<bg>.json (3.7's default). SORTS=default keeps
+  # the old behaviour (whatever the editor defaults to, unrecorded).
+  local n="$1" ply="$2" bg m sm sd st
+  for m in $SORTS; do
+    sm=(); sd=onpath; st=""
+    case "$m" in depth) sm=(--sort-mode depth) ;; radial) sm=(--sort-mode radial); sd=onpath_rad; st=_rad ;; esac
+    [ -f "$VT/shots/$sd/$n/_viewer.json" ] || "$VPY" scripts/viewer_shots.py --engine current --bg black grey "${sm[@]}" --ply "$ply" \
+      --dataset "$TEST" --out-dir "$VT/shots/$sd/$n" | tail -1 || { sleep 60; "$VPY" scripts/viewer_shots.py --engine current \
+      --bg black grey "${sm[@]}" --ply "$ply" --dataset "$TEST" --out-dir "$VT/shots/$sd/$n" | tail -1; }
+    for bg in black grey; do
+      [ -f "$REP/${n}${st}_$bg.json" ] || "$GPY" scripts/eval_views.py --pred-dir "$VT/shots/$sd/$n/$bg" --dataset "$TEST" \
+        --tag "${n}${st}_$bg" --json-out "$REP/${n}${st}_$bg.json" | tail -1
+      dists "$VT/shots/$sd/$n/$bg" "$REP/${n}${st}_$bg.json"
+      [ -n "$st" ] && continue
+      [ -f "$REP/${n}_${bg}_reg.json" ] || "$GPY" scripts/eval_views.py --pred-dir "$VT/shots/$sd/$n/$bg" --gt-dir "$REG" \
+        --tag "${n}_${bg}_reg" --json-out "$REP/${n}_${bg}_reg.json" | tail -1
+      dists "$VT/shots/$sd/$n/$bg" "$REP/${n}_${bg}_reg.json" "$REG"
+    done
   done
   [ -f "$VT/shots/offpath/$n/_viewer.json" ] || "$VPY" scripts/viewer_shots.py --engine current --bg black --ply "$ply" \
     --dataset "$TEST" --every 8 --move 0 -0.3 1.0 --out-dir "$VT/shots/offpath/$n" | tail -1 || true
 }
-
 gate() {  # <arm>: strict + perceptual gate vs the baseline
   local pr=(--pair black "$REP/${BASE}_black.json" "$REP/$1_black.json" --pair grey "$REP/${BASE}_grey.json" "$REP/$1_grey.json")
   "$CPUPY" scripts/accept_gate.py "${pr[@]}" --out "$REP/gate_$1.json" | tail -1 || true
@@ -98,6 +106,9 @@ gate() {  # <arm>: strict + perceptual gate vs the baseline
   [ -f "$REP/$1_grey_reg.json" ] && [ -f "$REP/${BASE}_grey_reg.json" ] && { "$CPUPY" scripts/accept_gate.py \
     --pair black_reg "$REP/${BASE}_black_reg.json" "$REP/$1_black_reg.json" --pair grey_reg "$REP/${BASE}_grey_reg.json" \
     "$REP/$1_grey_reg.json" --out "$REP/gate_$1_reg.json" | tail -1 || true; }
+  [ -f "$REP/$1_rad_grey.json" ] && [ -f "$REP/${BASE}_rad_grey.json" ] && { "$CPUPY" scripts/accept_gate.py \
+    --pair black_rad "$REP/${BASE}_rad_black.json" "$REP/$1_rad_black.json" --pair grey_rad "$REP/${BASE}_rad_grey.json" \
+    "$REP/$1_rad_grey.json" --out "$REP/gate_$1_rad.json" | tail -1 || true; }
   return 0
 }
 
