@@ -17,7 +17,8 @@ Viewer profiles (--viewer), reimplemented from the shader sources:
           focal, 0.3 px^2 dilation, half-extent sqrt(8) sigma (radius capped at min(1024, viewport)),
           normalised kernel (exp(-d^2/2) - e^-4) / (1 - e^-4) cut at d^2 = 8, no 1/255 cut, splats with
           2 sqrt(2 lambda1) < 2 px dropped, opacity quantised to 8 bits, standard SH.
-Both: per-gaussian view-depth sort, premultiplied over-blending onto black, colour clamped >= 0, output [0,1].
+Both: per-gaussian view-depth sort (--sort radial: distance to the camera = SuperSplat 3.7.0's default Sort Mode; dual:
+alternate per render), premultiplied over-blending onto black, colour clamped >= 0, output [0,1].
 Rasterisers (--raster): `exact` = gsplat's CUDA tile/indices kernels + per-pixel compositing in torch with
 the viewer's kernel (exact cut-offs, autograd); `cuda` = gsplat's fused rasteriser fed the viewer's
 projection (fast; keeps the exp tail beyond d^2 = 8 and gsplat's 0.999 alpha clamp, so pc274 only).
@@ -285,7 +286,7 @@ class ViewerRaster:
     """Differentiable copy of a viewer's splat renderer (see module docstring)."""
 
     def __init__(self, viewer="pc274", raster="exact", quant=False, tile=16, cull=True, cutoff=True, a255=True,
-                 shbug=None, dil=None, display_scale=1.0):
+                 shbug=None, dil=None, display_scale=1.0, sort="depth"):
         """Ablation knobs (gap attribution): cull = minimum-size cull, cutoff = d^2 <= 8 kernel cut, a255 = 1/255
         discard (pc274), shbug = 2.7.4's SH band-2 typo (default: on for pc274), dil = dilation in px^2.
         display_scale (ss352): on-screen canvas pixels per rendered pixel. SuperSplat's projector takes focal, the 0.3
@@ -298,6 +299,7 @@ class ViewerRaster:
         self.cull, self.cutoff, self.a255 = cull, cutoff, a255
         self.shbug = (viewer == "pc274") if shbug is None else shbug
         self.r = display_scale if viewer == "ss352" else 1.0
+        self.sort, self._n = sort, 0        # blend order: depth | radial (SuperSplat 3.7 default) | dual (alternate per render)
         self._dil = dil
         self.last = {}
 
@@ -384,7 +386,10 @@ class ViewerRaster:
         if self.quant:
             col = half(col)
         feats = torch.cat([col, z[:, None]], 1) if depth else col
-        z_sort = torch.where(keep, z, torch.full_like(z, 1e10)).detach()
+        self._n += 1
+        key = z if self.sort == "depth" or (self.sort == "dual" and self._n % 2) else \
+            (p["means"] @ w2c[:3, :3].T + w2c[:3, 3]).norm(dim=-1)        # radial: distance to the camera
+        z_sort = torch.where(keep, key, torch.full_like(key, 1e10)).detach()
         tw, th = (W + self.tile - 1) // self.tile, (H + self.tile - 1) // self.tile
         _, isect_ids, flatten_ids = isect_tiles(md[None].detach().contiguous(), radii[None].contiguous(), z_sort[None].contiguous(),
                                                 self.tile, tw, th)
@@ -595,7 +600,7 @@ def render(args):
     p = load_any(args.ply, dev); deg = sh_deg(p)
     if args.quant_format == "cply":                    # simulate splat-transform's .compressed.ply of this .ply
         p = quantise_cply(p, cply_order(p["means"].cpu().numpy()), args.quant_parts.split(","), ste=False)
-    r = ViewerRaster(args.viewer, args.raster, quant=args.quant, display_scale=args.display_scale)
+    r = ViewerRaster(args.viewer, args.raster, quant=args.quant, display_scale=args.display_scale, sort=args.sort)
     bgs = {b: torch.tensor([float(x) for x in b.split(",")] if "," in b else
                            {"black": [0.0] * 3, "grey": [0.5] * 3, "white": [1.0] * 3}[b], device=dev) for b in args.bg}
     for name, cam, c2w in frames(args.dataset, 0, "all")[args.offset::args.every]:
@@ -657,7 +662,7 @@ def finetune(args):
     gm = next(g for g in opt.param_groups if g["name"] == "means")
     rs = [float(x) for x in str(args.display_scale).split(":")]
     r_eval = rs[0] if len(rs) == 1 else float(args.eval_display_scale or rs[0])
-    raster = ViewerRaster(args.viewer, args.raster, display_scale=r_eval)
+    raster = ViewerRaster(args.viewer, args.raster, display_scale=r_eval, sort=args.sort)
     eval_ds = args.eval_dataset
     ev = []
     if eval_ds:                                       # held-out monitor (matched renderer, viewer camera)
@@ -798,6 +803,7 @@ def main():
                    ".compressed.ply of --ply (--ply may also be a .compressed.ply: decoded as SuperSplat does)")
     r.add_argument("--quant-parts", default=",".join(CPLY_PARTS), help="subset of " + ",".join(CPLY_PARTS))
     r.add_argument("--display-scale", type=float, default=1.0, help="ss352: on-screen canvas px per image px")
+    r.add_argument("--sort", choices=("depth", "radial", "dual"), default="depth", help="blend order (SuperSplat 3.7: radial)")
     r.add_argument("--bg", nargs="+", default=["black"], help="black|grey|white|R,G,B; several -> <out-dir>/<bg>/")
     r.add_argument("--every", type=int, default=1); r.add_argument("--offset", type=int, default=0)
     k = sub.add_parser("cply-check")
@@ -809,6 +815,8 @@ def main():
     f.add_argument("--test-split-interval", type=int, default=0, help="3DGRUT's rule: frame k held out iff k %% N == 0")
     f.add_argument("--viewer", default="ss352", choices=("pc274", "ss352"), help="ss352 = today's SuperSplat (default)")
     f.add_argument("--raster", default="exact", choices=("exact", "cuda"))
+    f.add_argument("--sort", choices=("depth", "radial", "dual"), default="depth",
+                   help="blend order: depth (SuperSplat <= 3.6 / 'Depth' mode), radial (3.7's default 'Radial'), dual (both)")
     f.add_argument("--display-scale", default="1.0", help="ss352: on-screen canvas px per image px (see ViewerRaster); "
                    "'a:b' samples it log-uniformly per step (robust to the user's window / DPI)")
     f.add_argument("--eval-display-scale", type=float, default=None, help="scale for the monitor evals (default: a)")
