@@ -16,6 +16,9 @@ trainer refuses other kernels), with the viewer's conventions (shaders documente
   both: EWA Jacobian at the true centre (no 1.3x-FOV clamp: the viewers draw off-screen-centred splats near the
         camera stretched), near plane 1e-4, per-gaussian view-depth sort (gsplat per-tile sort by camera z = the
         viewers' global order), black background, SH degree 3.
+--sort depth|radial|dual: blend order. SuperSplat 3.7.0 added Settings > Sort Mode, default Radial (distance to the
+camera), which reorders big / overlapping splats trained in view-depth order (CEAR baseline: 36.28 dB in Depth mode, 32.26
+in Radial); radial trains in that order, dual alternates the two per step (one splat for both modes).
 Options: --aa (gsplat antialiased mode: opacity x sqrt(det/det_dilated); the exported PLY is tagged
 `comment SplatRenderMode mip` -- PlayCanvas 2.7.4 itself never enables GSPLAT_AA, so its renders lack the
 compensation), --ss 2 (SRGS-style sub-pixel constraint: render at 2x with eps2d x 4, 2x2 area-downsample, loss
@@ -114,6 +117,17 @@ class ViewerGS:
         self.sh_band2 = args.sh_band2 or prof["sh_band2"]
         self.floor = None                                  # per-gaussian 3D scale floor (--min-px), or None
         self.min_px, self.near, self.cap_px = args.min_px, args.near, args.cap_px
+        self.sort, self._n = getattr(args, "sort", "depth"), 0   # blend order (--sort; SuperSplat >= 3.7 default: radial)
+
+    def sort_key(self, p, viewmat, depths):
+        """Per-gaussian blend-order key [1,N]: view depth (SuperSplat <= 3.6, its 'Depth' sort mode) or the distance to the
+        camera (3.7's default 'Radial'); 'dual' alternates per render so the splat is trained for both orders."""
+        import torch
+        self._n += 1
+        if self.sort == "depth" or (self.sort == "dual" and self._n % 2):
+            return depths.detach()
+        with torch.no_grad():
+            return torch.linalg.norm(p["means"] @ viewmat[:3, :3].T + viewmat[:3, 3], dim=-1)[None]
 
     def scales(self, p):
         import torch
@@ -201,7 +215,7 @@ class ViewerGS:
         else:
             col = torch.clamp_min(spherical_harmonics(deg, dirs, self.sh_coeffs(p, deg), masks=vis) + 0.5, 0.0)
         feats = torch.cat([col, depths[0][:, None]], 1) if depth else col
-        out, alpha = self.raster(means2d, radii, depths, conics, feats, opr, W * ss, H * ss, absgrad=absgrad)
+        out, alpha = self.raster(means2d, radii, self.sort_key(p, viewmat, depths), conics, feats, opr, W * ss, H * ss, absgrad=absgrad)
         out, alpha = out[0], alpha[0, ..., 0]
         if ss > 1:                                          # area-downsample to the 1x grid
             pool = lambda x: F.avg_pool2d(x.permute(2, 0, 1)[None], ss)[0].permute(1, 2, 0)
@@ -219,7 +233,7 @@ class ViewerGS:
             radii, means2d, depths, conics, opr = self.project(p, viewmat, K, W, H, 1)
         f = torch.zeros(len(p["means"]), 1, device=means2d.device, requires_grad=True)
         with torch.enable_grad():
-            out, _ = self.raster(means2d.detach(), radii, depths.detach(), conics.detach(), f, opr.detach(), W, H)
+            out, _ = self.raster(means2d.detach(), radii, self.sort_key(p, viewmat, depths), conics.detach(), f, opr.detach(), W, H)
             (out[0, ..., 0] * edge).sum().backward()
         return f.grad[:, 0].detach(), (radii[0] > 0).all(-1)
 
@@ -490,6 +504,9 @@ def main():
     ap.add_argument("--near", type=float, default=1e-4, help="near plane (PlayCanvas draws any splat in front of the camera)")
     ap.add_argument("--cap-px", type=float, default=1024.0, help="viewer's quad half-extent cap in px (0 = off)")
     ap.add_argument("--aa", action="store_true", help="antialiased (opacity compensation) mode")
+    ap.add_argument("--sort", choices=("depth", "radial", "dual"), default="depth",
+                    help="blend order: depth (SuperSplat <= 3.6 / its 'Depth' sort mode), radial (distance to the camera: "
+                         "SuperSplat 3.7's default 'Radial'), dual (alternate per step: good in both)")
     ap.add_argument("--ss", type=int, default=1, help="supersampling factor (render ss x, area-downsample, loss at 1x)")
     ap.add_argument("--min-px", type=float, default=0.0, help="3D scale floor in pixels at the closest training camera; 0 = off")
     ap.add_argument("--sh-band2", choices=("zero", "pcbug", "std"), default=None, help="default: zero (pc274), std (ss352)")
@@ -730,7 +747,7 @@ def main():
         res["appearance"] = {k: aj[k] for k in aj if k != "frames"}
         print(f"[vgs] appearance ({args.appearance}): luminance gain pct 0/5/25/50/75/95/100 "
               f"{aj['gain_pct_0_5_25_50_75_95_100']['lum']}, gain std rgb {aj['gain_std']}, bias std {aj['bias_std']}", flush=True)
-    comments = [f"train_viewer_gsplat viewer={args.viewer} eps2d={rast.eps2d} strategy={args.strategy} ss={args.ss} aa={args.aa}"
+    comments = [f"train_viewer_gsplat viewer={args.viewer} eps2d={rast.eps2d} strategy={args.strategy} ss={args.ss} aa={args.aa} sort={args.sort}"
                 + (f" appearance={args.appearance}" if app is not None else "")]
     if args.aa:
         comments.append("SplatRenderMode mip")
