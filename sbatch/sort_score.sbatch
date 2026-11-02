@@ -45,8 +45,11 @@ pred, gt, js = sys.argv[1:4]; r = json.load(open(js))
 if "dists" not in r:
     t = lambda p: torch.from_numpy(np.asarray(Image.open(p).convert("RGB"), np.float32) / 255).permute(2, 0, 1)[None].cuda()
     m = piq.DISTS(reduction="none").cuda(); v = []
+    g = {os.path.splitext(f)[0]: f for f in os.listdir(gt) if f.lower().endswith((".png", ".jpg", ".jpeg"))
+         and not f.endswith(("_mask.png", "_covis.png"))}                    # real frames may be .jpg: match by stem
     for n in sorted(f for f in os.listdir(pred) if f.endswith(".png") and not f.startswith("_")):
-        with torch.no_grad(): v.append(m(t(os.path.join(pred, n)), t(os.path.join(gt, n))).item())
+        if os.path.splitext(n)[0] in g:
+            with torch.no_grad(): v.append(m(t(os.path.join(pred, n)), t(os.path.join(gt, g[os.path.splitext(n)[0]]))).item())
     r["dists"] = round(float(np.mean(v)), 4); json.dump(r, open(js, "w"), indent=2)
 PY
       done
