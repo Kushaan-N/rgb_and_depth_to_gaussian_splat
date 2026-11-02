@@ -286,7 +286,7 @@ class ViewerRaster:
     """Differentiable copy of a viewer's splat renderer (see module docstring)."""
 
     def __init__(self, viewer="pc274", raster="exact", quant=False, tile=16, cull=True, cutoff=True, a255=True,
-                 shbug=None, dil=None, display_scale=1.0, sort="depth"):
+                 shbug=None, dil=None, display_scale=1.0, sort="depth", radial_frac=0.5):
         """Ablation knobs (gap attribution): cull = minimum-size cull, cutoff = d^2 <= 8 kernel cut, a255 = 1/255
         discard (pc274), shbug = 2.7.4's SH band-2 typo (default: on for pc274), dil = dilation in px^2.
         display_scale (ss352): on-screen canvas pixels per rendered pixel. SuperSplat's projector takes focal, the 0.3
@@ -300,6 +300,7 @@ class ViewerRaster:
         self.shbug = (viewer == "pc274") if shbug is None else shbug
         self.r = display_scale if viewer == "ss352" else 1.0
         self.sort, self._n = sort, 0        # blend order: depth | radial (SuperSplat 3.7 default) | dual (alternate per render)
+        self.radial_frac = radial_frac      # dual: deterministic share of renders in radial order (0.5 = alternate)
         self._dil = dil
         self.last = {}
 
@@ -387,7 +388,8 @@ class ViewerRaster:
             col = half(col)
         feats = torch.cat([col, z[:, None]], 1) if depth else col
         self._n += 1
-        key = z if self.sort == "depth" or (self.sort == "dual" and self._n % 2) else \
+        f = self.radial_frac
+        key = z if self.sort == "depth" or (self.sort == "dual" and math.floor(self._n * f) == math.floor((self._n - 1) * f)) else \
             (p["means"] @ w2c[:3, :3].T + w2c[:3, 3]).norm(dim=-1)        # radial: distance to the camera
         z_sort = torch.where(keep, key, torch.full_like(key, 1e10)).detach()
         tw, th = (W + self.tile - 1) // self.tile, (H + self.tile - 1) // self.tile
@@ -662,7 +664,7 @@ def finetune(args):
     gm = next(g for g in opt.param_groups if g["name"] == "means")
     rs = [float(x) for x in str(args.display_scale).split(":")]
     r_eval = rs[0] if len(rs) == 1 else float(args.eval_display_scale or rs[0])
-    raster = ViewerRaster(args.viewer, args.raster, display_scale=r_eval, sort=args.sort)
+    raster = ViewerRaster(args.viewer, args.raster, display_scale=r_eval, sort=args.sort, radial_frac=args.sort_radial_frac)
     eval_ds = args.eval_dataset
     ev = []
     if eval_ds:                                       # held-out monitor (matched renderer, viewer camera)
@@ -815,6 +817,7 @@ def main():
     f.add_argument("--test-split-interval", type=int, default=0, help="3DGRUT's rule: frame k held out iff k %% N == 0")
     f.add_argument("--viewer", default="ss352", choices=("pc274", "ss352"), help="ss352 = today's SuperSplat (default)")
     f.add_argument("--raster", default="exact", choices=("exact", "cuda"))
+    f.add_argument("--sort-radial-frac", type=float, default=0.5, help="--sort dual: share of renders in radial order")
     f.add_argument("--sort", choices=("depth", "radial", "dual"), default="depth",
                    help="blend order: depth (SuperSplat <= 3.6 / 'Depth' mode), radial (3.7's default 'Radial'), dual (both)")
     f.add_argument("--display-scale", default="1.0", help="ss352: on-screen canvas px per image px (see ViewerRaster); "
