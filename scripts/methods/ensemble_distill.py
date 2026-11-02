@@ -11,7 +11,10 @@ scripts/train_viewer_gsplat.py on
                                     consecutive training cameras, rotation up to --jitter-r deg) vs the mean of the
                                     teachers' renders there (each composited on the same random background),
 with no densification (gaussian count fixed), all learning rates x --lr-mult with a cosine decay to 0.1x. Held-out
-frames (--test-split-interval) are never used; --eval-dataset is scored at the end for the student, every teacher and the
+frames (--test-split-interval) are never used. --pseudo-mode interp places the pseudo cameras ON the path instead: between
+two consecutive training cameras (lerp centre / slerp rotation, u ~ U(0,1)), then jittered as above -- where the held-out
+frames of a trajectory are. --sort depth|radial|dual: blend order of teachers AND student (dual: one order per step, drawn
+at random, so the student is distilled for both SuperSplat sort modes like train_viewer_gsplat.py --sort dual); --eval-dataset is scored at the end for the student, every teacher and the
 teachers' render mean (the ensemble upper bound) at the viewer camera. Output: <out>/splat.ply, <out>/distill.json.
 
     PYTHONPATH=$CEAR_WS/gsplat-viewer-pc274 python scripts/methods/ensemble_distill.py --teachers A.ply B.ply C.ply \
@@ -23,6 +26,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import train_viewer_gsplat as tvg  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from refine_poses_gsplat import ssim, psnr  # noqa: E402
 
 
@@ -50,6 +54,9 @@ def main():
     ap.add_argument("--lr-mult", type=float, default=0.3)
     ap.add_argument("--ssim-lambda", type=float, default=0.2)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--pseudo-mode", choices=("jitter", "interp"), default="jitter",
+                    help="pseudo cameras: jittered training cameras, or interpolated between consecutive ones (+ jitter)")
+    ap.add_argument("--sort", choices=("depth", "radial", "dual"), default="depth", help="blend order (dual: random per step)")
     args = ap.parse_args()
 
     import torch
@@ -60,7 +67,7 @@ def main():
     if cut != args.viewer:
         raise SystemExit(f"[distill] --viewer {args.viewer} needs PYTHONPATH=$CEAR_WS/gsplat-viewer-{args.viewer}; loaded {cut}")
     rast = tvg.ViewerGS(argparse.Namespace(viewer=args.viewer, eps2d=None, cull_l1=None, aa=False, sh_band2=None,
-                                           min_px=0.0, near=1e-4, cap_px=1024.0))
+                                           min_px=0.0, near=1e-4, cap_px=1024.0, sort="depth"))
     tr = tvg.load_views(args.dataset, args.test_split_interval, "train", dev)
     ev = tvg.load_views(args.eval_dataset, 0, "all", dev) if args.eval_dataset else []
     T = [tvg.load_ply_params(f, dev) for f in args.teachers]
@@ -78,6 +85,16 @@ def main():
     opt = torch.optim.Adam([{"params": [params[k]], "lr": lr[k]} for k in params], eps=1e-15)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(s / args.iters, 1))))
 
+    pairs = [k for k in range(len(tr) - 1) if np.linalg.norm(C[k + 1] - C[k]) <= 3 * spacing]
+
+    def interp(k):                                          # a camera on the path between training frames k and k+1
+        from vwarp import _exp_rot, _log_rot
+        ca, cb, u = torch.linalg.inv(tr[k][4]), torch.linalg.inv(tr[k + 1][4]), float(np.random.rand())
+        c = ca.clone(); c[:3, :3] = ca[:3, :3] @ _exp_rot(u * _log_rot(ca[:3, :3].T @ cb[:3, :3]))
+        c[:3, 3] = (1 - u) * ca[:3, 3] + u * cb[:3, 3]
+        v = tr[k]
+        return (v[0], v[1], v[2], v[3], torch.linalg.inv(c), None, None)
+
     def jitter(v):
         c = torch.linalg.inv(v[4])
         r = rot(torch.nn.functional.normalize(torch.randn(3, device=dev), dim=0) * math.radians(args.jitter_r) * float(torch.rand(())))
@@ -87,10 +104,13 @@ def main():
 
     curve, nps = [], 0
     for step in range(args.iters):
-        v = tr[np.random.randint(len(tr))]
+        ki = np.random.randint(len(tr)); v = tr[ki]
         bg = torch.rand(3, device=dev)
+        rast.sort = args.sort if args.sort != "dual" else ("radial" if np.random.rand() < 0.5 else "depth")
         pseudo = np.random.rand() < args.pseudo_frac
         if pseudo:
+            if args.pseudo_mode == "interp" and pairs:
+                v = interp(pairs[np.random.randint(len(pairs))])
             v = jitter(v); nps += 1
             with torch.no_grad():
                 tgt = torch.stack([(lambda o: o[0] + (1 - o[1][..., None]) * bg)(rast.render(t, v, deg)) for t in T]).mean(0).clamp(0, 1)
@@ -106,6 +126,7 @@ def main():
             curve.append(e); print(f"[distill] {e}", flush=True)
     res = {"args": vars(args), "n_gaussians": len(params["means"]), "pseudo_steps": nps, "curve": curve,
            "train_seconds": round(time.time() - t0, 1)}
+    rast.sort = "depth" if args.sort == "dual" else args.sort
     if ev:
         res["student"] = tvg.evaluate(rast, params, ev, deg, os.path.join(args.out, "renders_trainer"), args.viewer)
         res["teachers"] = [tvg.evaluate(rast, t, ev, deg, viewer=args.viewer) for t in T]
