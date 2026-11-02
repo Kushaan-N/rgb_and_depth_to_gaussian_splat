@@ -11,7 +11,7 @@
 #     configs/mocap2_well-lit_trot.yaml
 # Env: NAME (viewer_msd60k_wd_clean_ft2_solid3), IN (<E>/<NAME>.ply), METHOD, TAG (METHOD with , -> _), LEARNED,
 #      BUILD_ARGS, REFIT (1), REFIT_ARGS ("--train-zone-m 0.25 --iters 2000"), BUDGET_ARGS ("--min-w 0.002 --iters 12"),
-#      STOP_AFTER=build (prep + build only), MOVES ("0 -0.3 1.0;0 -0.6 1.5"), EVERY_OFF (40), FORCE=1 (redo every stage of this TAG).
+#      BUDGET_MODE=zone (GT-aware budget in the object zones: scripts/object_priors/zone_budget.py), STOP_AFTER=build (prep + build only), MOVES ("0 -0.3 1.0;0 -0.6 1.5"), EVERY_OFF (40), FORCE=1 (redo every stage of this TAG).
 #SBATCH -J obj-priors
 #SBATCH -p gpu-highvram,gpu-preempt-highvram
 #SBATCH --gres=gpu:1
@@ -65,8 +65,13 @@ if [ "${REFIT:-1}" = 1 ]; then
   CAND="$T/refit.ply"; SRC="$T/refit_src.npz"
 fi
 echo "== 3. per-view visibility budget vs the input"
-needt "$T/budget.ply" && "$SPY" "$SO" budget --input "$IN" --cand "$CAND" --src "$SRC" --dataset "$DATA" "$TEST" \
-  --out "$T/budget.ply" ${BUDGET_ARGS:---min-w 0.002 --iters 12}
+if [ "${BUDGET_MODE:-strict}" = zone ]; then   # GT-aware inside object zones, strict elsewhere, per-view cap (zone_budget.py)
+  needt "$T/budget.ply" && "$SPY" scripts/object_priors/zone_budget.py --input "$IN" --cand "$CAND" --src "$SRC" --zone "$T/zone.npz" \
+    --dataset "$DATA" "$TEST" --out "$T/budget.ply" ${BUDGET_ARGS:-}
+else
+  needt "$T/budget.ply" && "$SPY" "$SO" budget --input "$IN" --cand "$CAND" --src "$SRC" --dataset "$DATA" "$TEST" \
+    --out "$T/budget.ply" ${BUDGET_ARGS:---min-w 0.002 --iters 12}
+fi
 echo "== 4. shfit + exports"
 needt "$OUTPLY" && "$SPY" "$SO" shfit --ply "$T/budget.ply" --ref "$T/budget.ply" --dataset "$DATA" "$TEST" --out "$OUTPLY"
 [ -z "$FRAME" ] || { needt "${OUTPLY%.ply}_refaxes.ply" && "$CPUPY" scripts/sim3_align_splat.py --colmap-model "$P/dataset/sparse/0" \
