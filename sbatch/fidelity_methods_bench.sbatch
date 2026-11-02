@@ -10,11 +10,13 @@
 #   MODE=report ARMS="..." sbatch ... sbatch/fidelity_methods_bench.sbatch configs/<seq>.yaml   # table only
 # Arm = fm_<token>[_<token>...]; tokens: seed<n> | ema[<decay>] (0.999) | ann[<final>] (cosine LR anneal from 0.75,
 #   final x0.1) | freq[<lambda>] (0.1) | hard[<lambda>] (0.4) | grad[<lambda>] (0.1) | pixgs | pixgsd<x> |
-#   shn<lambda> (--shn-reg) | c2f<a> (--c2f) | emul / eerr (--eas-error mul / err) | aniso<lambda> (--aniso-reg, ratio 10) | ssl<x> (--ssim-lambda) | srad / sdual (--sort radial / dual) | ms<lambda> (--msssim-lambda) | blur<K> (--blur-kernel) | blr<x> (--blur-lr) | gt<threshold> (--grad-threshold) | bilag (--appearance bilagrid) | ss352 (viewer profile; default pc274).
-# fm_ens[_jt<x>][_jr<deg>][_pf<frac>][_it<n>][_lr<x>][_t<label>]: multi-seed ensemble distillation (scripts/methods/ensemble_distill.py)
-#   of the arms in $TEACHERS (default "igs4m_pc274 fm_seed1 fm_seed2", which must exist) into one splat.
+#   shn<lambda> (--shn-reg) | c2f<a> (--c2f) | emul / eerr (--eas-error mul / err) | aniso<lambda> (--aniso-reg, ratio 10) | ssl<x> (--ssim-lambda) | srad / sdual (--sort radial / dual) | ms<lambda> (--msssim-lambda) | blur<K> (--blur-kernel) | blr<x> (--blur-lr) | gt<threshold> (--grad-threshold) | bilag (--appearance bilagrid) | ss352 (viewer profile; default pc274) |
+#   drop<r> (--drop-rate, DropGaussian) | vw<lambda> (--vwarp-lambda) | vwp<p> (--vwarp-prob) | vwj<x> (--vwarp-jitter) | pose<lr> (--pose-lr) | poshp<N> (--pose-hp) | sam<lambda> (--sam-lambda) | samr<rho> (--sam-rho) | hp<t> (flags of sbatch/hp_search.sbatch trial t).
+# TSI (8): hold-out interval of the training set (0 + VT_DATASET=<all-frames set>: deliverable-style splats); 
+# fm_ens[_jt<x>][_jr<deg>][_pf<frac>][_it<n>][_lr<x>][_pmi][_sdual|_srad][_t<label>] (pmi: pseudo views interpolated on the path): multi-seed ensemble distillation (scripts/methods/ensemble_distill.py)
+#   of the arms in $TEACHERS (fm_ensv...: the same inside the viewer-exact fine-tune, see ensv_arm()) (default "igs4m_pc274 fm_seed1 fm_seed2", which must exist) into one splat.
 # Outputs: $VT/<arm>/{splat.ply,train.json,train.log,methods.json}, $VT/shots/{onpath,offpath}/<arm>/,
-#   $VT/report_fm/<arm>_<bg>.json, gate_<arm>{,_perc,_reg}.json, summary_fm.md. Also "registered" scores <arm>_<bg>_reg.json:
+#   $VT/report_fm/<arm>_<bg>.json, gate_<arm>{,_perc,_reg}.json, summary_fm.md. FT_ITERS=n: also "<arm>~ft" (see ft_arm()). Also "registered" scores <arm>_<bg>_reg.json:
 #   the same renders vs the real frames resampled into the viewer_shots camera (scripts/register_gt.py; removes the
 #   ~0.2 px principal-point rounding of the centred canvas that costs every splat ~1.4 dB on CEAR).
 #SBATCH -J fm-bench
@@ -54,6 +56,9 @@ arm_args() {  # fm_<tokens> -> A (extra trainer flags), PROF
       eerr|emul) A+=(--eas-error "${t#e}") ;;     aniso*) A+=(--aniso-reg "${t#aniso}") ;;
       ssl*) A+=(--ssim-lambda "${t#ssl}") ;;    ms*) A+=(--msssim-lambda "${t#ms}") ;;    blur*) A+=(--blur-kernel "${t#blur}") ;;    blr*) A+=(--blur-lr "${t#blr}") ;;
       gt*) A+=(--grad-threshold "${t#gt}") ;;   srad) A+=(--sort radial) ;;   sdual) A+=(--sort dual) ;;   bilag) A+=(--appearance bilagrid) ;;
+      hp[0-9]*) read -ra X < "${HP_OUT:-$P/hp_search}/trial_${t#hp}/flags"; A+=("${X[@]}") ;;   # sbatch/hp_search.sbatch trial
+      drop*) A+=(--drop-rate "${t#drop}") ;;  vwp*) A+=(--vwarp-prob "${t#vwp}") ;;  vwj*) A+=(--vwarp-jitter "${t#vwj}") ;;
+      vw*) A+=(--vwarp-lambda "${t#vw}") ;;     samr*) A+=(--sam-rho "${t#samr}") ;;  sam*) A+=(--sam-lambda "${t#sam}") ;;     poshp*) A+=(--pose-hp "${t#poshp}") ;;  pose*) A+=(--pose-lr "${t#pose}") ;;
       ss352|pc274) PROF="$t" ;;
       *) echo "unknown token $t in $1"; return 1 ;;
     esac
@@ -99,15 +104,16 @@ score() {  # <name> <ply>: live SuperSplat at the held-out cameras (black, grey)
   [ -f "$VT/shots/offpath/$n/_viewer.json" ] || "$VPY" scripts/viewer_shots.py --engine current --bg black --ply "$ply" \
     --dataset "$TEST" --every 8 --move 0 -0.3 1.0 --out-dir "$VT/shots/offpath/$n" | tail -1 || true
 }
-gate() {  # <arm>: strict + perceptual gate vs the baseline
-  local pr=(--pair black "$REP/${BASE}_black.json" "$REP/$1_black.json" --pair grey "$REP/${BASE}_grey.json" "$REP/$1_grey.json")
+gate() {  # <arm> [base]: strict + perceptual gate vs the baseline (default $BASE)
+  local B="${2:-$BASE}"
+  local pr=(--pair black "$REP/${B}_black.json" "$REP/$1_black.json" --pair grey "$REP/${B}_grey.json" "$REP/$1_grey.json")
   "$CPUPY" scripts/accept_gate.py "${pr[@]}" --out "$REP/gate_$1.json" | tail -1 || true
   "$CPUPY" scripts/accept_gate.py "${pr[@]}" --perceptual --out "$REP/gate_$1_perc.json" | tail -1 || true
-  [ -f "$REP/$1_grey_reg.json" ] && [ -f "$REP/${BASE}_grey_reg.json" ] && { "$CPUPY" scripts/accept_gate.py \
-    --pair black_reg "$REP/${BASE}_black_reg.json" "$REP/$1_black_reg.json" --pair grey_reg "$REP/${BASE}_grey_reg.json" \
+  [ -f "$REP/$1_grey_reg.json" ] && [ -f "$REP/${B}_grey_reg.json" ] && { "$CPUPY" scripts/accept_gate.py \
+    --pair black_reg "$REP/${B}_black_reg.json" "$REP/$1_black_reg.json" --pair grey_reg "$REP/${B}_grey_reg.json" \
     "$REP/$1_grey_reg.json" --out "$REP/gate_$1_reg.json" | tail -1 || true; }
-  [ -f "$REP/$1_rad_grey.json" ] && [ -f "$REP/${BASE}_rad_grey.json" ] && { "$CPUPY" scripts/accept_gate.py \
-    --pair black_rad "$REP/${BASE}_rad_black.json" "$REP/$1_rad_black.json" --pair grey_rad "$REP/${BASE}_rad_grey.json" \
+  [ -f "$REP/$1_rad_grey.json" ] && [ -f "$REP/${B}_rad_grey.json" ] && { "$CPUPY" scripts/accept_gate.py \
+    --pair black_rad "$REP/${B}_rad_black.json" "$REP/$1_rad_black.json" --pair grey_rad "$REP/${B}_rad_grey.json" \
     "$REP/$1_rad_grey.json" --out "$REP/gate_$1_rad.json" | tail -1 || true; }
   return 0
 }
@@ -124,32 +130,62 @@ distill_arm() {  # fm_ens[_jt<x>][_jr<deg>][_pf<frac>][_it<iters>]: scripts/meth
   local arm="$1" R="$VT/$1" t D=(); IFS=_ read -ra T <<< "${1#fm_ens}"
   for t in "${T[@]}"; do case "$t" in
     "") ;; jt*) D+=(--jitter-t "${t#jt}") ;; jr*) D+=(--jitter-r "${t#jr}") ;; pf*) D+=(--pseudo-frac "${t#pf}") ;;
-    it*) D+=(--iters "${t#it}") ;; lr*) D+=(--lr-mult "${t#lr}") ;; t*) ;;  # t<label>: name only (e.g. which TEACHERS)
+    it*) D+=(--iters "${t#it}") ;; lr*) D+=(--lr-mult "${t#lr}") ;; pmi) D+=(--pseudo-mode interp) ;;
+    sdual) D+=(--sort dual) ;; srad) D+=(--sort radial) ;; t*) ;;  # t<label>: name only (e.g. which TEACHERS)
     *) echo "unknown token $t in $1"; return 1 ;; esac; done
   local TP=(); for t in ${TEACHERS:-igs4m_pc274 fm_seed1 fm_seed2}; do TP+=("$VT/$t/splat.ply"); done
   if [ ! -f "$R/splat.ply" ]; then
     mkdir -p "$R"; echo "== [$arm] distill: ${TP[*]} ${D[*]}"; date
     PATH="$(dirname "$SPY"):$PATH" PYTHONPATH="$CEAR_WS/gsplat-viewer-pc274" TORCH_EXTENSIONS_DIR="$CEAR_WS/torch-ext-gsplat-viewer-pc274" \
-      "$SPY" scripts/methods/ensemble_distill.py --teachers "${TP[@]}" --dataset "$DS" --test-split-interval 8 --eval-dataset "$TEST" \
+      "$SPY" scripts/methods/ensemble_distill.py --teachers "${TP[@]}" --dataset "$DS" --test-split-interval "${TSI:-8}" --eval-dataset "$TEST" \
       --out "$R" --viewer pc274 "${D[@]}" > "$R/train.log" 2>&1 || { tail -40 "$R/train.log"; return 1; }
   fi
   grep -E 'held-out' "$R/train.log" || true
-  score "$arm" "$R/splat.ply"; gate "$arm"
+  score "$arm" "$R/splat.ply"; [ "$arm" = "$BASE" ] || gate "$arm"; ft_arm "$arm" "$R/splat.ply"
+}
+
+ensv_arm() {  # fm_ensv[_pf<frac>][_it<n>][_jt<x>][_jr<deg>][_t<label>]: ensemble distillation inside the viewer-exact fine-tune
+  # (scripts/methods/ftv_distill.py) of $TEACHERS' fine-tuned splats ($VT/<t>/splat_ft.ply, from FT_ITERS runs), student =
+  # the first; a post-fine-tune product, so gated vs "$BASE~ft"
+  local arm="$1" R="$VT/$1" t D=(); IFS=_ read -ra T <<< "${1#fm_ensv}"
+  for t in "${T[@]}"; do case "$t" in
+    "") ;; pf*) D+=(--pseudo-frac "${t#pf}") ;; it*) D+=(--iters "${t#it}") ;; jt*) D+=(--jitter-t "${t#jt}") ;;
+    jr*) D+=(--jitter-r "${t#jr}") ;; t*) ;; *) echo "unknown token $t in $1"; return 1 ;; esac; done
+  local TP=(); for t in ${TEACHERS:-igs4m_pc274 fm_seed1 fm_seed2}; do TP+=("$VT/$t/splat_ft.ply"); done
+  mkdir -p "$R"
+  [ -f "$R/splat.ply" ] || PATH="$(dirname "$SPY"):$PATH" "$SPY" scripts/methods/ftv_distill.py --teachers "${TP[@]}" --dataset "$DS" \
+    --test-split-interval 8 --eval-dataset "$TEST" --out "$R/splat.ply" "${D[@]}" > "$R/train.log" 2>&1 || { tail -30 "$R/train.log"; return 1; }
+  grep -E 'held-out' "$R/train.log" || true
+  score "$arm" "$R/splat.ply"; gate "$arm" "$BASE~ft"
+}
+
+ft_arm() {  # <arm> <ply>: FT_ITERS > 0: the deliverable's viewer-exact fine-tune (finetune_ply_viewer.py, SuperSplat profile,
+  # display scales 1.5:4, WD, --sort $FT_SORT) on the TRAINING frames only (every 8th held out) -> $VT/<arm>/splat_ft.ply, scored
+  # as "<arm>~ft" and gated vs "$BASE~ft" (run the base arm in ARMS too). Removes most of the trainer-vs-viewer mismatch that
+  # makes raw seeds scatter by +-0.4 dB in the live viewer, and is what the deliverable chain does next anyway.
+  [ "${FT_ITERS:-0}" -gt 0 ] || return 0
+  local R="$VT/$1"
+  [ -f "$R/splat_ft.ply" ] || PATH="$(dirname "$SPY"):$PATH" "$SPY" scripts/finetune_ply_viewer.py finetune --ply "$2" --out "$R/splat_ft.ply" \
+    --dataset "$DS" --test-split-interval 8 --viewer ss352 --display-scale 1.5:4 --iters "$FT_ITERS" --sort "${FT_SORT:-dual}" \
+    --lambda-wd 0.025 --wd-log2-sigma 4 --eval-dataset "$TEST" > "$R/ft.log" 2>&1 || { tail -30 "$R/ft.log"; return 1; }
+  grep -E "eval \{" "$R/ft.log" | sed -n '1p;$p'
+  score "$1~ft" "$R/splat_ft.ply"; [ "$1" = "$BASE" ] || gate "$1~ft" "$BASE~ft"
 }
 
 run_arm() {
   local arm="$1" R="$VT/$1"
+  [[ "$arm" == fm_ensv* ]] && { ensv_arm "$arm"; return; }
   [[ "$arm" == fm_ens* ]] && { distill_arm "$arm"; return; }
   arm_args "$arm"
   if [ ! -f "$R/splat.ply" ]; then
     mkdir -p "$R"; echo "== [$arm] train: ${A[*]}"; date
     PATH="$(dirname "$SPY"):$PATH" PYTHONPATH="$CEAR_WS/gsplat-viewer-$PROF" TORCH_EXTENSIONS_DIR="$CEAR_WS/torch-ext-gsplat-viewer-$PROF" \
-      "$SPY" scripts/train_viewer_gsplat.py --dataset "$DS" --out "$R" --test-split-interval 8 --eval-dataset "$TEST" \
+      "$SPY" scripts/train_viewer_gsplat.py --dataset "$DS" --out "$R" --test-split-interval "${TSI:-8}" --eval-dataset "$TEST" \
       --iters "$ITERS" --strategy improved --budget 4000000 --viewer "$PROF" "${A[@]}" > "$R/train.log" 2>&1 || { tail -40 "$R/train.log"; return 1; }
     date
   fi
   grep -E '^\[(vgs\] (held-out|[0-9]+ gaussians)|methods\])' "$R/train.log" || true
-  score "$arm" "$R/splat.ply"; gate "$arm"
+  score "$arm" "$R/splat.ply"; [ "$arm" = "$BASE" ] || gate "$arm"; ft_arm "$arm" "$R/splat.ply"
 }
 
 [ -f "$REG/_register.json" ] || "$CPUPY" scripts/register_gt.py --dataset "$TEST" --out "$REG" --engine current | tail -1
