@@ -476,7 +476,7 @@ def build(args):
     n_f = np.array(ometa["floor"]["n"]); d_f = float(ometa["floor"]["d"])
     cv = o3d.io.read_point_cloud(args.cloud).voxel_down_sample(0.01); Lall = np.asarray(cv.points)
     gtree = cKDTree(Gm)
-    keep = np.ones(N, bool); mod = np.zeros(N, bool); vmod = v.copy()
+    keep = np.ones(N, bool); mod = np.zeros(N, bool); vmod = v.copy(); zone_in = np.zeros(N, bool)
     new_rows, meta_rows = [], []                                          # appended rows + (obj, face, local, metric, normal)
     gen_dbg_extra = {}
     rep = {"method": sorted(meth), "objects": []}; gen_dbg = []
@@ -498,6 +498,7 @@ def build(args):
         zh = ob.half + args.zone_m
         Lg = ob.loc(Gm)
         inz = np.nonzero((np.abs(Lg[:, 0]) <= zh[0]) & (np.abs(Lg[:, 1]) <= zh[1]) & (Lg[:, 2] > -0.02) & (Lg[:, 2] < hmax + args.zone_m))[0]
+        zone_in[inz] = True
         strong = inz[(wmax[inz] >= args.seen_w) & (op[inz] > 0.5) & (smax[inz] < args.needle_ratio * smid[inz]) & (Lg[inz, 2] > args.ev_min_h)]
         Lev = np.concatenate([Lx[Lx[:, 2] > args.ev_min_h], Lg[strong]])
         # other measured surfaces near the object (walls, shelves): never cleaned / filled there
@@ -704,6 +705,7 @@ def build(args):
     np.savez_compressed(os.path.join(args.out_dir, "meta.npz"), keep=keep, mod=mod, removed_near_surface=~keep,
                         disc_obj=cat(0, 1), disc_face=cat(1, 1), disc_local=cat(2, 2), disc_metric=cat(3, 2), disc_normal=cat(4, 2),
                         disc_src=cat(5, 1), cell=args.cell, sim3=np.array([s]), n_in=N)
+    np.savez_compressed(os.path.join(args.out_dir, "zone.npz"), zone=zone_in)   # input rows in an object zone (zone_budget.py)
     np.savez_compressed(os.path.join(args.out_dir, "src.npz"), src=np.concatenate([np.nonzero(keep)[0], np.full(len(new), -1)]))
     rep.update({"gaussians_in": N, "kept": nk, "removed": int(N - nk), "snapped": int(mod.sum()), "added": int(len(new)),
                 "seconds": round(time.time() - t0, 1)})
