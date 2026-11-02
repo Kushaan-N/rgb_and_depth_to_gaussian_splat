@@ -118,13 +118,15 @@ class ViewerGS:
         self.floor = None                                  # per-gaussian 3D scale floor (--min-px), or None
         self.min_px, self.near, self.cap_px = args.min_px, args.near, args.cap_px
         self.sort, self._n = getattr(args, "sort", "depth"), 0   # blend order (--sort; SuperSplat >= 3.7 default: radial)
+        self.radial_frac = getattr(args, "sort_radial_frac", 0.5)   # dual: share of renders in radial order
 
     def sort_key(self, p, viewmat, depths):
         """Per-gaussian blend-order key [1,N]: view depth (SuperSplat <= 3.6, its 'Depth' sort mode) or the distance to the
         camera (3.7's default 'Radial'); 'dual' alternates per render so the splat is trained for both orders."""
         import torch
         self._n += 1
-        if self.sort == "depth" or (self.sort == "dual" and self._n % 2):
+        f = self.radial_frac                                # dual: radial on a deterministic f share of renders (0.5 = alternate)
+        if self.sort == "depth" or (self.sort == "dual" and math.floor(self._n * f) == math.floor((self._n - 1) * f)):
             return depths.detach()
         with torch.no_grad():
             return torch.linalg.norm(p["means"] @ viewmat[:3, :3].T + viewmat[:3, 3], dim=-1)[None]
@@ -504,6 +506,7 @@ def main():
     ap.add_argument("--near", type=float, default=1e-4, help="near plane (PlayCanvas draws any splat in front of the camera)")
     ap.add_argument("--cap-px", type=float, default=1024.0, help="viewer's quad half-extent cap in px (0 = off)")
     ap.add_argument("--aa", action="store_true", help="antialiased (opacity compensation) mode")
+    ap.add_argument("--sort-radial-frac", type=float, default=0.5, help="--sort dual: share of renders in radial order")
     ap.add_argument("--sort", choices=("depth", "radial", "dual"), default="depth",
                     help="blend order: depth (SuperSplat <= 3.6 / its 'Depth' sort mode), radial (distance to the camera: "
                          "SuperSplat 3.7's default 'Radial'), dual (alternate per step: good in both)")
