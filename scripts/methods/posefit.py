@@ -35,6 +35,8 @@ class PoseFit:
         self.a, self.on, self.used, self.ss = args, args.pose_lr > 0 and bool(views), None, scene_scale
         if not self.on:
             return
+        if args.pose_hp > 0:     # 60k CEAR run (fm_ms0.2_sdual_pose3e-5_poshp9) hit a singular / non-finite viewmat: disabled
+            raise SystemExit("[methods] --pose-hp is disabled (non-finite poses at 60k, unfixed; pose refinement measured -0.9 dB anyway)")
         import torch
         self.idx = {v[0]: k for k, v in enumerate(views)}; self.names = [v[0] for v in views]
         self.emb = torch.nn.Embedding(len(views), 6, sparse=True).to(dev)
@@ -65,7 +67,7 @@ class PoseFit:
         if self.used is not None:
             self.opt.step(); self.opt.zero_grad(set_to_none=True)
             with torch.no_grad():
-                W = self.emb.weight; W.sub_(W.mean(0, keepdim=True))
+                W = self.emb.weight; W.nan_to_num_(0.0, 0.0, 0.0); W.sub_(W.mean(0, keepdim=True))
                 if self.a.pose_hp > 1:                       # keep only per-frame jitter: remove the trajectory low-pass
                     import torch.nn.functional as F
                     n = self.a.pose_hp | 1
