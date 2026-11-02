@@ -27,3 +27,4 @@ venv*/
 *.out
 logs/
 scripts/methods/__pycache__/
+scripts/object_priors/__pycache__/
