@@ -26,6 +26,14 @@ Methods (module, flag):
   schedule.py   --c2f a         coarse-to-fine resolution: 1/4 res for a/3 x iters, 1/2 until 2a/3, then full
   (here)        --shn-reg       L2 pull of the view-dependent SH bands (shN) of the step's visible gaussians toward 0:
                                 less view-dependent overfitting to the training trajectory (train PSNR >> held-out)
+  dropgs.py     --drop-rate     DropGaussian (Park et al., CVPR 2025): random gaussian dropout with opacity compensation on
+                                the training renders, progressive rate, off for the last stretch (generalisation)
+  vwarp.py      --vwarp-lambda  virtual views between consecutive training cameras, supervised by both real frames
+                                backward-warped through the render's depth where the two warps agree
+  posefit.py    --pose-lr       joint per-training-frame SE(3) pose correction (gauge: mean correction removed)
+  sam.py        --sam-lambda    sharpness-aware objective L(theta) + lambda L(theta + eps), eps = rho Adam steps uphill
+                                (momentum SAM; FASR 2025 for 3DGS generalisation), late phase only
+  hparams.py    --lr-mult / --reset-mult  learning-rate multipliers per group, opacity-reset interval (random search)
   (here)        --aniso-reg     anti-needle: lambda x mean relu(s_max / s_min - --aniso-max) over the step's visible
                                 gaussians (PhysGaussian's anisotropy regulariser, Xie et al. CVPR 2024): no spikes off-path
 """
@@ -37,11 +45,17 @@ from .average import ParamAverager, add_average_args
 from .densify import add_densify_args, patch_strategy
 from .schedule import ResSchedule, add_schedule_args
 from .blur import FrameBlur, add_blur_args
+from .dropgs import DropGaussian, add_dropgs_args
+from .vwarp import VirtualWarp, add_vwarp_args
+from .posefit import PoseFit, add_posefit_args
+from .sam import SharpAware, add_sam_args
+from .hparams import add_hparam_args, apply_hparams
 
 
 def add_args(ap):
     g = ap.add_argument_group("fidelity methods (scripts/methods, default off)")
     add_loss_args(g); add_average_args(g); add_densify_args(g); add_schedule_args(g); add_blur_args(g)
+    add_dropgs_args(g); add_vwarp_args(g); add_posefit_args(g); add_sam_args(g); add_hparam_args(g)
     g.add_argument("--shn-reg", type=float, default=0.0, help="L2 weight on the visible gaussians' shN (0 = off)")
     g.add_argument("--aniso-reg", type=float, default=0.0, help="anti-needle scale-ratio penalty weight (0 = off)")
     g.add_argument("--aniso-max", type=float, default=10.0, help="allowed max/min scale ratio")
@@ -56,7 +70,14 @@ class Hooks:
         self.res = ResSchedule(args)
         self.blur = FrameBlur(args, [v[0] for v in views] if views else [], params["means"].device)
         self._blur_reg = None
-        on = [k for k in ("freq_lambda", "hard_lambda", "grad_lambda", "ema_decay", "anneal_start", "pixelgs", "shn_reg", "c2f", "eas_error", "aniso_reg", "msssim_lambda", "blur_kernel")
+        dev = params["means"].device
+        self.drop = DropGaussian(args, rast)
+        self.vwarp = VirtualWarp(args, rast, views, params)
+        self.pose = PoseFit(args, views, scene_scale, dev)
+        self.sam, self._v = SharpAware(args, rast, params, opts), None
+        self.hp = apply_hparams(args, opts, strat)
+        on = [k for k in ("freq_lambda", "hard_lambda", "grad_lambda", "ema_decay", "anneal_start", "pixelgs", "shn_reg", "c2f", "eas_error", "aniso_reg", "msssim_lambda", "blur_kernel",
+                                 "drop_rate", "vwarp_lambda", "pose_lr", "sam_lambda")
               if getattr(args, k) not in (0, False, None, "off")]
         if on:
             print(f"[methods] on: " + ", ".join(f"{k}={getattr(args, k)}" for k in on), flush=True)
@@ -71,6 +92,10 @@ class Hooks:
         l = self.losses(img, gt, step)
         if self._blur_reg is not None:
             l = l + self._blur_reg
+        deg = min(step // 1000, self.args.sh_degree)
+        for x in (self.vwarp.loss(step, deg), self.pose.loss(), self.sam.loss(self._v, gt, step, deg)):
+            if x is not None:
+                l = l + x
         a = self.args
         if (a.shn_reg > 0 or a.aniso_reg > 0) and info is not None:
             vis = (info["radii"][0] > 0).all(-1)
@@ -83,13 +108,17 @@ class Hooks:
         return l
 
     def view(self, v, step, masked=False):
-        return self.res.view(v, step, masked)
+        self.drop.step(step)
+        self._v = self.pose.view(self.res.view(v, step, masked), step)
+        return self._v
 
     def after_step(self, step, stepping):
-        self.avg.after_step(step, stepping); self.blur.step()
+        self.avg.after_step(step, stepping); self.blur.step(); self.pose.after_step(step)
 
     def finalize(self, out_dir):
-        rec = {"losses": self.losses.summary(), "average": self.avg.finalize(), "densify": self.densify, "schedule": self.res.summary(), "blur": self.blur.summary()}
+        rec = {"losses": self.losses.summary(), "average": self.avg.finalize(), "densify": self.densify, "schedule": self.res.summary(), "blur": self.blur.summary(),
+               "dropgs": self.drop.summary(), "vwarp": self.vwarp.summary(), "pose": self.pose.summary(out_dir),
+               "sam": self.sam.summary(), "hparams": self.hp}
         if out_dir and any(v for v in rec.values()):
             json.dump(rec, open(os.path.join(out_dir, "methods.json"), "w"), indent=1)
             print(f"[methods] {json.dumps(rec)}", flush=True)
