@@ -159,6 +159,32 @@ ensv_arm() {  # fm_ensv[_pf<frac>][_it<n>][_jt<x>][_jr<deg>][_t<label>]: ensembl
   score "$arm" "$R/splat.ply"; gate "$arm" "$BASE~ft"
 }
 
+ensm_arm() {  # fm_ensm[_it<n>][_k<keep>][_pf<frac>][_t<label>]: splat-level ensemble (scripts/methods/ens_merge.py) of $TEACHERS'
+  # fine-tuned splats ($VT/<t>/splat_ft.ply): merge (opacity 1-(1-a)^(1/n)) -> "<arm>~raw"; joint viewer-exact fine-tune toward the
+  # seeds' render mean + real frames (ftv_distill.py --init, it<n>, default 2000) -> "<arm>~full"; prune to k (default: the mean
+  # teacher count; <1 = fraction) by training-view blending weight + 1500-iteration viewer-exact fine-tune -> "<arm>" (splat.ply).
+  # All gated vs "$BASE~ft"; held-out frames never used.
+  local arm="$1" R="$VT/$1" t IT=2000 K="" PF=0.5; IFS=_ read -ra T <<< "${1#fm_ensm}"
+  for t in "${T[@]}"; do case "$t" in
+    "") ;; it*) IT="${t#it}" ;; k*) K="${t#k}" ;; pf*) PF="${t#pf}" ;; t*) ;; *) echo "unknown token $t in $1"; return 1 ;; esac; done
+  local TP=(); for t in ${TEACHERS:-igs4m_pc274 fm_seed1 fm_seed2}; do TP+=("$VT/$t/splat_ft.ply"); done
+  mkdir -p "$R"; local GP=(env PATH="$(dirname "$SPY"):$PATH" PYTHONPATH="$CEAR_WS/gsplat-viewer-pc274" TORCH_EXTENSIONS_DIR="$CEAR_WS/torch-ext-gsplat-viewer-pc274")
+  [ -f "$R/merged.ply" ] || "$SPY" scripts/methods/ens_merge.py merge --plys "${TP[@]}" --out "$R/merged.ply" | tail -1
+  score "$arm~raw" "$R/merged.ply"; gate "$arm~raw" "$BASE~ft"
+  [ -f "$R/full.ply" ] || "${GP[@]}" "$SPY" scripts/methods/ftv_distill.py --teachers "${TP[@]}" --init "$R/merged.ply" --dataset "$DS" \
+    --test-split-interval 8 --eval-dataset "$TEST" --out "$R/full.ply" --iters "$IT" --pseudo-frac "$PF" > "$R/full.log" 2>&1 || { tail -30 "$R/full.log"; return 1; }
+  grep -E 'held-out' "$R/full.log" || true
+  score "$arm~full" "$R/full.ply"; gate "$arm~full" "$BASE~ft"
+  [ -n "$K" ] || K=$("$CPUPY" -c "import sys; print(sum(int(open(f,'rb').read(4096).split(b'element vertex ')[1].split()[0]) for f in sys.argv[1:]) // (len(sys.argv) - 1))" "${TP[@]}")
+  [ -f "$R/pruned.ply" ] || "${GP[@]}" "$SPY" scripts/methods/ens_merge.py prune --ply "$R/full.ply" --dataset "$DS" --test-split-interval 8 \
+    --keep "$K" --out "$R/pruned.ply" | tail -1
+  [ -f "$R/splat.ply" ] || "${GP[@]}" "$SPY" scripts/finetune_ply_viewer.py finetune --ply "$R/pruned.ply" --out "$R/splat.ply" --dataset "$DS" \
+    --test-split-interval 8 --viewer ss352 --display-scale 1.5:4 --iters 1500 --sort dual --lambda-wd 0.025 --wd-log2-sigma 4 \
+    --eval-dataset "$TEST" > "$R/prune_ft.log" 2>&1 || { tail -30 "$R/prune_ft.log"; return 1; }
+  ls -la "$R"/*.ply
+  score "$arm" "$R/splat.ply"; gate "$arm" "$BASE~ft"
+}
+
 ft_arm() {  # <arm> <ply>: FT_ITERS > 0: the deliverable's viewer-exact fine-tune (finetune_ply_viewer.py, SuperSplat profile,
   # display scales 1.5:4, WD, --sort $FT_SORT) on the TRAINING frames only (every 8th held out) -> $VT/<arm>/splat_ft.ply, scored
   # as "<arm>~ft" and gated vs "$BASE~ft" (run the base arm in ARMS too). Removes most of the trainer-vs-viewer mismatch that
@@ -175,6 +201,7 @@ ft_arm() {  # <arm> <ply>: FT_ITERS > 0: the deliverable's viewer-exact fine-tun
 run_arm() {
   local arm="$1" R="$VT/$1"
   [[ "$arm" == fm_ensv* ]] && { ensv_arm "$arm"; return; }
+  [[ "$arm" == fm_ensm* ]] && { ensm_arm "$arm"; return; }
   [[ "$arm" == fm_ens* ]] && { distill_arm "$arm"; return; }
   arm_args "$arm"
   if [ ! -f "$R/splat.ply" ]; then
