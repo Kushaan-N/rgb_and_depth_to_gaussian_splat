@@ -269,29 +269,46 @@ def stepbox_inside(pr, L):
     return out
 
 
-def fit_plates(L, cell, thr=0.015, min_tilt=15, max_tilt=80, min_share=0.12, max_plates=4):
+def fit_plates(L, cell, thr=0.02, min_tilt=15, max_tilt=80, min_share=0.12, max_plates=4, raw_share=0.03,
+               merge_deg=12.0, merge_m=0.10):
+    """sequential RANSAC tilted planes (noisy LiDAR gives several parallel slices of one panel: slices with normals
+    within merge_deg and offsets within merge_m are merged, the panel re-fitted by PCA), panels >= min_share kept."""
     import open3d as o3d
     E = L[L[:, 2] > 0.03]
-    pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(E)); rest = pc; plates = []
-    for _ in range(8):
-        if len(rest.points) < max(50, min_share * len(E)):
+    pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(E)); rest = pc; raw = []
+    for _ in range(16):
+        if len(rest.points) < max(50, raw_share * len(E)):
             break
         pl, inl = rest.segment_plane(thr, 3, 3000)
         Q = np.asarray(rest.points)[inl]; m = np.array(pl[:3]); m /= np.linalg.norm(m)
-        tilt = np.degrees(np.arccos(abs(m[2])))
         rest = rest.select_by_index(inl, invert=True)
-        if len(inl) < min_share * len(E) or not (min_tilt <= tilt <= max_tilt):
+        if len(inl) < raw_share * len(E):
+            break
+        if min_tilt <= np.degrees(np.arccos(abs(m[2]))) <= max_tilt:
+            raw.append([Q, m])
+    groups = []
+    for Q, m in raw:
+        for g in groups:
+            if abs(m @ g[1]) > np.cos(np.radians(merge_deg)) and abs((Q.mean(0) - g[0].mean(0)) @ g[1]) < merge_m:
+                g[0] = np.concatenate([g[0], Q]); break
+        else:
+            groups.append([Q, m])
+    plates = []
+    for Q, _ in sorted(groups, key=lambda g: -len(g[0])):
+        if len(Q) < min_share * len(E) or len(plates) >= max_plates:
             continue
-        cen = Q.mean(0); m = m if m @ (cen - np.r_[0, 0, cen[2]]) >= 0 else -m   # facing away from the vertical axis
+        cen = Q.mean(0); m = np.linalg.svd(Q - cen, full_matrices=False)[2][2]
+        tilt = np.degrees(np.arccos(abs(m[2])))
+        if not (min_tilt <= tilt <= max_tilt):
+            continue
+        m = m if m @ (cen - np.r_[0, 0, cen[2]]) >= 0 else -m               # facing away from the vertical axis
         p1 = np.cross([0, 0, 1.0], m); p1 /= np.linalg.norm(p1); p2 = np.cross(m, p1)
         q = np.stack([(Q - cen) @ p1, (Q - cen) @ p2], 1)
         lo, hi = np.percentile(q, 1, 0), np.percentile(q, 99, 0)
-        res = (Q - cen) @ m; thick = float(np.clip(2.5 * res.std(), 0.01, 0.04))
+        res = (Q - cen) @ m; thick = float(np.clip(2.0 * res.std(), 0.01, 0.04))
         plates.append({"centre": (cen + 0.5 * (lo[0] + hi[0]) * p1 + 0.5 * (lo[1] + hi[1]) * p2).tolist(), "m": m.tolist(),
                        "p1": p1.tolist(), "p2": p2.tolist(), "half": ((hi - lo) / 2).tolist(), "thick": thick,
-                       "tilt_deg": round(float(tilt), 1), "inliers": int(len(inl))})
-        if len(plates) >= max_plates:
-            break
+                       "tilt_deg": round(float(tilt), 1), "inliers": int(len(Q))})
     if not plates:
         return None
     return {"kind": "plates", "plates": plates}
@@ -579,7 +596,7 @@ def build(args):
         weak = wmax[inz] < args.junk_w
         prot = (Lg[inz, 2] < args.floor_m) | (np.isfinite(otree.query(Lg[inz], distance_upper_bound=args.other_m)[0]) if otree else False)
         rm = weak & ~prot & ((ins & (dS > args.inside_m)) | (~ins & (dS > args.off_m)))
-        spk = weak & ~prot & ~rm & (smax[inz] > args.needle_ratio * smid[inz]) & (op[inz] > 0.05) & (dS <= args.off_m)
+        spk = (wmax[inz] < (args.snap_w if args.snap_w is not None else args.junk_w)) & ~prot & ~rm & (smax[inz] > args.needle_ratio * smid[inz]) & (op[inz] > 0.05) & (dS <= args.off_m)
         if args.no_clean:                                                  # add-only candidate (removals / snaps gated separately)
             rm[:] = False; spk[:] = False
         keep[inz[rm]] = False
@@ -825,6 +842,7 @@ def main():
                    help="a face sample seen by any camera at <= this incidence is not filled (90: grazing views count too)")
     b.add_argument("--replace", action="store_true",
                    help="replacement surfaces: discs on every not-solid primitive face (seen too), coloured by the real images there")
+    b.add_argument("--snap-w", type=float, default=None, help="spikes snapped only below this support (default --junk-w)")
     b.add_argument("--no-clean", action="store_true", help="no removals / snaps: only add the prior's surface")
     b.add_argument("--ev-min-h", type=float, default=0.045, help="evidence above this height only (floor band excluded)")
     b.add_argument("--carve-frac", type=float, default=0.3, help="depth prior: stop growing when this share of a strip is seen")
