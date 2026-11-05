@@ -11,7 +11,7 @@
 #     configs/mocap2_well-lit_trot.yaml
 # Env: NAME (viewer_msd60k_wd_clean_ft2_solid3), IN (<E>/<NAME>.ply), METHOD, TAG (METHOD with , -> _), LEARNED,
 #      BUILD_ARGS, REFIT (1), REFIT_ARGS ("--train-zone-m 0.25 --iters 2000"), BUDGET_ARGS ("--min-w 0.002 --iters 12"),
-#      REFIT=zone (zone_refit.py, ZREFIT_ARGS), BUDGET_MODE=zone (GT-aware budget in the object zones: scripts/object_priors/zone_budget.py), STOP_AFTER=build (prep + build only), MOVES ("0 -0.3 1.0;0 -0.6 1.5"), EVERY_OFF (40), FORCE=1 (redo every stage of this TAG).
+#      REFIT=zone (zone_refit.py, ZREFIT_ARGS), BUDGET_MODE=zone|none (none = cosmetic, no budget; zone = GT-aware budget in the object zones: scripts/object_priors/zone_budget.py), STOP_AFTER=build (prep + build only), MOVES ("0 -0.3 1.0;0 -0.6 1.5"), EVERY_OFF (40), FORCE=1 (redo every stage of this TAG).
 #SBATCH -J obj-priors
 #SBATCH -p gpu-highvram,gpu-preempt-highvram
 #SBATCH --gres=gpu:1
@@ -71,7 +71,9 @@ elif [ "${REFIT:-1}" = 1 ]; then
   CAND="$T/refit.ply"; SRC="$T/refit_src.npz"
 fi
 echo "== 3. per-view visibility budget vs the input"
-if [ "${BUDGET_MODE:-strict}" = zone ]; then   # GT-aware inside object zones, strict elsewhere, per-view cap (zone_budget.py)
+if [ "${BUDGET_MODE:-strict}" = none ]; then    # cosmetic: no real-image budget (edits are confined to the object zones)
+  needt "$T/budget.ply" && cp "$CAND" "$T/budget.ply"
+elif [ "${BUDGET_MODE:-strict}" = zone ]; then   # GT-aware inside object zones, strict elsewhere, per-view cap (zone_budget.py)
   needt "$T/budget.ply" && "$SPY" scripts/object_priors/zone_budget.py --input "$IN" --cand "$CAND" --src "$SRC" --zone "$T/zone.npz" \
     --dataset "$DATA" "$TEST" --out "$T/budget.ply" ${BUDGET_ARGS:-}
 else
@@ -85,7 +87,9 @@ needt "$OUTPLY" && "$SPY" "$SO" shfit --ply "$T/budget.ply" --ref "$T/budget.ply
 ls -la "$OUTPLY"*; md5sum "$OUTPLY" | tee "$T/output.md5"
 
 echo "== 5. live SuperSplat checks"
-LI="$D/live_in"; L="$T/live"; mkdir -p "$LI" "$L" "$L/report"
+LI="$D/live_in"; L="$T/live"
+[ "${FORCE:-0}" = 1 ] && [ -d "$L" ] && mv "$L" "${L}_prev_$(date +%m%d%H%M%S)"   # FORCE: fresh shots / scores
+mkdir -p "$LI" "$L" "$L/report"
 score() {  # <shots dir with black/ grey/> <tag> <report dir>
   for bg in black grey; do
     [ -f "$3/${2}_$bg.json" ] || "$GPY" scripts/eval_views.py --pred-dir "$1/$bg" --dataset "$TEST" --tag "${2}_$bg" --json-out "$3/${2}_$bg.json" | tail -1
