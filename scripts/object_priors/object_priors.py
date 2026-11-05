@@ -545,7 +545,12 @@ def build(args):
         Lg = ob.loc(Gm); zh = ob.half + args.zone_m                        # 2nd pass: frame from LiDAR + seen gaussians
         z0 = np.nonzero((np.abs(Lg[:, 0]) <= zh[0]) & (np.abs(Lg[:, 1]) <= zh[1]) & (Lg[:, 2] > args.ev_min_h) & (Lg[:, 2] < hmax + 0.05)
                         & (wmax >= args.seen_w) & (op > 0.5) & (smax < args.needle_ratio * smid))[0]
-        ob = Obj(np.concatenate([X, Gm[z0]]), n_f, d_f, min_h=args.ev_min_h); Lx = ob.loc(X)
+        surfel = (wmax >= args.face_w) & (op > 0.7) & (smin < 0.3 * smid) & (smax < 3 * smid)   # well-seen flat gaussians
+        if args.splat_faces and (surfel[z0]).sum() > 100:                 # faces from the splat's seen surface, LiDAR weak prior
+            ob = Obj(np.concatenate([X[::10], Gm[z0[surfel[z0]]]]), n_f, d_f, min_h=args.ev_min_h)
+        else:
+            ob = Obj(np.concatenate([X, Gm[z0]]), n_f, d_f, min_h=args.ev_min_h)
+        Lx = ob.loc(X)
         # depth prior by space carving: a side only one face of which was measured extends while no camera sees through
         # the strip and no other measured surface is there, up to a box no deeper than max(other side, height)
         Ll0 = ob.loc(Lall); nr = (np.abs(Ll0[:, 0]) < 1.5) & (np.abs(Ll0[:, 1]) < 1.5) & (Ll0[:, 2] > 0.03)
@@ -560,13 +565,18 @@ def build(args):
         zone_in[inz] = True
         strong = inz[(wmax[inz] >= args.seen_w) & (op[inz] > 0.5) & (smax[inz] < args.needle_ratio * smid[inz]) & (Lg[inz, 2] > args.ev_min_h)]
         Lev = np.concatenate([Lx[Lx[:, 2] > args.ev_min_h], Lg[strong]])
+        sfz = inz[surfel[inz] & (Lg[inz, 2] > args.ev_min_h)]
+        if args.splat_faces and len(sfz) > 100:
+            Lev = np.concatenate([Lx[Lx[:, 2] > args.ev_min_h][::10], Lg[sfz]])
+        sftree = cKDTree(Gm[sfz]) if len(sfz) else None
         # other measured surfaces near the object (walls, shelves): never cleaned / filled there
         Ll = ob.loc(Lall); near = (np.abs(Ll[:, 0]) <= zh[0] + 0.1) & (np.abs(Ll[:, 1]) <= zh[1] + 0.1) & (Ll[:, 2] > 0.03)
         own = cKDTree(Lx).query(Ll[near], distance_upper_bound=0.03)[0]
         other = Ll[near][~np.isfinite(own)]
         otree = cKDTree(other) if len(other) else None
         # candidates; selection = evidence inlier share - share of claimed surface a camera sees but has no evidence near
-        cands = [fit_stepbox(Lev, ob.half, args.cell), fit_plates(Lev, args.cell), fit_cylinder(Lev, ob.half)]
+        fc_ = args.fit_cell if args.splat_faces else args.cell; pt_ = args.plate_thr if args.splat_faces else 0.02
+        cands = [fit_stepbox(Lev, ob.half, fc_), fit_plates(Lev, args.cell, thr=pt_), fit_cylinder(Lev, ob.half)]
         etree = cKDTree(Lev); best = None; scores = {}
         for pr in cands:
             if pr is None:
@@ -610,6 +620,10 @@ def build(args):
         Ltr = cKDTree(Ps); dS, iS = Ltr.query(Lg[inz]); ins = INSIDE[pr["kind"]](pr, Lg[inz])
         weak = wmax[inz] < args.junk_w
         prot = (Lg[inz, 2] < args.floor_m) | (np.isfinite(otree.query(Lg[inz], distance_upper_bound=args.other_m)[0]) if otree else False)
+        if args.protect_m > 0:                                             # never touch what is within protect_m of a seen face
+            zg = cKDTree(Gm[np.nonzero(surfel & zone_in)[0]]) if (surfel & zone_in).any() else None
+            if zg is not None:
+                prot = prot | np.isfinite(zg.query(Gm[inz], distance_upper_bound=args.protect_m)[0]) | surfel[inz]
         rm = weak & ~prot & ((ins & (dS > args.inside_m)) | (~ins & (dS > args.off_m)))
         spk = (wmax[inz] < (args.snap_w if args.snap_w is not None else args.junk_w)) & ~prot & ~rm & (smax[inz] > args.needle_ratio * smid[inz]) & (op[inz] > 0.05) & (dS <= args.off_m)
         if args.no_clean:                                                  # add-only candidate (removals / snaps gated separately)
@@ -872,6 +886,10 @@ def main():
                    help="a face sample seen by any camera at <= this incidence is not filled (90: grazing views count too)")
     b.add_argument("--replace", action="store_true",
                    help="replacement surfaces: discs on every not-solid primitive face (seen too), coloured by the real images there")
+    b.add_argument("--splat-faces", action="store_true", help="fit faces to the splat's well-seen surfels (LiDAR a weak prior)")
+    b.add_argument("--face-w", type=float, default=0.2, help="well-seen surfel: support max blend weight >= this")
+    b.add_argument("--fit-cell", type=float, default=0.01); b.add_argument("--plate-thr", type=float, default=0.01)
+    b.add_argument("--protect-m", type=float, default=0.0, help="never remove / snap gaussians this close to a well-seen surfel")
     b.add_argument("--cosmetic", action="store_true", help="shape-aware cleaning zones, A-frame inner faces + shadow floor patch")
     b.add_argument("--cos-zone-plates-m", type=float, default=0.4); b.add_argument("--cos-zone-box-m", type=float, default=0.3)
     b.add_argument("--shadow", type=float, default=0.55, help="floor patch under plates: floor colour x this")
