@@ -11,7 +11,7 @@
 #     configs/mocap2_well-lit_trot.yaml
 # Env: NAME (viewer_msd60k_wd_clean_ft2_solid3), IN (<E>/<NAME>.ply), METHOD, TAG (METHOD with , -> _), LEARNED,
 #      BUILD_ARGS, REFIT (1), REFIT_ARGS ("--train-zone-m 0.25 --iters 2000"), BUDGET_ARGS ("--min-w 0.002 --iters 12"),
-#      BUDGET_MODE=zone (GT-aware budget in the object zones: scripts/object_priors/zone_budget.py), STOP_AFTER=build (prep + build only), MOVES ("0 -0.3 1.0;0 -0.6 1.5"), EVERY_OFF (40), FORCE=1 (redo every stage of this TAG).
+#      REFIT=zone (zone_refit.py, ZREFIT_ARGS), BUDGET_MODE=zone (GT-aware budget in the object zones: scripts/object_priors/zone_budget.py), STOP_AFTER=build (prep + build only), MOVES ("0 -0.3 1.0;0 -0.6 1.5"), EVERY_OFF (40), FORCE=1 (redo every stage of this TAG).
 #SBATCH -J obj-priors
 #SBATCH -p gpu-highvram,gpu-preempt-highvram
 #SBATCH --gres=gpu:1
@@ -57,7 +57,13 @@ needt "$T/meta.npz" && "$CPUPY" "$OP" build --ply "$IN" --support "$D/support.np
   --sim3-json "$P/sim3.json" --dataset "$DATA" --splat-depth-dir "$D/depth" --method "$METHOD" "${LA[@]}" --out-dir "$T" ${BUILD_ARGS:-}
 CAND="$T/textured.ply"; SRC="$T/src.npz"
 [ "${STOP_AFTER:-}" = build ] && { echo OBJECT_PRIORS_BUILD_ONLY; exit 0; }
-if [ "${REFIT:-1}" = 1 ]; then
+if [ "${REFIT:-1}" = zone ]; then
+  echo "== 2. zone refit: orbit terms on the prior's free rows only (scripts/object_priors/zone_refit.py)"
+  needt "$T/zrefit.ply" && "$SPY" scripts/object_priors/zone_refit.py --ply "$T/textured.ply" --src "$T/src.npz" --zone "$T/zone.npz" \
+    --support "$D/support.npz" --orbit "$D/orbit" --objects "$D/objects" --cloud "$CLOUD" --sim3-json "$P/sim3.json" \
+    --dataset "$DATA" "$TEST" --out "$T/zrefit.ply" ${ZREFIT_ARGS:-}
+  CAND="$T/zrefit.ply"; SRC="$T/zrefit_src.npz"
+elif [ "${REFIT:-1}" = 1 ]; then
   echo "== 2. joint refit (new rows + object-zone input gaussians, anchored)"
   needt "$T/refit.ply" && "$SPY" "$SO" refit --ply "$T/textured.ply" --meta "$T/meta.npz" --dataset "$DATA" "$TEST" \
     --sim3-json "$P/sim3.json" --objects "$D/objects" --cloud "$CLOUD" --orbit "$D/orbit" --train-all --out "$T/refit.ply" \
