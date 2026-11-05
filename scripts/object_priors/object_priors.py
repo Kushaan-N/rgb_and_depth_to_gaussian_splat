@@ -379,8 +379,8 @@ INSIDE = {"stepbox": stepbox_inside, "plates": plates_inside, "cylinder": cylind
 
 
 def face_class(face):
-    """0 wall, 1 top, 2 plate side (outer), 3 plate side (inner)"""
-    return np.where(face >= 20, 2 + (face - 20) % 2, np.where(face >= 10, 1, 0))
+    """0 wall, 1 top, 2 plate side (outer), 3 plate side (inner), 4 shadow floor patch under plates"""
+    return np.where(face >= 40, 4, np.where(face >= 20, 2 + (face - 20) % 2, np.where(face >= 10, 1, 0)))
 
 
 def carve(ob, hmax, cell, otree, seen_fn, frac=0.3):
@@ -591,6 +591,21 @@ def build(args):
             rep["objects"].append(orep); continue
         _, pr, Ps, Ns, Fs = best
         orep["model"] = {kk: (vv if kk != "grid" else None) for kk, vv in pr.items()}
+        if args.cosmetic:                                                  # shape-aware cleaning zone, floor patch under plates
+            mg = args.cos_zone_plates_m if pr["kind"] == "plates" else args.cos_zone_box_m; zb = ob.half + mg
+            inz = np.nonzero((np.abs(Lg[:, 0]) <= zb[0]) & (np.abs(Lg[:, 1]) <= zb[1]) & (Lg[:, 2] > -0.02) & (Lg[:, 2] < hmax + mg))[0]
+            zone_in[inz] = True
+            if pr["kind"] == "plates":
+                from scipy.spatial import Delaunay
+                cor = []
+                for p_ in pr["plates"]:
+                    c, p1, p2, hf = (np.array(p_[x]) for x in ("centre", "p1", "p2", "half"))
+                    cor += [c + a1_ * hf[0] * p1 + a2_ * hf[1] * p2 for a1_ in (-1, 1) for a2_ in (-1, 1)]
+                cor = np.array(cor)[:, :2]; g_ = np.arange(-1.5, 1.5, args.cell)
+                U, V = np.meshgrid(g_, g_, indexing="ij"); Q = np.c_[U.ravel(), V.ravel()]
+                Q = Q[Delaunay(cor).find_simplex(Q) >= 0]
+                Ps = np.concatenate([Ps, np.c_[Q, np.full(len(Q), 0.006)]]); Ns = np.concatenate([Ns, np.tile([0, 0, 1.0], (len(Q), 1))])
+                Fs = np.concatenate([Fs, np.full(len(Q), 40)]); orep["floor_patch"] = int(len(Q))
         # zone gaussians vs the primitive (only ones no training view constrains)
         Ltr = cKDTree(Ps); dS, iS = Ltr.query(Lg[inz]); ins = INSIDE[pr["kind"]](pr, Lg[inz])
         weak = wmax[inz] < args.junk_w
@@ -624,6 +639,8 @@ def build(args):
         Sinv = np.einsum("nij,nj,nkj->nik", Rk, 1.0 / np.maximum(sck, 1e-5) ** 2, Rk)
         sol = solidity(Pm, Nm, Gk, op[kz], Sinv, args.solid_radius_m, args.window_m) if len(kz) else np.zeros(len(Pm))
         need = okf & ~seen & (sol < args.solid_alpha)
+        if args.cosmetic:                                                  # plate inner faces + shadow floor: always replaced
+            need = need | (okf & (face_class(Fs) >= 3))
         if args.replace:                                                   # replacement surfaces also where cameras look in;
             need = okf & ((sol < args.solid_alpha) | (face_class(Fs) == 3))   # plate inner faces: solid only via the plate
         # colours of seen samples: opacity/distance-weighted DC of nearby constrained gaussians of the object
@@ -751,6 +768,19 @@ def build(args):
                 gc = gt_colours(Pa, args.dataset, args.splat_depth_dir, s, R, t, args.tol_rel, args.min_hidden_m)
                 okc = np.isfinite(gc[:, 0]); col[okc] = (gc[okc] - 0.5) / C0; srcm[okc] = 5
                 orep["gt_coloured"] = int(okc.sum())
+            if args.cosmetic:                                              # dark inner material, shadowed floor
+                ca = face_class(Fs[add]); rgb_o = 0.5 + C0 * scol[obs] if obs.any() else None
+                if (ca == 3).any() and rgb_o is not None:
+                    inn = obs & (cls == 3)
+                    if inn.sum() >= 10:
+                        dark = np.median(0.5 + C0 * scol[inn], 0)
+                    else:
+                        lum = rgb_o.mean(1); dark = np.median(rgb_o[lum <= np.quantile(lum, 0.2)], 0)
+                    col[ca == 3] = (dark - 0.5) / C0; srcm[ca == 3] = 6
+                if (ca == 4).any():
+                    fl = inz[(Lg[inz, 2] < args.floor_m) & (op[inz] > 0.5)]
+                    frgb = np.median(0.5 + C0 * dc[fl], 0) if len(fl) else np.array([0.5, 0.5, 0.5])
+                    col[ca == 4] = (np.clip(args.shadow * frgb, 0, 1) - 0.5) / C0; srcm[ca == 4] = 7
             new_rows.append(disc_rows(v.dtype, ((Pa - t) @ R) / s, Na @ R, col, args.cell, s, args.opacity))
             meta_rows.append((np.full(len(add), k), Fs[add], Ps[add], Pa, Na, srcm))
             orep["discs"] = int(len(add)); orep["disc_colour_src"] = {"flat": int((srcm == 0).sum()), "nearest_same_class": int((srcm == 1).sum()),
@@ -842,6 +872,9 @@ def main():
                    help="a face sample seen by any camera at <= this incidence is not filled (90: grazing views count too)")
     b.add_argument("--replace", action="store_true",
                    help="replacement surfaces: discs on every not-solid primitive face (seen too), coloured by the real images there")
+    b.add_argument("--cosmetic", action="store_true", help="shape-aware cleaning zones, A-frame inner faces + shadow floor patch")
+    b.add_argument("--cos-zone-plates-m", type=float, default=0.4); b.add_argument("--cos-zone-box-m", type=float, default=0.3)
+    b.add_argument("--shadow", type=float, default=0.55, help="floor patch under plates: floor colour x this")
     b.add_argument("--snap-w", type=float, default=None, help="spikes snapped only below this support (default --junk-w)")
     b.add_argument("--no-clean", action="store_true", help="no removals / snaps: only add the prior's surface")
     b.add_argument("--ev-min-h", type=float, default=0.045, help="evidence above this height only (floor band excluded)")
