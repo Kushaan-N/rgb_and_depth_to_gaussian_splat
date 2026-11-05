@@ -36,6 +36,9 @@ def main():
     ap.add_argument("--needle-ratio", type=float, default=3.0); ap.add_argument("--pos-tol-m", type=float, default=0.015)
     ap.add_argument("--lam-pos", type=float, default=0.1); ap.add_argument("--lam-flat", type=float, default=0.1)
     ap.add_argument("--log-every", type=int, default=250)
+    ap.add_argument("--max-scale-m", type=float, default=0.03, help="new rows: no axis larger than this (no blow-up blobs)")
+    ap.add_argument("--new-only", action="store_true", help="cosmetic: only the prior's new rows train (every input row frozen)")
+    ap.add_argument("--lam-photo", type=float, default=1.0, help="weight of the training-view photometric loss")
     a = ap.parse_args()
     import torch
     from finetune_ply_viewer import ViewerRaster, cam_args, frames, load_ply, save_ply, sh_deg, to_t
@@ -49,6 +52,8 @@ def main():
     zin = np.load(a.zone)["zone"]; wmax = np.load(a.support)["wmax"]
     new = src < 0; zrow = new.copy(); zrow[~new] = zin[src[~new]]
     free = new.copy(); free[~new] = zin[src[~new]] & (wmax[src[~new]] < a.free_w)
+    if a.new_only:
+        zrow, free = new.copy(), new.copy()
     T = lambda m: torch.tensor(m, device=dev)
     tm, fr_, nw = T(zrow), T(free), T(new); seen_rows = tm & ~fr_
     print(f"[zrefit] {N:,} rows: trainable {int(tm.sum()):,} (free {int(fr_.sum()):,} incl. {int(nw.sum()):,} new; seen {int(seen_rows.sum()):,})", flush=True)
@@ -90,7 +95,7 @@ def main():
         img, _, _ = Rv.render(params, to_t(np.linalg.inv(c2w), dev), *cam_args(cam), sh_degree=deg)
         gt = rgb[k].float() / 255
         lph = 0.8 * (img - gt).abs().mean() + 0.2 * (1 - ssim(img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None]))
-        g1 = torch.autograd.grad(lph, [params[x] for x in keys], allow_unused=True)
+        g1 = torch.autograd.grad(a.lam_photo * lph, [params[x] for x in keys], allow_unused=True)
         # prior terms: free rows only
         w2c_o, ca, mk = orb[np.random.randint(len(orb))]
         io, ao, _ = Rv.render(params, w2c_o, *ca, sh_degree=deg)
@@ -116,6 +121,8 @@ def main():
         with torch.no_grad():
             for x in keys:                                                 # seen zone rows move at lr_seen x the rate
                 params[x][seen_rows] = old[x] + a.lr_seen * (params[x][seen_rows] - old[x])
+            params["scales"][ni] = params["scales"][ni].clamp_max(float(np.log(a.max_scale_m / s)))   # free rows stay surfels
+            params["scales"][fi] = params["scales"][fi].clamp_max(float(np.log(max(a.max_scale_m, 1e-3) * 3 / s)))
         if step % a.log_every == 0 or step == 1:
             e = {"step": step, "psnr": round(psnr(img.detach(), gt), 2), "hole": round(float(lh), 4), "tv": round(float(lt), 4),
                  "needle": round(float(lneed), 4), "opa": round(float(lopa), 4), "pos": round(float(lpos), 4)}
