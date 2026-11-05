@@ -150,6 +150,48 @@ def seen_by_cameras(Pm, datasets, depth_dir, s, R, t, tol_rel, solid_opacity, mi
     return seen
 
 
+_IMG = {}
+
+
+def gt_colours(Pm, datasets, depth_dir, s, R, t, tol_rel, min_hidden_m, min_views=2):
+    """median real-image colour (rgb 0..1) at each metric point over the training views that see it (in front of / within
+    min_hidden_m behind the input's rendered surface); NaN where fewer than min_views do."""
+    from PIL import Image
+    Xd = ((Pm - t) @ R) / s; obs = [[] for _ in range(len(Pm))]
+    for ds in datasets:
+        if ds not in _CAMS:
+            _CAMS[ds] = read_text_model(os.path.join(ds, "sparse", "0"))
+        cams, imgs = _CAMS[ds]
+        for name, cid, q, tc in imgs:
+            f = os.path.join(depth_dir, os.path.splitext(name)[0] + "_splatdepth.npy"); fi = os.path.join(ds, "images", name)
+            if not (os.path.exists(f) and os.path.exists(fi)):
+                continue
+            if f not in _DEP:
+                fo = f.replace("_splatdepth.npy", "_splatopacity.npy")
+                _DEP[f] = (np.load(f).astype(np.float32), np.load(fo).astype(np.float16) if os.path.exists(fo) else None)
+            Dm = _DEP[f][0]; W, H, (fx, fy, cx, cy) = cams[cid]
+            Pc = Xd @ quat_to_R(q).T + tc; z = Pc[:, 2]; ok = z > 0.05
+            u = np.full(len(z), -1); vv = np.full(len(z), -1)
+            u[ok] = np.floor(fx * Pc[ok, 0] / z[ok] + cx); vv[ok] = np.floor(fy * Pc[ok, 1] / z[ok] + cy)
+            ok &= (u >= 0) & (u < W) & (vv >= 0) & (vv < H); ia = np.nonzero(ok)[0]
+            if not len(ia):
+                continue
+            D = Dm[vv[ia], u[ia]]; r = np.linalg.norm(Pc[ia], axis=1)
+            vis = (D > 0) & ((r < D * (1 + tol_rel)) | (r < D + min_hidden_m / s))
+            if not vis.any():
+                continue
+            if fi not in _IMG:
+                _IMG[fi] = np.asarray(Image.open(fi).convert("RGB"))
+            c = _IMG[fi][vv[ia[vis]], u[ia[vis]]] / 255.0
+            for j, cc in zip(ia[vis], c):
+                obs[j].append(cc)
+    out = np.full((len(Pm), 3), np.nan)
+    for j, o in enumerate(obs):
+        if len(o) >= min_views:
+            out[j] = np.median(np.array(o), 0)
+    return out
+
+
 # ---------------------------------------------------------------- primitives (local coordinates)
 def fit_stepbox(L, half, cell, level_gap=0.03, min_share=0.05):
     """rectangle [-half, half] grid; per cell the 90th-percentile height of the evidence; heights quantised to levels."""
@@ -565,6 +607,8 @@ def build(args):
         Sinv = np.einsum("nij,nj,nkj->nik", Rk, 1.0 / np.maximum(sck, 1e-5) ** 2, Rk)
         sol = solidity(Pm, Nm, Gk, op[kz], Sinv, args.solid_radius_m, args.window_m) if len(kz) else np.zeros(len(Pm))
         need = okf & ~seen & (sol < args.solid_alpha)
+        if args.replace:                                                   # replacement surfaces also where cameras look in;
+            need = okf & ((sol < args.solid_alpha) | (face_class(Fs) == 3))   # plate inner faces: solid only via the plate
         # colours of seen samples: opacity/distance-weighted DC of nearby constrained gaussians of the object
         cons = inz[(wmax[inz] >= args.seen_w) & (op[inz] > 0.3)]
         scol = np.full((len(Ps), 3), np.nan)
@@ -686,6 +730,10 @@ def build(args):
                     w = np.exp(-dd / max(np.median(dd[:, 0]), args.cell)); col[im] = (w[..., None] * scol[so][jj]).sum(1) / w.sum(1, keepdims=True)
                     srcm[im] = 1
             Pa = ob.met(Ps[add]); Na = ob.vec(Ns[add])
+            if args.replace:                                               # what the robot saw there (dark interiors, shadows)
+                gc = gt_colours(Pa, args.dataset, args.splat_depth_dir, s, R, t, args.tol_rel, args.min_hidden_m)
+                okc = np.isfinite(gc[:, 0]); col[okc] = (gc[okc] - 0.5) / C0; srcm[okc] = 5
+                orep["gt_coloured"] = int(okc.sum())
             new_rows.append(disc_rows(v.dtype, ((Pa - t) @ R) / s, Na @ R, col, args.cell, s, args.opacity))
             meta_rows.append((np.full(len(add), k), Fs[add], Ps[add], Pa, Na, srcm))
             orep["discs"] = int(len(add)); orep["disc_colour_src"] = {"flat": int((srcm == 0).sum()), "nearest_same_class": int((srcm == 1).sum()),
@@ -775,6 +823,8 @@ def main():
     b.add_argument("--tex-radius-m", type=float, default=0.03)
     b.add_argument("--fill-max-incidence", type=float, default=90.0,
                    help="a face sample seen by any camera at <= this incidence is not filled (90: grazing views count too)")
+    b.add_argument("--replace", action="store_true",
+                   help="replacement surfaces: discs on every not-solid primitive face (seen too), coloured by the real images there")
     b.add_argument("--no-clean", action="store_true", help="no removals / snaps: only add the prior's surface")
     b.add_argument("--ev-min-h", type=float, default=0.045, help="evidence above this height only (floor band excluded)")
     b.add_argument("--carve-frac", type=float, default=0.3, help="depth prior: stop growing when this share of a strip is seen")
