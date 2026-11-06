@@ -95,7 +95,13 @@ def main():
     ap.add_argument("--under", type=float, default=0.55, help="floor under an object (A-frame inside): colour x this")
     ap.add_argument("--face-w", type=float, default=0.2); ap.add_argument("--protect-m", type=float, default=0.012)
     ap.add_argument("--wall-min-pts", type=int, default=800); ap.add_argument("--wall-h", type=float, default=0.6)
-    ap.add_argument("--cover-m", type=float, default=0.02); ap.add_argument("--no-walls", action="store_true")
+    ap.add_argument("--cover-m", type=float, default=0.02)
+    ap.add_argument("--walls", action="store_true", help="also continue room walls (only at the LiDAR room boundary)")
+    ap.add_argument("--wall-boundary-m", type=float, default=0.3, help="a wall plane must be this close to the cloud's extreme")
+    ap.add_argument("--wall-obj-m", type=float, default=0.5, help="only behind objects this close to the wall")
+    ap.add_argument("--dataset", nargs="*", default=[], help="training frames: discs a camera would see in front of the input are dropped")
+    ap.add_argument("--splat-depth-dir", default=None, help="the input's rendered depth at --dataset (render_ply_depth.py)")
+    ap.add_argument("--floor-tol-m", type=float, default=0.01)
     a = ap.parse_args()
     import cv2
     from scipy.spatial import cKDTree
@@ -123,12 +129,14 @@ def main():
         inp = Inpainter("telea", None)
     # ---- walls: Manhattan peaks of the LiDAR projection (0.1 .. 1.5 m above the floor)
     walls = []
-    if not a.no_walls:
+    if a.walls:
         Lw = L[(hL > 0.1) & (hL < 1.5)]
         for ax, e in (("e1", e1), ("e2", e2)):
             p = Lw @ e; hist, edges = np.histogram(p, bins=np.arange(p.min(), p.max() + 0.02, 0.02))
+            lo_p, hi_p = np.percentile(p, [0.5, 99.5])
             for i in np.nonzero(hist >= a.wall_min_pts)[0]:
-                if hist[i] == hist[max(i - 2, 0):i + 3].max():
+                c_ = (edges[i] + edges[i + 1]) / 2
+                if hist[i] == hist[max(i - 2, 0):i + 3].max() and min(abs(c_ - lo_p), abs(c_ - hi_p)) < a.wall_boundary_m:
                     walls.append((ax, e, float((edges[i] + edges[i + 1]) / 2), int(hist[i])))
     rep["walls"] = [(w[0], round(w[2], 3), w[3]) for w in walls]
     for o, X in zip(meta["objects"], opts):
@@ -168,7 +176,7 @@ def main():
         for ax, e, off, cnt in walls:
             other = e2 if ax == "e1" else e1
             dpl = F @ e - off
-            if np.abs(dpl).min() > a.zone_m + 0.3:
+            if np.abs(dpl).min() > a.wall_obj_m:
                 continue
             side = np.sign(np.median(dpl)) or 1.0
             along = np.arange((F @ other).min() - a.zone_m, (F @ other).max() + a.zone_m, a.cell)
@@ -188,6 +196,14 @@ def main():
         rep["objects"].append(orep); print(f"[env] {orep}", flush=True)
     X = np.concatenate(new_X) if new_X else np.zeros((0, 3)); Nn = np.concatenate(new_N) if new_N else np.zeros((0, 3))
     C = np.concatenate(new_c) if new_c else np.zeros((0, 3))
+    keep = np.ones(len(X), bool)
+    if a.dataset and a.splat_depth_dir and len(X):                       # never in front of what a training camera saw
+        from object_priors import seen_by_cameras
+        keep = ~seen_by_cameras(X, a.dataset, a.splat_depth_dir, s, R, t, 0.05, 0.98, 0.05, thru=True)
+    fl = np.abs(X @ n + d - a.lift_m) < a.floor_tol_m
+    isfloor = np.all(np.abs(Nn - n) < 1e-6, 1); keep &= ~isfloor | fl
+    rep["dropped_in_front_of_cameras"] = int((~keep).sum())
+    X, Nn, C = X[keep], Nn[keep], C[keep]
     rows = disc_rows(v.dtype, ((X - t) @ R) / s, Nn @ R, (np.clip(C, 0, 1) - 0.5) / C0, a.cell, s, a.opacity)
     write_vertex(os.path.join(a.out_dir, "textured_env.ply"), np.concatenate([v, rows]))
     np.savez_compressed(os.path.join(a.out_dir, "src_env.npz"), src=np.concatenate([src, np.full(len(rows), -1)]))
