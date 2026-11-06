@@ -48,7 +48,7 @@ COMMON=(--objects "$D/objects" --sim3-json "$P/sim3.json" --dataset "$DATA" --sp
 echo "== 1. generate"
 need "$G/generate.json" && "$MPY" "$MG" generate "${COMMON[@]}" ${GEN_ARGS:-}
 echo "== 2. register"
-{ need "$G/register.json" || [ "${FORCE_REG:-0}" = 1 ]; } && "$MPY" "$MG" register "${COMMON[@]}" ${REG_ARGS:-}
+{ need "$G/register.json" || [ "${FORCE_REG:-0}" = 1 ]; } && "$MPY" "$MG" register "${COMMON[@]}" --ply "$IN" --support "$D/support.npz" ${REG_ARGS:-}
 [ "${STOP_AFTER:-}" = register ] && { echo MV_PRIOR_REGISTER_ONLY; exit 0; }
 echo "== 3. refit on the generated views"
 needt "$T/refit.ply" && "$SPY" scripts/object_priors/mv_refit.py --ply "$IN" --support "$D/support.npz" --gen "$G" \
