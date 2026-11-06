@@ -101,6 +101,7 @@ def main():
     ap.add_argument("--wall-obj-m", type=float, default=0.5, help="only behind objects this close to the wall")
     ap.add_argument("--dataset", nargs="*", default=[], help="training frames: discs a camera would see in front of the input are dropped")
     ap.add_argument("--splat-depth-dir", default=None, help="the input's rendered depth at --dataset (render_ply_depth.py)")
+    ap.add_argument("--close-px", type=int, default=3)
     ap.add_argument("--floor-tol-m", type=float, default=0.01)
     a = ap.parse_args()
     import cv2
@@ -148,7 +149,8 @@ def main():
         sel = band & (U0 > lo[0]) & (U0 < hi[0]) & (V0 > lo[1]) & (V0 < hi[1])
         Uq, Vq = (U0[sel] - lo[0]) / a.px, (V0[sel] - lo[1]) / a.px
         col, alpha = ortho(Uq, Vq, op[sel], rgb[sel], np.clip(1.5 * smid[sel] / a.px, 0.7, 4.0), W_, H_)
-        known = alpha >= a.solid
+        known = ndimage.binary_closing(alpha >= a.solid, iterations=a.close_px)   # speckle between footprints = floor
+        known |= ndimage.binary_opening(alpha < a.solid, iterations=2) == 0      # only real voids (>= ~5 px) are holes
         foot = np.zeros((H_, W_), bool)
         fx_, fy_ = np.clip(((fu - lo[0]) / a.px).astype(int), 0, W_ - 1), np.clip(((fv - lo[1]) / a.px).astype(int), 0, H_ - 1)
         foot[fy_, fx_] = True; foot = ndimage.binary_fill_holes(ndimage.binary_closing(foot, iterations=3))
