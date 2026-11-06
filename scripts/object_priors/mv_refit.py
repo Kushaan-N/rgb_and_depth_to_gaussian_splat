@@ -53,18 +53,20 @@ def main():
     ap.add_argument("--objects", required=True); ap.add_argument("--out", required=True)
     ap.add_argument("--iters", type=int, default=3000); ap.add_argument("--display-scale", default="1.5:4")
     ap.add_argument("--zone-m", type=float, default=0.06); ap.add_argument("--floor-m", type=float, default=0.015)
-    ap.add_argument("--free-w", type=float, default=0.2); ap.add_argument("--lr-seen", type=float, default=0.1)
+    ap.add_argument("--free-w", type=float, default=0.05); ap.add_argument("--lr-seen", type=float, default=0.1)
     ap.add_argument("--face-w", type=float, default=0.2); ap.add_argument("--seed-skip-m", type=float, default=0.012)
     ap.add_argument("--seed-cell-m", type=float, default=0.01); ap.add_argument("--seed-opacity", type=float, default=0.8)
     ap.add_argument("--no-seeds", action="store_true")
     ap.add_argument("--lam-photo", type=float, default=1.0); ap.add_argument("--lam-gen", type=float, default=1.0)
-    ap.add_argument("--lam-in", type=float, default=0.5); ap.add_argument("--lam-out", type=float, default=0.5)
+    ap.add_argument("--lam-in", type=float, default=0.5); ap.add_argument("--lam-out", type=float, default=2.0)
+    ap.add_argument("--free-scale-k", type=float, default=1.0, help="free input rows: scale cap = this x --max-scale-m")
     ap.add_argument("--lam-normal", type=float, default=0.0); ap.add_argument("--out-dilate", type=int, default=4)
     ap.add_argument("--lam-needle", type=float, default=0.3); ap.add_argument("--needle-ratio", type=float, default=3.0)
     ap.add_argument("--lam-opa", type=float, default=0.1); ap.add_argument("--max-scale-m", type=float, default=0.03)
     ap.add_argument("--gen-scale", type=float, default=2.0, help="generated views rendered at this x their 320 px")
     ap.add_argument("--low-weight", type=float, default=0.5, help="weight of the -10 deg (below the object centre) views")
     ap.add_argument("--freeze-seen", action="store_true", help="every input row outside FREE frozen (seen faces byte-identical)")
+    ap.add_argument("--no-hull-mask", action="store_true"); ap.add_argument("--hull-dilate", type=int, default=3)
     ap.add_argument("--log-every", type=int, default=250)
     a = ap.parse_args()
     import torch, cv2
@@ -88,12 +90,12 @@ def main():
         zone |= iz; objr |= iz & (L[:, 2] > a.floor_m); oid_row[iz] = r["id"]
     seen_face = zone & (wmax >= a.face_w) & (op0 > 0.5)
     # seeds -> new rows
-    sd = np.load(os.path.join(a.gen, "seeds.npz")); Xs, Ns, Cs = sd["X"], sd["N"], sd["C"]
+    sd = np.load(os.path.join(a.gen, "seeds.npz")); Xs, Ns, Cs, So = sd["X"], sd["N"], sd["C"], sd["obj"].astype(int)
     if a.no_seeds:
-        Xs = Xs[:0]
+        Xs, Ns, Cs, So = Xs[:0], Ns[:0], Cs[:0], So[:0]
     if len(Xs) and seen_face.any():
         dd = cKDTree(X[seen_face]).query(Xs)[0] * s; k = dd > a.seed_skip_m
-        Xs, Ns, Cs = Xs[k], Ns[k], Cs[k]
+        Xs, Ns, Cs, So = Xs[k], Ns[k], Cs[k], So[k]
     M = len(Xs); print(f"[mvrefit] {N0:,} input rows, zone {zone.sum():,} (object rows {objr.sum():,}), {M:,} seeds", flush=True)
     K = p0["shN"].shape[1]
     sc_in = np.log(0.6 * a.seed_cell_m / s); sc_n = np.log(0.15 * a.seed_cell_m / s)
@@ -109,6 +111,9 @@ def main():
     obj_rows = np.r_[objr, np.ones(M, bool)]
     T = lambda m: torch.tensor(m, device=dev)
     tm, fr_ = T(tr_rows), T(free); seen_rows = tm & ~fr_; oi = torch.nonzero(T(obj_rows))[:, 0]
+    row_obj = np.r_[oid_row, So]                                           # a generated view renders its own object only
+    oidx = {r["id"]: torch.nonzero(T(obj_rows & (row_obj == r["id"])))[:, 0] for r in reg}
+    oidx0 = {k_: v_[v_ < N0] for k_, v_ in oidx.items()}
     print(f"[mvrefit] trainable {int(tm.sum()):,} (free {int(fr_.sum()):,}, seen {int(seen_rows.sum()):,}); generated-view render rows {len(oi):,}", flush=True)
     # generated views
     Rv = ViewerRaster("ss352", "exact", display_scale=1.5)
@@ -121,11 +126,19 @@ def main():
             fx, fy, cx, cy, W, H = fx * g_, fy * g_, cx * g_, cy * g_, int(W * g_), int(H * g_)
             im = np.asarray(Image.open(os.path.join(V, "images", name)).convert("RGB").resize((W, H), Image.Resampling.BICUBIC), np.float32) / 255
             mk = np.asarray(Image.open(os.path.join(V, "masks", name.replace(".png", "_mask.png"))).resize((W, H), Image.Resampling.NEAREST)) > 127
+            hf = os.path.join(V, "masks", name.replace(".png", "_hull.png"))
+            if os.path.exists(hf) and not a.no_hull_mask:                  # train only where the generated view and the hull agree
+                hm = np.asarray(Image.open(hf).resize((W, H), Image.Resampling.NEAREST)) > 127
+                hm = cv2.dilate(hm.astype(np.uint8), np.ones((2 * a.hull_dilate + 1,) * 2, np.uint8)).astype(bool)
+                mk_in = mk & hm
+            else:
+                mk_in = mk
             nf = os.path.join(V, "normals", name.replace(".png", "_normal.npy"))
             nm = cv2.resize(np.load(nf).astype(np.float32), (W, H), interpolation=cv2.INTER_LINEAR) if os.path.exists(nf) else None
             w2c = to_t(np.linalg.inv(c2w), dev)
             # calibration: gain/bias per channel from the input's well-seen object rows rendered here
-            si = torch.nonzero(T(obj_rows[:N0] & ~free[:N0]))[:, 0]
+            gid = int(name.split("_")[0][3:])
+            si = torch.nonzero(T(obj_rows[:N0] & ~free[:N0] & (oid_row == gid)))[:, 0]
             img, al, _ = Rv.render(sub(P0, si), w2c, fx, fy, cx, cy, W, H, sh_degree=deg)
             ok = (al.cpu().numpy() > 0.9) & cv2.erode(mk.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
             gb = None
@@ -136,7 +149,7 @@ def main():
                     g1 = float(np.clip(g1, 0.6, 1.6)); gb.append((g1, float(np.median(ren[:, c] - g1 * gen[:, c]))))
             outm = ~(cv2.dilate(mk.astype(np.uint8), np.ones((2 * a.out_dilate + 1,) * 2, np.uint8)).astype(bool))
             low = "_v1" in name or "_v3" in name or "_v5" in name
-            gv.append({"name": name, "w2c": w2c, "cam": (fx, fy, cx, cy, W, H), "img": im, "mask": mk, "out": outm, "n": nm, "gb": gb,
+            gv.append({"name": name, "oid": gid, "w2c": w2c, "cam": (fx, fy, cx, cy, W, H), "img": im, "mask": mk_in, "full": mk, "out": outm, "n": nm, "gb": gb,
                        "w": a.low_weight if low else 1.0, "calib_px": int(ok.sum())})
     gbs = [g["gb"] for g in gv if g["gb"] is not None]
     gmed = [(float(np.median([x[c][0] for x in gbs])), float(np.median([x[c][1] for x in gbs]))) for c in range(3)] if gbs else [(1.0, 0.0)] * 3
@@ -144,7 +157,7 @@ def main():
         gb = g["gb"] or gmed; im = g["img"].copy()
         for c in range(3):
             im[..., c] = np.clip(gb[c][0] * im[..., c] + gb[c][1], 0, 1)
-        g["img_t"] = torch.tensor(im, device=dev); g["mask_t"] = T(g["mask"]); g["out_t"] = T(g["out"])
+        g["img_t"] = torch.tensor(im, device=dev); g["mask_t"] = T(g["mask"]); g["full_t"] = T(g["full"]); g["out_t"] = T(g["out"])
         g["n_t"] = torch.tensor(g["n"], device=dev) if g["n"] is not None else None
         g["bg"] = torch.tensor(np.median(g["img"][g["out"]], 0) if g["out"].any() else [0.5] * 3, device=dev, dtype=torch.float32)
     print(f"[mvrefit] {len(gv)} generated views; calibrated from own pixels: {sum(g['gb'] is not None for g in gv)}", flush=True)
@@ -174,12 +187,13 @@ def main():
         g1 = torch.autograd.grad(a.lam_photo * lph, [params[x] for x in keys], allow_unused=True)
         # generated view: object rows only
         G_ = gv[int(gorder.pop())]; Rv.r = 1.5
-        ps = sub(params, oi)
+        ps = sub(params, oidx[G_["oid"]])
         io, ao, _ = Rv.render(ps, G_["w2c"], *G_["cam"], sh_degree=0)
         comp = io + (1 - ao)[..., None] * G_["bg"]
-        tgt = torch.where(G_["mask_t"][..., None], G_["img_t"], G_["bg"].expand_as(G_["img_t"]))
+        tgt = torch.where(G_["full_t"][..., None], G_["img_t"], G_["bg"].expand_as(G_["img_t"]))
         mk = G_["mask_t"]
-        lc = 0.8 * (comp - tgt).abs()[mk].mean() + 0.2 * (1 - ssim(comp.permute(2, 0, 1)[None], tgt.permute(2, 0, 1)[None]))
+        ev = mk | G_["out_t"]                                              # inside (hull-agreeing) + clearly outside
+        lc = 0.8 * (comp - tgt).abs()[ev].mean() + 0.2 * (1 - ssim(comp.permute(2, 0, 1)[None], tgt.permute(2, 0, 1)[None]))
         lin = (1 - ao.clamp(0, 1))[mk].mean(); lout = ao[G_["out_t"]].mean() if G_["out_t"].any() else torch.zeros((), device=dev)
         lg = lc + a.lam_in * lin + a.lam_out * lout
         ln_ = torch.zeros((), device=dev)
@@ -211,7 +225,7 @@ def main():
             for x in keys:
                 params[x][seen_rows] = old[x] + a.lr_seen * (params[x][seen_rows] - old[x])
             params["scales"][ni] = params["scales"][ni].clamp_max(float(np.log(a.max_scale_m / s)))
-            params["scales"][fi] = params["scales"][fi].clamp_max(float(np.log(a.max_scale_m * 3 / s)))
+            params["scales"][fi] = params["scales"][fi].clamp_max(float(np.log(a.max_scale_m * a.free_scale_k / s)))
         if step % a.log_every == 0 or step == 1:
             e = {"step": step, "psnr": round(psnr(img.detach(), gt), 2), "gen_l1": round(float(lc), 4), "in": round(float(lin), 4),
                  "out": round(float(lout), 4), "normal": round(float(ln_), 4), "needle": round(float(lneed), 4), "opa": round(float(lopa), 4)}
@@ -226,7 +240,7 @@ def main():
         prev = []
         for G_ in gv:
             row = []
-            for pp, idx in ((P0, torch.nonzero(T(np.r_[objr, np.zeros(M, bool)]))[:, 0]), (params, oi)):
+            for pp, idx in ((P0, oidx0[G_["oid"]]), (params, oidx[G_["oid"]])):
                 io, ao, _ = Rv.render(sub(pp, idx), G_["w2c"], *G_["cam"], sh_degree=0)
                 row.append(((io + (1 - ao)[..., None] * G_["bg"]).clamp(0, 1).cpu().numpy() * 255).astype(np.uint8))
             prev.append(np.hstack([(G_["img"] * 255).astype(np.uint8)] + row))
