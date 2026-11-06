@@ -22,7 +22,7 @@ seen views stay close.
   pathmontage (CPU) per path, ring frames side by side from several render dirs (before | after | repaired).
   distill  (gsplat venv, GPU) fine-tune the gaussians inside the object zones (local min-area box + --zone-m, floor to
            top + --zone-m; colour AND geometry) plus new low-opacity gaussians seeded on each object's closed 2.5D surface
-           (complete_objects.object_surface), viewer-exact (--sort dual, display scale --display-scale): real training
+           (complete_objects.object_surface) where no opaque zone gaussian is within --seed-free-m, viewer-exact (--sort dual, display scale --display-scale): real training
            frames that see a zone (full image L1+SSIM, share --real-frac) mixed with repaired path frames (L1+SSIM inside
            the object mask; pixels a training view saw weighted --seen-weight). Trainable gaussians that end below
            --prune-opacity are dropped. Writes <out>.ply + <out>_distill.json (real-frame PSNR before/after).
@@ -347,6 +347,10 @@ def distill(args):
     if len(seeds):
         seeds = seeds[np.unique(np.floor(seeds / args.seed_cell).astype(np.int64), axis=0, return_index=True)[1]]
     ref = zi[op0[zi] > 0.3]
+    if len(seeds) and args.seed_free_m > 0:                                # only where the zone has no solid gaussian yet
+        solid = zi[op0[zi] > 0.5]
+        if len(solid):
+            seeds = seeds[cKDTree(Gm[solid]).query(seeds)[0] > args.seed_free_m]
     nn_ = cKDTree(Gm[ref]).query(seeds)[1] if len(seeds) and len(ref) else np.zeros(len(seeds), int)
     M = len(seeds); K = p0["shN"].shape[1]
     new = {"means": torch.tensor(((seeds - t) @ R) / s, dtype=torch.float32, device=dev).reshape(M, 3),
@@ -493,6 +497,7 @@ def main():
     d.add_argument("--seen-weight", type=float, default=0.25); d.add_argument("--ssim-lambda", type=float, default=0.2)
     d.add_argument("--lam-alpha", type=float, default=0.05); d.add_argument("--skip-first", type=int, default=0)
     d.add_argument("--seed-cell", type=float, default=0.03); d.add_argument("--seed-scale-m", type=float, default=0.012)
+    d.add_argument("--seed-free-m", type=float, default=0.02, help="no seed within this of an opaque zone gaussian")
     d.add_argument("--seed-opacity", type=float, default=0.05); d.add_argument("--prune-opacity", type=float, default=1 / 255)
     d.add_argument("--means-lr", type=float, default=4e-5); d.add_argument("--means-lr-final", type=float, default=2e-6)
     d.add_argument("--opacity-lr", type=float, default=0.025)
