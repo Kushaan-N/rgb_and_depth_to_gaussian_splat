@@ -101,6 +101,9 @@ def main():
     ap.add_argument("--wall-obj-m", type=float, default=0.5, help="only behind objects this close to the wall")
     ap.add_argument("--dataset", nargs="*", default=[], help="training frames: discs a camera would see in front of the input are dropped")
     ap.add_argument("--splat-depth-dir", default=None, help="the input's rendered depth at --dataset (render_ply_depth.py)")
+    ap.add_argument("--strict-unseen", action="store_true",
+                   help="drop every disc some training camera sees (in front of / within --unseen-margin-m behind its render)")
+    ap.add_argument("--unseen-margin-m", type=float, default=0.03)
     ap.add_argument("--close-px", type=int, default=3)
     ap.add_argument("--floor-tol-m", type=float, default=0.01)
     a = ap.parse_args()
@@ -201,7 +204,10 @@ def main():
     keep = np.ones(len(X), bool)
     if a.dataset and a.splat_depth_dir and len(X):                       # never in front of what a training camera saw
         from object_priors import seen_by_cameras
-        keep = ~seen_by_cameras(X, a.dataset, a.splat_depth_dir, s, R, t, 0.05, 0.98, 0.05, thru=True)
+        if a.strict_unseen:                                                # no training camera sees that cell at all
+            keep = ~seen_by_cameras(X, a.dataset, a.splat_depth_dir, s, R, t, 0.05, 0.98, a.unseen_margin_m)
+        else:
+            keep = ~seen_by_cameras(X, a.dataset, a.splat_depth_dir, s, R, t, 0.05, 0.98, 0.05, thru=True)
     fl = np.abs(X @ n + d - a.lift_m) < a.floor_tol_m
     isfloor = np.all(np.abs(Nn - n) < 1e-6, 1); keep &= ~isfloor | fl
     rep["dropped_in_front_of_cameras"] = int((~keep).sum())
