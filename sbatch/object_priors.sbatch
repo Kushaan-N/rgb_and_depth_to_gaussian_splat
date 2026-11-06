@@ -11,7 +11,7 @@
 #     configs/mocap2_well-lit_trot.yaml
 # Env: NAME (viewer_msd60k_wd_clean_ft2_solid3), IN (<E>/<NAME>.ply), METHOD, TAG (METHOD with , -> _), LEARNED,
 #      BUILD_ARGS, REFIT (1), REFIT_ARGS ("--train-zone-m 0.25 --iters 2000"), BUDGET_ARGS ("--min-w 0.002 --iters 12"),
-#      ENV=1 (env_prior.py after the build, ENV_ARGS; REFIT=0), REFIT=zone (zone_refit.py, ZREFIT_ARGS), BUDGET_MODE=zone|none (none = cosmetic, no budget; zone = GT-aware budget in the object zones: scripts/object_priors/zone_budget.py), STOP_AFTER=build (prep + build only), MOVES ("0 -0.3 1.0;0 -0.6 1.5"), EVERY_OFF (40), FORCE=1 (redo every stage of this TAG).
+#      BUILD=0 (skip the object step; input = candidate, or CAND_PLY + CAND_SRC from another prior), ENV=1 (env_prior.py after the build, ENV_ARGS; REFIT=0), REFIT=zone (zone_refit.py, ZREFIT_ARGS), BUDGET_MODE=zone|none (none = cosmetic, no budget; zone = GT-aware budget in the object zones: scripts/object_priors/zone_budget.py), STOP_AFTER=build (prep + build only), MOVES ("0 -0.3 1.0;0 -0.6 1.5"), EVERY_OFF (40), FORCE=1 (redo every stage of this TAG).
 #SBATCH -J obj-priors
 #SBATCH -p gpu-highvram,gpu-preempt-highvram
 #SBATCH --gres=gpu:1
@@ -53,9 +53,15 @@ need "$D/orbit/sparse/0/images.txt" && "$CPUPY" "$SO" orbit --objects "$D/object
 
 echo "== 1. build"
 LA=(); [ -n "${LEARNED:-}" ] && LA=(--learned-dir "$LEARNED")
-needt "$T/meta.npz" && "$CPUPY" "$OP" build --ply "$IN" --support "$D/support.npz" --objects "$D/objects" --cloud "$CLOUD" \
+[ "${BUILD:-1}" = 1 ] && needt "$T/meta.npz" && "$CPUPY" "$OP" build --ply "$IN" --support "$D/support.npz" --objects "$D/objects" --cloud "$CLOUD" \
   --sim3-json "$P/sim3.json" --dataset "$DATA" --splat-depth-dir "$D/depth" --method "$METHOD" "${LA[@]}" --out-dir "$T" ${BUILD_ARGS:-}
 CAND="$T/textured.ply"; SRC="$T/src.npz"
+if [ "${BUILD:-1}" = 0 ]; then   # no object step: the input as candidate (identity src, empty zone), e.g. ENV=1 alone
+  "$CPUPY" -c "import numpy as np,sys; from plyfile import PlyData; n=PlyData.read(sys.argv[1])['vertex'].count; np.savez_compressed(sys.argv[2],src=np.arange(n)); np.savez_compressed(sys.argv[3],zone=np.zeros(n,bool))" \
+    "$IN" "$T/src_id.npz" "$T/zone.npz"
+  CAND="$IN"; SRC="$T/src_id.npz"
+  [ -n "${CAND_PLY:-}" ] && { CAND="$CAND_PLY"; SRC="${CAND_SRC:?CAND_SRC (src map of CAND_PLY to IN rows) required}"; }   # compose: e.g. mv_refit.py output
+fi
 if [ "${ENV:-0}" = 1 ]; then   # environment prior: floor / walls continued behind + under the objects (env_prior.py)
   IPY="${INPAINT_VENV:-$CEAR_WS/venv-inpaint}/bin/python"
   needt "$T/env/textured_env.ply" && "$IPY" scripts/object_priors/env_prior.py --ply "$CAND" --src "$SRC" --support "$D/support.npz" \
@@ -162,7 +168,8 @@ if os.path.exists(p):
 for f in ("budget_budget.json", "refit_refit.json"):
     if os.path.exists(os.path.join(T, f)):
         j = json.load(open(os.path.join(T, f))); r[f] = {k: v for k, v in j.items() if k not in ("iterations", "curve", "args")}
-r["build"] = {k: v for k, v in json.load(open(os.path.join(T, "priors.json"))).items() if k != "objects"}
+if os.path.exists(os.path.join(T, "priors.json")):
+    r["build"] = {k: v for k, v in json.load(open(os.path.join(T, "priors.json"))).items() if k != "objects"}
 json.dump(r, open(os.path.join(L, "summary.json"), "w"), indent=1); print("OBJECT_PRIORS_SUMMARY", json.dumps(r))
 PY
 echo OBJECT_PRIORS_DONE
