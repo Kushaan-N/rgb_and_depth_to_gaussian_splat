@@ -66,9 +66,9 @@ st_afx() {
   module purge 2>/dev/null || true; module load cuda/12.8 2>/dev/null || true
   export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"; export PATH="$AFX_VENV/bin:$PATH"
   ( cd "$AFX_DIR" && "$APY" -m model_eval.run_inference --evalset reconstructed_colmap --checkpoint_pt "$CHECKPOINT_PT" \
-      --model_id "$MODEL_ID" --save_dir "$W/afx_run" --split_path "$W/afx/split.json" --render_trajectory trajectory \
+      --model_id "$MODEL_ID" --save_dir "${AFX_SAVE:-$W/afx_run}" --split_path "$W/afx/split.json" --render_trajectory trajectory \
       --neighbor_selection_mode covisibility --save_frame_outputs_only ${AFX_ARGS:-} )
-  "$CPUPY" "$CA" collect --paths "$W" --afx-run "$W/afx_run" --seq "$SEQ"
+  "$CPUPY" "$CA" collect --paths "$W" --afx-run "${AFX_SAVE:-$W/afx_run}" --seq "$SEQ"
 }
 st_distill() {
   gs_env
