@@ -59,7 +59,7 @@ CAND="$T/textured.ply"; SRC="$T/src.npz"
 if [ "${ENV:-0}" = 1 ]; then   # environment prior: floor / walls continued behind + under the objects (env_prior.py)
   IPY="${INPAINT_VENV:-$CEAR_WS/venv-inpaint}/bin/python"
   needt "$T/env/textured_env.ply" && "$IPY" scripts/object_priors/env_prior.py --ply "$CAND" --src "$SRC" --support "$D/support.npz" \
-    --objects "$D/objects" --cloud "$CLOUD" --sim3-json "$P/sim3.json" --out-dir "$T/env" \
+    --objects "$D/objects" --cloud "$CLOUD" --sim3-json "$P/sim3.json" --out-dir "$T/env" --dataset "$DATA" --splat-depth-dir "$D/depth" \
     --lama-pt "${LAMA_PT:-$CEAR_WS/torch-hub/lama/big-lama.pt}" ${ENV_ARGS:-}
   CAND="$T/env/textured_env.ply"; SRC="$T/env/src_env.npz"
   [ "${REFIT:-0}" = 0 ] || { echo "ENV=1 with REFIT: refit reads textured.ply - use REFIT=0"; exit 1; }
