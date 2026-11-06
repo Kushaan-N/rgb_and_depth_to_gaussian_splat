@@ -2,7 +2,7 @@
 """Cosmetic unseen sides by IMAGE repair: render camera paths that orbit each free-standing object, repair the renders
 with a video world model (NVIDIA ArtiFixer, conditioned on the nearest real training frames), distil the repaired frames
 back into ONLY the objects' gaussians. Invents plausible backs / interiors (they need not match real images); every
-gaussian outside the object zones is frozen (rows byte-identical), and the real training frames stay in the loss so
+gaussian outside the object zones is frozen (rows byte-identical; --zone-min-h 0.02 keeps the floor layer frozen, --max-scale-m caps growth), and the real training frames stay in the loss so
 seen views stay close.
 
   paths    (CPU) per object (find_objects.py) and ring height: a path that STARTS at the real training view that best
@@ -23,7 +23,8 @@ seen views stay close.
   distill  (gsplat venv, GPU) fine-tune the gaussians inside the object zones (local min-area box + --zone-m, floor to
            top + --zone-m; colour AND geometry) plus new low-opacity gaussians seeded on each object's closed 2.5D surface
            (complete_objects.object_surface) where no opaque zone gaussian is within --seed-free-m, viewer-exact (--sort dual, display scale --display-scale): real training
-           frames that see a zone (full image L1+SSIM, share --real-frac) mixed with repaired path frames (L1+SSIM inside
+           frames that see a zone (full image L1+SSIM, share --real-frac; --freeze-seen: zone gaussians centred on a training view's
+           rendered surface stay frozen too) mixed with repaired path frames (L1+SSIM inside
            the object mask; pixels a training view saw weighted --seen-weight). Trainable gaussians that end below
            --prune-opacity are dropped. Writes <out>.ply + <out>_distill.json (real-frame PSNR before/after).
 
@@ -152,14 +153,14 @@ def paths(args):
 
 
 # ---------------------------------------------------------------- zones (shared by prep / distill)
-def zones(Gm, ometa, opts, zone_m):
+def zones(Gm, ometa, opts, zone_m, min_h=-0.02):
     """-> per object: (row indices of the gaussians in its zone, closed 2.5D surface samples (metric), Obj)."""
     from complete_objects import object_surface
     n_f = np.array(ometa["floor"]["n"]); d_f = float(ometa["floor"]["d"]); out = {}
     for o, X in zip(ometa["objects"], opts):
         ob = obj_frame(X, n_f, d_f); Lx = ob.loc(X); hmax = float(np.percentile(Lx[:, 2], 99))
         Lg = ob.loc(Gm); zh = ob.half + zone_m
-        inz = np.nonzero((np.abs(Lg[:, 0]) <= zh[0]) & (np.abs(Lg[:, 1]) <= zh[1]) & (Lg[:, 2] > -0.02) &
+        inz = np.nonzero((np.abs(Lg[:, 0]) <= zh[0]) & (np.abs(Lg[:, 1]) <= zh[1]) & (Lg[:, 2] > min_h) &
                          (Lg[:, 2] < hmax + zone_m))[0]
         out[o["id"]] = (inz, object_surface(X, n_f, d_f, 0.03, 0.03)[0], ob)
     return out
@@ -325,6 +326,31 @@ def pathmontage(args):
 
 
 # ---------------------------------------------------------------- distill (GPU)
+def seen_gaussians(p, deg, dataset, args, dev, cand):
+    """bool (N,): candidate gaussians (opacity > --seen-min-opacity) whose centre lies on the rendered surface of some
+    training view (|z - D| <= max(--seen-tol-m, 3 % D)) = what a camera saw; viewer-exact renders at display scale 1.5."""
+    import torch
+    from finetune_ply_viewer import ViewerRaster, cam_args, frames, to_t
+    s = sim3(args.sim3_json)[0]
+    idx = np.nonzero(cand & (torch.sigmoid(p["opacities"]).cpu().numpy() > args.seen_min_opacity))[0]
+    X = p["means"][torch.tensor(idx, device=dev)]; seen = torch.zeros(len(idx), dtype=torch.bool, device=dev)
+    Rv = ViewerRaster("ss352", "exact", display_scale=1.5, sort="depth")
+    with torch.no_grad():
+        for name, cam, c2w in frames(dataset, 0, "all"):
+            fx, fy, cx, cy, W, H = cam_args(cam); w2c = to_t(np.linalg.inv(c2w), dev)
+            pc_ = X @ w2c[:3, :3].T + w2c[:3, 3]; z = pc_[:, 2]; zs = z.clamp_min(1e-6)
+            u = (fx * pc_[:, 0] / zs + cx).floor().long(); v = (fy * pc_[:, 1] / zs + cy).floor().long()
+            ok = (z > 0.05) & (u >= 0) & (u < W) & (v >= 0) & (v < H)
+            if not bool(ok.any()):
+                continue
+            _, a, dep = Rv.render(p, w2c, fx, fy, cx, cy, W, H, sh_degree=deg, depth=True)
+            D = torch.where(a > 0.5, dep, torch.zeros_like(dep))[v.clamp(0, H - 1), u.clamp(0, W - 1)]
+            seen |= ok & (D > 0) & ((z - D).abs() <= torch.clamp(0.03 * D, min=args.seen_tol_m / s))
+    out = np.zeros(len(cand), bool); out[idx[seen.cpu().numpy()]] = True
+    print(f"[distill] {int(out.sum()):,} of {int(cand.sum()):,} zone gaussians lie on a training view's surface: frozen", flush=True)
+    return out
+
+
 def distill(args):
     import torch
     from PIL import Image
@@ -336,10 +362,12 @@ def distill(args):
     meta = json.load(open(os.path.join(args.paths, "paths.json")))
     vertex, p0 = load_ply(args.ply, dev); deg = sh_deg(p0); N = len(p0["means"])
     Gm = s * (p0["means"].double().cpu().numpy() @ R.T) + t
-    Z = zones(Gm, ometa, opts, args.zone_m)
+    Z = zones(Gm, ometa, opts, args.zone_m, args.zone_min_h)
     zone = np.zeros(N, bool)
     for inz, _, _ in Z.values():
         zone[inz] = True
+    if args.freeze_seen:                                                     # zone gaussians a training view sees stay frozen
+        zone &= ~seen_gaussians(p0, deg, args.dataset, args, dev, zone)
     zi = np.nonzero(zone)[0]; fi = np.nonzero(~zone)[0]
     # seeds: closed 2.5D surface samples, low opacity, colour of the nearest zone gaussian
     op0 = torch.sigmoid(p0["opacities"]).cpu().numpy()
@@ -436,6 +464,9 @@ def distill(args):
             if prm.grad is not None:
                 prm.grad[~torch.isfinite(prm.grad)] = 0
         opt.step()
+        if args.max_scale_m > 0:                                            # no growing haze sheets in front of the object
+            with torch.no_grad():
+                params["scales"].clamp_(max=float(np.log(args.max_scale_m / s)))
         if step % args.log_every == 0 or step == 1:
             print(f"[distill] step {step:6d} {'real' if is_real else 'path'} loss {loss.item():.4f} "
                   f"mem {torch.cuda.max_memory_allocated() / 2**30:.1f}G ({time.time() - t0:.0f}s)", flush=True)
@@ -502,6 +533,10 @@ def main():
     d.add_argument("--means-lr", type=float, default=4e-5); d.add_argument("--means-lr-final", type=float, default=2e-6)
     d.add_argument("--opacity-lr", type=float, default=0.025)
     d.add_argument("--display-scale", default="1.5:4"); d.add_argument("--sort", default="dual", choices=("depth", "radial", "dual"))
+    d.add_argument("--zone-min-h", type=float, default=-0.02, help="zone starts this high above the floor (0.02: floor layer frozen)")
+    d.add_argument("--max-scale-m", type=float, default=0.0, help="cap trainable gaussians' scales (m); 0 = off")
+    d.add_argument("--freeze-seen", action="store_true", help="zone gaussians on a training view's rendered surface stay frozen")
+    d.add_argument("--seen-tol-m", type=float, default=0.02); d.add_argument("--seen-min-opacity", type=float, default=0.1)
     d.add_argument("--min-zone-px", type=int, default=50); d.add_argument("--eval-every", type=int, default=4)
     d.add_argument("--log-every", type=int, default=250); d.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
