@@ -11,7 +11,7 @@
 #     configs/mocap2_well-lit_trot.yaml
 # Env: NAME (viewer_msd60k_wd_clean_ft2_solid3), IN (<E>/<NAME>.ply), METHOD, TAG (METHOD with , -> _), LEARNED,
 #      BUILD_ARGS, REFIT (1), REFIT_ARGS ("--train-zone-m 0.25 --iters 2000"), BUDGET_ARGS ("--min-w 0.002 --iters 12"),
-#      REFIT=zone (zone_refit.py, ZREFIT_ARGS), BUDGET_MODE=zone|none (none = cosmetic, no budget; zone = GT-aware budget in the object zones: scripts/object_priors/zone_budget.py), STOP_AFTER=build (prep + build only), MOVES ("0 -0.3 1.0;0 -0.6 1.5"), EVERY_OFF (40), FORCE=1 (redo every stage of this TAG).
+#      ENV=1 (env_prior.py after the build, ENV_ARGS; REFIT=0), REFIT=zone (zone_refit.py, ZREFIT_ARGS), BUDGET_MODE=zone|none (none = cosmetic, no budget; zone = GT-aware budget in the object zones: scripts/object_priors/zone_budget.py), STOP_AFTER=build (prep + build only), MOVES ("0 -0.3 1.0;0 -0.6 1.5"), EVERY_OFF (40), FORCE=1 (redo every stage of this TAG).
 #SBATCH -J obj-priors
 #SBATCH -p gpu-highvram,gpu-preempt-highvram
 #SBATCH --gres=gpu:1
@@ -56,6 +56,14 @@ LA=(); [ -n "${LEARNED:-}" ] && LA=(--learned-dir "$LEARNED")
 needt "$T/meta.npz" && "$CPUPY" "$OP" build --ply "$IN" --support "$D/support.npz" --objects "$D/objects" --cloud "$CLOUD" \
   --sim3-json "$P/sim3.json" --dataset "$DATA" --splat-depth-dir "$D/depth" --method "$METHOD" "${LA[@]}" --out-dir "$T" ${BUILD_ARGS:-}
 CAND="$T/textured.ply"; SRC="$T/src.npz"
+if [ "${ENV:-0}" = 1 ]; then   # environment prior: floor / walls continued behind + under the objects (env_prior.py)
+  IPY="${INPAINT_VENV:-$CEAR_WS/venv-inpaint}/bin/python"
+  needt "$T/env/textured_env.ply" && "$IPY" scripts/object_priors/env_prior.py --ply "$CAND" --src "$SRC" --support "$D/support.npz" \
+    --objects "$D/objects" --cloud "$CLOUD" --sim3-json "$P/sim3.json" --out-dir "$T/env" \
+    --lama-pt "${LAMA_PT:-$CEAR_WS/torch-hub/lama/big-lama.pt}" ${ENV_ARGS:-}
+  CAND="$T/env/textured_env.ply"; SRC="$T/env/src_env.npz"
+  [ "${REFIT:-0}" = 0 ] || { echo "ENV=1 with REFIT: refit reads textured.ply - use REFIT=0"; exit 1; }
+fi
 [ "${STOP_AFTER:-}" = build ] && { echo OBJECT_PRIORS_BUILD_ONLY; exit 0; }
 if [ "${REFIT:-1}" = zone ]; then
   echo "== 2. zone refit: orbit terms on the prior's free rows only (scripts/object_priors/zone_refit.py)"
