@@ -9,7 +9,7 @@
 #   WHY=... scripts/sub.sh -A pi_donghyunkim_umass_edu --exclude=gpu010,gpu035 -o logs/%x-%j.out sbatch/mv_prior.sbatch \
 #     configs/mocap2_well-lit_trot.yaml
 # Env: NAME (viewer_msd60k_wd_clean_ft2_solid3), IN, TAG (variant suffix), GEN (generated-view dir, shared by TAGs: GEN_TAG),
-#      GEN_ARGS, REG_ARGS, REFIT_ARGS, STOP_AFTER=register|refit, FORCE=1 (redo refit + later stages), MOVES, EVERY_OFF.
+#      GEN_ARGS, REG_ARGS, REFIT_ARGS, BUDGET=1 (+BUDGET_ARGS: solidify_unseen.py budget after the refit), STOP_AFTER=register|refit, FORCE=1 (redo refit + later stages), MOVES, EVERY_OFF.
 #SBATCH -J mv-prior
 #SBATCH -p gpu-highvram,gpu-preempt-highvram
 #SBATCH --gres=gpu:1
@@ -54,8 +54,15 @@ echo "== 3. refit on the generated views"
 needt "$T/refit.ply" && "$SPY" scripts/object_priors/mv_refit.py --ply "$IN" --support "$D/support.npz" --gen "$G" \
   --dataset "$DATA" "$TEST" --sim3-json "$P/sim3.json" --objects "$D/objects" --out "$T/refit.ply" ${REFIT_ARGS:-}
 [ "${STOP_AFTER:-}" = refit ] && { echo MV_PRIOR_REFIT_ONLY; exit 0; }
+CAND="$T/refit.ply"
+if [ "${BUDGET:-0}" = 1 ]; then   # per-view visibility budget vs the input: reverts what shows in a training view (> 8/255 cluster / > 0.3 dB)
+  echo "== 3b. visibility budget"
+  needt "$T/budget.ply" && "$SPY" "$SO" budget --input "$IN" --cand "$T/refit.ply" --src "$T/refit_src.npz" --dataset "$DATA" "$TEST" \
+    --out "$T/budget.ply" ${BUDGET_ARGS:---min-w 0.002 --iters 12}
+  CAND="$T/budget.ply"
+fi
 echo "== 4. shfit + exports"
-needt "$OUTPLY" && "$SPY" "$SO" shfit --ply "$T/refit.ply" --ref "$T/refit.ply" --dataset "$DATA" "$TEST" --out "$OUTPLY"
+needt "$OUTPLY" && "$SPY" "$SO" shfit --ply "$CAND" --ref "$CAND" --dataset "$DATA" "$TEST" --out "$OUTPLY"
 [ -z "$FRAME" ] || { needt "${OUTPLY%.ply}_refaxes.ply" && "$CPUPY" scripts/sim3_align_splat.py --colmap-model "$P/dataset/sparse/0" \
   --gt-model "$FRAME" --in-ply "$OUTPLY" --out-ply "${OUTPLY%.ply}_refaxes.ply"; }
 ls -la "$OUTPLY"*; md5sum "$OUTPLY" | tee "$T/output.md5"
