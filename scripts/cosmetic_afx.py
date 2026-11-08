@@ -377,6 +377,8 @@ def distill(args):
     if len(seeds):
         seeds = seeds[np.unique(np.floor(seeds / args.seed_cell).astype(np.int64), axis=0, return_index=True)[1]]
     ref = zi[op0[zi] > 0.3]
+    if len(seeds) and args.seed_min_h > 0:                                 # no seeds in the floor layer (haze at the foot)
+        seeds = seeds[seeds @ np.array(ometa["floor"]["n"]) + float(ometa["floor"]["d"]) > args.seed_min_h]
     if len(seeds) and args.seed_free_m > 0:                                # only where the zone has no solid gaussian yet
         solid = zi[op0[zi] > 0.5]
         if len(solid):
@@ -538,6 +540,7 @@ def main():
     d.add_argument("--opacity-lr", type=float, default=0.025)
     d.add_argument("--display-scale", default="1.5:4"); d.add_argument("--sort", default="dual", choices=("depth", "radial", "dual"))
     d.add_argument("--only-objects", type=int, nargs="*", default=[], help="object ids to repair (default: all)")
+    d.add_argument("--seed-min-h", type=float, default=0.0, help="no seeds below this height above the floor (m)")
     d.add_argument("--zone-min-h", type=float, default=-0.02, help="zone starts this high above the floor (0.02: floor layer frozen)")
     d.add_argument("--max-scale-m", type=float, default=0.0, help="cap trainable gaussians' scales (m); 0 = off")
     d.add_argument("--freeze-seen", action="store_true", help="zone gaussians on a training view's rendered surface stay frozen")
