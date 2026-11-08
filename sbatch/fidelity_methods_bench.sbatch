@@ -12,6 +12,8 @@
 #   final x0.1) | freq[<lambda>] (0.1) | hard[<lambda>] (0.4) | grad[<lambda>] (0.1) | pixgs | pixgsd<x> |
 #   shn<lambda> (--shn-reg) | c2f<a> (--c2f) | emul / eerr (--eas-error mul / err) | aniso<lambda> (--aniso-reg, ratio 10) | ssl<x> (--ssim-lambda) | srad / sdual (--sort radial / dual) | ms<lambda> (--msssim-lambda) | blur<K> (--blur-kernel) | blr<x> (--blur-lr) | gt<threshold> (--grad-threshold) | bilag (--appearance bilagrid) | ss352 (viewer profile; default pc274) |
 #   drop<r> (--drop-rate, DropGaussian) | vw<lambda> (--vwarp-lambda) | vwp<p> (--vwarp-prob) | vwj<x> (--vwarp-jitter) | pose<lr> (--pose-lr) | poshp<N> (--pose-hp) | sam<lambda> (--sam-lambda) | samr<rho> (--sam-rho) | hp<t> (flags of sbatch/hp_search.sbatch trial t).
+#   hylp / hylpr (HY-World 2.0 LPIPS 0.2->0.1; r: official [0,1] input quirk) | hyn / hynm (HY-World depth-to-normal vs WorldMirror 2.0 /
+#   MoGe-2 normals, $P/hyworld/normals_{wm,moge2}) | shw<gamma> (--sharp-gamma) | spj<px> (--spj-px).
 # TSI (8): hold-out interval of the training set (0 + VT_DATASET=<all-frames set>: deliverable-style splats); 
 # fm_ens[_jt<x>][_jr<deg>][_pf<frac>][_it<n>][_lr<x>][_pmi][_sdual|_srad][_t<label>] (pmi: pseudo views interpolated on the path): multi-seed ensemble distillation (scripts/methods/ensemble_distill.py)
 #   of the arms in $TEACHERS (fm_ensv...: the same inside the viewer-exact fine-tune, see ensv_arm()) (default "igs4m_pc274 fm_seed1 fm_seed2", which must exist) into one splat.
@@ -60,6 +62,9 @@ arm_args() {  # fm_<tokens> -> A (extra trainer flags), PROF
       drop*) A+=(--drop-rate "${t#drop}") ;;  vwp*) A+=(--vwarp-prob "${t#vwp}") ;;  vwj*) A+=(--vwarp-jitter "${t#vwj}") ;;
       vw*) A+=(--vwarp-lambda "${t#vw}") ;;     samr*) A+=(--sam-rho "${t#samr}") ;;  sam*) A+=(--sam-lambda "${t#sam}") ;;     poshp*) A+=(--pose-hp "${t#poshp}") ;;  pose*) A+=(--pose-lr "${t#pose}") ;;
       ss352|pc274) PROF="$t" ;;
+      hylp) A+=(--hy-lpips 0.2:0.1) ;;  hylpr) A+=(--hy-lpips 0.2:0.1 --hy-lpips-raw) ;;   # HY-World 2.0 objective (scripts/methods/hyworld.py)
+      hyn|hynm) A+=(--hy-normal 0.1:0.5 --hy-normal-dir "$P/hyworld/normals_$([ "$t" = hyn ] && echo wm || echo moge2)") ;;   # sbatch/hyworld_normals.sbatch
+      shw*) A+=(--sharp-gamma "${t#shw}") ;;   spj*) A+=(--spj-px "${t#spj}") ;;   # sharpness-weighted frames / sub-pixel jitter
       *) echo "unknown token $t in $1"; return 1 ;;
     esac
   done
