@@ -363,6 +363,8 @@ def distill(args):
     vertex, p0 = load_ply(args.ply, dev); deg = sh_deg(p0); N = len(p0["means"])
     Gm = s * (p0["means"].double().cpu().numpy() @ R.T) + t
     Z = zones(Gm, ometa, opts, args.zone_m, args.zone_min_h)
+    if args.only_objects:                                                   # e.g. only the A-frame
+        Z = {k: v for k, v in Z.items() if k in args.only_objects}
     zone = np.zeros(N, bool)
     for inz, _, _ in Z.values():
         zone[inz] = True
@@ -405,6 +407,8 @@ def distill(args):
     pf = {n: (cam, c2w) for n, cam, c2w in frames(args.paths, 0, "all")}
     orb = []
     for sc in meta["scenes"]:
+        if args.only_objects and sc["object"] not in args.only_objects:
+            continue
         for nm in sc["frames"][args.skip_first:]:
             f = os.path.join(args.paths, "repaired", nm)
             if not os.path.exists(f):
@@ -533,6 +537,7 @@ def main():
     d.add_argument("--means-lr", type=float, default=4e-5); d.add_argument("--means-lr-final", type=float, default=2e-6)
     d.add_argument("--opacity-lr", type=float, default=0.025)
     d.add_argument("--display-scale", default="1.5:4"); d.add_argument("--sort", default="dual", choices=("depth", "radial", "dual"))
+    d.add_argument("--only-objects", type=int, nargs="*", default=[], help="object ids to repair (default: all)")
     d.add_argument("--zone-min-h", type=float, default=-0.02, help="zone starts this high above the floor (0.02: floor layer frozen)")
     d.add_argument("--max-scale-m", type=float, default=0.0, help="cap trainable gaussians' scales (m); 0 = off")
     d.add_argument("--freeze-seen", action="store_true", help="zone gaussians on a training view's rendered surface stay frozen")
