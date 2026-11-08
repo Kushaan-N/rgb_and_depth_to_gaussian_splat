@@ -664,7 +664,7 @@ def main():
         deg = min(step // 1000, args.sh_degree)
         if args.min_px > 0 and (rast.floor is None or len(rast.floor) != len(params["means"]) or step % 1000 == 0):
             rast.floor = ViewerGS.floors(params, tr, args.min_px)
-        img, alpha, d, info = rast.render(params, v, deg, ss=args.ss, depth=v[6] is not None,
+        img, alpha, d, info = rast.render(params, v, deg, ss=args.ss, depth=v[6] is not None or fm.need_depth,
                                           absgrad=args.strategy in ("improved", "default"))
         strat.step_pre_backward(params, opts, state, step, info)
         gt = v[5].float() / 255
@@ -679,7 +679,7 @@ def main():
             img = img * (1 - masks[k]) + gt * masks[k]
         loss = (1 - args.ssim_lambda) * (img - gt).abs().mean() + \
             args.ssim_lambda * (1 - ssim(img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None]))
-        loss = loss + fm.loss(img, gt, step, info)
+        loss = loss + fm.loss(img, gt, step, info, depth=d, view=v)
         ld = torch.zeros((), device=dev)
         if v[6] is not None:
             key = (v[2], v[3], tuple(v[1].flatten().tolist()))
