@@ -9,7 +9,7 @@
 #   WHY=... scripts/sub.sh -A pi_donghyunkim_umass_edu --exclude=gpu010,gpu035 -o logs/%x-%j.out sbatch/mv_prior.sbatch \
 #     configs/mocap2_well-lit_trot.yaml
 # Env: PRIOR=zero123|seva (seva: scripts/object_priors/mv_seva.py, venv-seva, GEN_ARGS e.g. "--ids 3 4 5"), COMPARE=<variant dir>,
-#      REFIT_MODE=objfit (mv_objfit.py: standalone object splats swapped in; REFIT_ARGS e.g. "--ids 3 4"),
+#      REFIT_MODE=brickbox (mv_brickbox.py, REFIT_ARGS "--ids 3 4 5") | objfit (mv_objfit.py: standalone object splats swapped in; REFIT_ARGS e.g. "--ids 3 4"),
 #      NAME (viewer_msd60k_wd_clean_ft2_solid3), IN, REF_NAME (stage-0 objects/orbit source for a new NAME), TAG (variant suffix), GEN (generated-view dir, shared by TAGs: GEN_TAG),
 #      GEN_ARGS, REG_ARGS, REFIT_ARGS, BUDGET=1 (+BUDGET_ARGS: solidify_unseen.py budget after the refit), STOP_AFTER=prep|register|refit, FORCE=1 (redo refit + later stages), MOVES, EVERY_OFF.
 #SBATCH -J mv-prior
@@ -55,7 +55,9 @@ need "$D/support.npz" && "$SPY" "$SO" support --ply "$IN" --dataset "$DATA" "$TE
 [ -x "$MPY" ] || { echo "venv-mv missing: sbatch/mv_venv.sbatch"; exit 1; }
 echo "== $NAME TAG=${TAG:-<none>} GEN=$G"
 COMMON=(--objects "$D/objects" --sim3-json "$P/sim3.json" --dataset "$DATA" --splat-depth-dir "$D/depth" --out-dir "$G")
-if [ "${PRIOR:-zero123}" = seva ]; then   # Stable Virtual Camera: real crops + real cameras in, orbit views out (mv_seva.py)
+if [ "${REFIT_MODE:-zone}" = brickbox ]; then
+  echo "== 1-2. (brickbox: no generated views)"
+elif [ "${PRIOR:-zero123}" = seva ]; then   # Stable Virtual Camera: real crops + real cameras in, orbit views out (mv_seva.py)
   SVPY="${SEVA_VENV:-$CEAR_WS/venv-seva}/bin/python"; MS=scripts/object_priors/mv_seva.py
   echo "== 1. generate (SEVA)"
   need "$G/generate.json" && "$SVPY" "$MS" generate "${COMMON[@]}" ${GEN_ARGS:-}
@@ -68,7 +70,11 @@ else
   { need "$G/register.json" || [ "${FORCE_REG:-0}" = 1 ]; } && "$MPY" "$MG" register "${COMMON[@]}" --ply "$IN" --support "$D/support.npz" ${REG_ARGS:-}
 fi
 [ "${STOP_AFTER:-}" = register ] && { echo MV_PRIOR_REGISTER_ONLY; exit 0; }
-if [ "${REFIT_MODE:-zone}" = objfit ]; then   # standalone object splats from the generated views, swapped into the zones
+if [ "${REFIT_MODE:-zone}" = brickbox ]; then   # clean textured stepped box per stack (mv_brickbox.py; needs no generated views)
+  echo "== 3. textured stepped boxes (mv_brickbox.py)"
+  needt "$T/refit.ply" && "$SPY" scripts/object_priors/mv_brickbox.py --ply "$IN" --support "$D/support.npz" --objects "$D/objects" \
+    --sim3-json "$P/sim3.json" --dataset "$DATA" --splat-depth-dir "$D/depth" --out "$T/refit.ply" ${REFIT_ARGS:-}
+elif [ "${REFIT_MODE:-zone}" = objfit ]; then   # standalone object splats from the generated views, swapped into the zones
   echo "== 3. standalone object fit + swap + colour harmonisation (mv_objfit.py)"
   needt "$T/refit.ply" && "$SPY" scripts/object_priors/mv_objfit.py --ply "$IN" --support "$D/support.npz" --gen "$G" \
     --dataset "$DATA" "$TEST" --sim3-json "$P/sim3.json" --objects "$D/objects" --splat-depth-dir "$D/depth" --out "$T/refit.ply" ${REFIT_ARGS:-}
