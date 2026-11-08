@@ -9,6 +9,7 @@
 #   WHY=... scripts/sub.sh -A pi_donghyunkim_umass_edu --exclude=gpu010,gpu035 -o logs/%x-%j.out sbatch/mv_prior.sbatch \
 #     configs/mocap2_well-lit_trot.yaml
 # Env: PRIOR=zero123|seva (seva: scripts/object_priors/mv_seva.py, venv-seva, GEN_ARGS e.g. "--ids 3 4 5"), COMPARE=<variant dir>,
+#      REFIT_MODE=objfit (mv_objfit.py: standalone object splats swapped in; REFIT_ARGS e.g. "--ids 3 4"),
 #      NAME (viewer_msd60k_wd_clean_ft2_solid3), IN, REF_NAME (stage-0 objects/orbit source for a new NAME), TAG (variant suffix), GEN (generated-view dir, shared by TAGs: GEN_TAG),
 #      GEN_ARGS, REG_ARGS, REFIT_ARGS, BUDGET=1 (+BUDGET_ARGS: solidify_unseen.py budget after the refit), STOP_AFTER=prep|register|refit, FORCE=1 (redo refit + later stages), MOVES, EVERY_OFF.
 #SBATCH -J mv-prior
@@ -67,9 +68,15 @@ else
   { need "$G/register.json" || [ "${FORCE_REG:-0}" = 1 ]; } && "$MPY" "$MG" register "${COMMON[@]}" --ply "$IN" --support "$D/support.npz" ${REG_ARGS:-}
 fi
 [ "${STOP_AFTER:-}" = register ] && { echo MV_PRIOR_REGISTER_ONLY; exit 0; }
-echo "== 3. refit on the generated views"
-needt "$T/refit.ply" && "$SPY" scripts/object_priors/mv_refit.py --ply "$IN" --support "$D/support.npz" --gen "$G" \
-  --dataset "$DATA" "$TEST" --sim3-json "$P/sim3.json" --objects "$D/objects" --out "$T/refit.ply" ${REFIT_ARGS:-}
+if [ "${REFIT_MODE:-zone}" = objfit ]; then   # standalone object splats from the generated views, swapped into the zones
+  echo "== 3. standalone object fit + swap + colour harmonisation (mv_objfit.py)"
+  needt "$T/refit.ply" && "$SPY" scripts/object_priors/mv_objfit.py --ply "$IN" --support "$D/support.npz" --gen "$G" \
+    --dataset "$DATA" "$TEST" --sim3-json "$P/sim3.json" --objects "$D/objects" --splat-depth-dir "$D/depth" --out "$T/refit.ply" ${REFIT_ARGS:-}
+else
+  echo "== 3. refit on the generated views"
+  needt "$T/refit.ply" && "$SPY" scripts/object_priors/mv_refit.py --ply "$IN" --support "$D/support.npz" --gen "$G" \
+    --dataset "$DATA" "$TEST" --sim3-json "$P/sim3.json" --objects "$D/objects" --out "$T/refit.ply" ${REFIT_ARGS:-}
+fi
 [ "${STOP_AFTER:-}" = refit ] && { echo MV_PRIOR_REFIT_ONLY; exit 0; }
 CAND="$T/refit.ply"
 if [ "${BUDGET:-0}" = 1 ]; then   # per-view visibility budget vs the input: reverts what shows in a training view (> 8/255 cluster / > 0.3 dB)
