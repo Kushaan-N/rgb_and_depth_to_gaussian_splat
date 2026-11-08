@@ -8,7 +8,8 @@
 #   5. live SuperSplat: on-path held-out both sort modes vs the input, orbit montages + proxies, off-path moved + editor views
 #   WHY=... scripts/sub.sh -A pi_donghyunkim_umass_edu --exclude=gpu010,gpu035 -o logs/%x-%j.out sbatch/mv_prior.sbatch \
 #     configs/mocap2_well-lit_trot.yaml
-# Env: NAME (viewer_msd60k_wd_clean_ft2_solid3), IN, TAG (variant suffix), GEN (generated-view dir, shared by TAGs: GEN_TAG),
+# Env: PRIOR=zero123|seva (seva: scripts/object_priors/mv_seva.py, venv-seva, GEN_ARGS e.g. "--ids 3 4 5"), COMPARE=<variant dir>,
+#      NAME (viewer_msd60k_wd_clean_ft2_solid3), IN, TAG (variant suffix), GEN (generated-view dir, shared by TAGs: GEN_TAG),
 #      GEN_ARGS, REG_ARGS, REFIT_ARGS, BUDGET=1 (+BUDGET_ARGS: solidify_unseen.py budget after the refit), STOP_AFTER=register|refit, FORCE=1 (redo refit + later stages), MOVES, EVERY_OFF.
 #SBATCH -J mv-prior
 #SBATCH -p gpu-highvram,gpu-preempt-highvram
@@ -30,7 +31,7 @@ export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$CEAR_WS/playwright
 get() { "$CPUPY" scripts/cfg_get.py "$CFG" "$@"; }
 OUT="$(get paths.out_root)"; P="$OUT/pipeline"; E="$OUT/exports"; FRAME="$(get pipeline.export_frame_model "")"
 NAME="${NAME:-viewer_msd60k_wd_clean_ft2_solid3}"; IN="${IN:-$E/$NAME.ply}"; TAG="${TAG:-}"
-D="$P/object_priors/$NAME"; G="${GEN:-$D/mv_gen${GEN_TAG:+_$GEN_TAG}}"; T="$D/cosmetic_mv${TAG:+_$TAG}"
+D="$P/object_priors/$NAME"; GB=mv_gen; [ "${PRIOR:-zero123}" = seva ] && GB=mv_seva; G="${GEN:-$D/$GB${GEN_TAG:+_$GEN_TAG}}"; T="$D/cosmetic_mv${TAG:+_$TAG}"
 OUTPLY="$E/${NAME}_op_cosmetic_mv${TAG:+_$TAG}.ply"
 DATA="$P/onpath/data_orig"; TEST="$P/onpath/test"; RT="$P/viewer_bench/reference_dataset"
 CLOUD="$P/offpath/depth/lidar_static.ply"; [ -f "$CLOUD" ] || CLOUD="$P/depth_cloud.ply"
@@ -45,10 +46,18 @@ export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-12}"
 [ -x "$MPY" ] || { echo "venv-mv missing: sbatch/mv_venv.sbatch"; exit 1; }
 echo "== $NAME TAG=${TAG:-<none>} GEN=$G"
 COMMON=(--objects "$D/objects" --sim3-json "$P/sim3.json" --dataset "$DATA" --splat-depth-dir "$D/depth" --out-dir "$G")
-echo "== 1. generate"
-need "$G/generate.json" && "$MPY" "$MG" generate "${COMMON[@]}" ${GEN_ARGS:-}
-echo "== 2. register"
-{ need "$G/register.json" || [ "${FORCE_REG:-0}" = 1 ]; } && "$MPY" "$MG" register "${COMMON[@]}" --ply "$IN" --support "$D/support.npz" ${REG_ARGS:-}
+if [ "${PRIOR:-zero123}" = seva ]; then   # Stable Virtual Camera: real crops + real cameras in, orbit views out (mv_seva.py)
+  SVPY="${SEVA_VENV:-$CEAR_WS/venv-seva}/bin/python"; MS=scripts/object_priors/mv_seva.py
+  echo "== 1. generate (SEVA)"
+  need "$G/generate.json" && "$SVPY" "$MS" generate "${COMMON[@]}" ${GEN_ARGS:-}
+  echo "== 2. hull + seeds"
+  { need "$G/register.json" || [ "${FORCE_REG:-0}" = 1 ]; } && "$MPY" "$MS" hull "${COMMON[@]}" ${REG_ARGS:-}
+else
+  echo "== 1. generate"
+  need "$G/generate.json" && "$MPY" "$MG" generate "${COMMON[@]}" ${GEN_ARGS:-}
+  echo "== 2. register"
+  { need "$G/register.json" || [ "${FORCE_REG:-0}" = 1 ]; } && "$MPY" "$MG" register "${COMMON[@]}" --ply "$IN" --support "$D/support.npz" ${REG_ARGS:-}
+fi
 [ "${STOP_AFTER:-}" = register ] && { echo MV_PRIOR_REGISTER_ONLY; exit 0; }
 echo "== 3. refit on the generated views"
 needt "$T/refit.ply" && "$SPY" scripts/object_priors/mv_refit.py --ply "$IN" --support "$D/support.npz" --gen "$G" \
@@ -101,6 +110,7 @@ done
 [ -f "$LI/orbit/_viewer.json" ] || "$VPY" "${VS[@]}" --bg black --ply "$IN" --dataset "$D/orbit" --out-dir "$LI/orbit" | tail -1
 [ -f "$L/orbit/_viewer.json" ] || "$VPY" "${VS[@]}" --bg black --ply "$OUTPLY" --dataset "$D/orbit" --out-dir "$L/orbit" | tail -1
 "$CPUPY" "$SO" montage --dirs "before=$LI/orbit" "after=$L/orbit" --out-dir "$L/orbit_montage"
+CMP="${COMPARE:-}"; [ -n "$CMP" ] && [ -d "$D/$CMP/live/orbit" ] && "$CPUPY" "$SO" montage --dirs "$CMP=$D/$CMP/live/orbit" "this=$L/orbit" --out-dir "$L/orbit_montage_vs_$CMP" || true
 V6="$D/cosmetic_v6/live/orbit"; [ -d "$V6" ] && "$CPUPY" "$SO" montage --dirs "v6=$V6" "mv=$L/orbit" --out-dir "$L/orbit_montage_vs_v6" || true
 "$SPY" "$SO" eval --ply "before=$IN" "after=$OUTPLY" --orbit "$D/orbit" --objects "$D/objects" --sim3-json "$P/sim3.json" \
   --cloud "$CLOUD" --live "before=$LI/orbit" "after=$L/orbit" --json-out "$L/proxies.json" | tail -1
