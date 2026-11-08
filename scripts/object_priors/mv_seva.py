@@ -9,7 +9,8 @@ orbit that must be registered by silhouette), SEVA takes the REAL training crops
            fills --fill of the frame) -> <out>/obj<id>/{inputs,targets}/*.png + cams.json
   hull     (venv-mv, GPU) BiRefNet object masks of every input crop and target (kept within the projected object box),
            visual hull = real masks AND >= n - --gen-miss target masks, surface seeds (minus seeds a training view shows),
-           -> mv_refit.py's interface: <out>/views/{images,masks (+ _hull),sparse/0}, seeds.npz, register.json
+           -> mv_refit.py's interface: <out>/views/{images,masks (+ _hull),sparse/0}, seeds.npz, register.json;
+           mv_objfit.py also reads <out>/views_real (the masked real crops) and seeds.npz A* (the whole hull surface)
 
     python scripts/object_priors/mv_seva.py generate --objects D/objects --sim3-json sim3.json --dataset <train ds> \
         --splat-depth-dir D/depth --out-dir S --ids 3 4 5
@@ -146,6 +147,7 @@ def hull(a):
     for sd_ in ("images", "masks", "sparse/0"):
         os.makedirs(os.path.join(V, sd_), exist_ok=True)
     crow, irow, rep, seeds = [], [], [], {"X": [], "N": [], "C": [], "obj": []}
+    rcrow, rirow = [], []
     for cj in sorted(glob.glob(os.path.join(a.out_dir, "obj*", "cams.json"))):
         J = json.load(open(cj)); oid = J["id"]
         if a.ids and oid not in a.ids:
@@ -197,6 +199,17 @@ def hull(a):
             col[ok] = img[vi[ok], ui[ok]] / 255.0; best[ok] = cs[ok]
         col[np.isnan(col[:, 0])] = np.nanmedian(col, 0) if np.isfinite(col).any() else 0.5
         k = ~shown
+        for k_, v_ in (("AX", Psd), ("AN", Nd), ("AC", col), ("Aobj", np.full(len(Psd), oid))):   # whole hull surface (mv_objfit.py)
+            seeds.setdefault(k_, []).append(v_)
+        VR = os.path.join(a.out_dir, "views_real")                         # real input crops + masks (mv_objfit.py)
+        for sd_ in ("images", "masks", "sparse/0"):
+            os.makedirs(os.path.join(VR, sd_), exist_ok=True)
+        for i_, ((img, K, c2w), m) in enumerate(zip(ins, rm)):
+            nm = f"obj{oid}_in{i_:02d}.png"; Image.fromarray(img).save(os.path.join(VR, "images", nm))
+            Image.fromarray((m * 255).astype(np.uint8)).save(os.path.join(VR, "masks", nm.replace(".png", "_mask.png")))
+            Z = img.shape[0]; w2c = np.linalg.inv(c2w); q = rot2qvec(w2c[:3, :3]); cid = len(rcrow) + 1
+            rcrow.append(f"{cid} PINHOLE {Z} {Z} {K[0, 0]:.6f} {K[1, 1]:.6f} {K[0, 2]:.6f} {K[1, 2]:.6f}\n")
+            rirow.append(f"{len(rirow) + 1} {' '.join(f'{x:.9f}' for x in q)} {' '.join(f'{x:.9f}' for x in w2c[:3, 3])} {cid} {nm}\n\n")
         seeds["X"].append(Psd[k]); seeds["N"].append(Nd[k]); seeds["C"].append(col[k]); seeds["obj"].append(np.full(int(k.sum()), oid))
         ov = []
         for (img, K, c2w, nm), m in zip(tgs, gm):
@@ -223,6 +236,11 @@ def hull(a):
     open(os.path.join(V, "sparse", "0", "cameras.txt"), "w").writelines(crow)
     open(os.path.join(V, "sparse", "0", "images.txt"), "w").writelines(irow)
     open(os.path.join(V, "sparse", "0", "points3D.txt"), "w").write("")
+    if rcrow:
+        VR = os.path.join(a.out_dir, "views_real")
+        open(os.path.join(VR, "sparse", "0", "cameras.txt"), "w").writelines(rcrow)
+        open(os.path.join(VR, "sparse", "0", "images.txt"), "w").writelines(rirow)
+        open(os.path.join(VR, "sparse", "0", "points3D.txt"), "w").write("")
     np.savez_compressed(os.path.join(a.out_dir, "seeds.npz"), **{k_: np.concatenate(v_) for k_, v_ in seeds.items()})
     json.dump(rep, open(os.path.join(a.out_dir, "register.json"), "w"), indent=1)
 
