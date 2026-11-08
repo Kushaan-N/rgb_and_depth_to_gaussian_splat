@@ -6,7 +6,7 @@ cosmetic: the backs are invented by the diffusion model).
            + the real input crops (weight --real-w), both masked to the object (BiRefNet): L1+SSIM of the render composited
            on grey vs the masked target, (alpha - mask)^2, anti-needle; --densify-at: the top --densify-frac rows by mean
            position-gradient are split in two (brick detail); pruned at opacity < 0.02.
-  2. swap  base rows in the object's box (mv_seva register box + --zone-m, above the floor) that no training view
+  2. swap  (--wholesale: every base row in the box above --floor-m goes, the whole fitted splat comes in) base rows in the object's box (mv_seva register box + --zone-m, above the floor) that no training view
            constrains (support max blend weight < --del-w) are deleted; well-seen base rows are kept; object rows a
            training view would show (in front of the base's rendered depth: trellis_complete.Vis.shows) are dropped, the
            rest get their opacity ramped down within --blend-m of a kept well-seen base row (seam).
@@ -40,6 +40,8 @@ def main():
     ap.add_argument("--max-scale-m", type=float, default=0.012); ap.add_argument("--zone-m", type=float, default=0.03)
     ap.add_argument("--floor-m", type=float, default=0.01); ap.add_argument("--del-w", type=float, default=0.02)
     ap.add_argument("--face-w", type=float, default=0.2); ap.add_argument("--blend-m", type=float, default=0.015)
+    ap.add_argument("--wholesale", action="store_true", help="delete every base row in the (tight) box above the floor and insert the "
+                    "whole fitted splat (no visibility drop, no seam ramp): seen views of the stack change")
     ap.add_argument("--harm-iters", type=int, default=400); ap.add_argument("--display-scale", type=float, default=1.8)
     # trellis_complete.Vis parameters (training-view visibility)
     ap.add_argument("--frame-stride", type=int, default=1); ap.add_argument("--max-incidence", type=float, default=85.0)
@@ -142,9 +144,13 @@ def main():
         r = reg[oid]; c0, A = np.array(r["c0"]), np.array(r["axes"])
         L = (Xm - c0) @ A; lo, hi = np.array(r["box_lo"]) - a.zone_m, np.array(r["box_hi"]) + a.zone_m
         inz = np.all((L[:, :2] >= lo[:2]) & (L[:, :2] <= hi[:2]), 1) & (L[:, 2] > a.floor_m) & (L[:, 2] <= hi[2])
-        d_ = inz & (wmax < a.del_w); dele |= d_; ks = inz & (wmax >= a.face_w) & (opb > 0.5); kept_seen |= ks
+        if a.wholesale:                                                    # the stack is replaced by its fitted splat
+            d_ = inz; ks = np.zeros(N0, bool)
+        else:
+            d_ = inz & (wmax < a.del_w); ks = inz & (wmax >= a.face_w) & (opb > 0.5)
+        dele |= d_; kept_seen |= ks
         Xq = Q["means"].cpu().numpy().astype(np.float64)
-        shown = vis.shows(Xq)
+        shown = vis.shows(Xq) if not a.wholesale else np.zeros(len(Xq), bool)
         dist = cKDTree(Xb[ks]).query(Xq)[0] * s if ks.any() else np.full(len(Xq), 1e9)
         keep = ~shown
         ramp = np.clip(dist / a.blend_m, 0.05, 1.0)
