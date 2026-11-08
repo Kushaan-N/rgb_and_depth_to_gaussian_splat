@@ -25,7 +25,8 @@ seen views stay close.
            (complete_objects.object_surface) where no opaque zone gaussian is within --seed-free-m, viewer-exact (--sort dual, display scale --display-scale): real training
            frames that see a zone (full image L1+SSIM, share --real-frac; --freeze-seen: zone gaussians centred on a training view's
            rendered surface stay frozen too) mixed with repaired path frames (L1+SSIM inside
-           the object mask; pixels a training view saw weighted --seen-weight). Trainable gaussians that end below
+           the object mask; pixels a training view saw weighted --seen-weight; --tight-mask: only the object's own silhouette,
+           --lam-out: the trainable gaussians' alpha outside it is penalised = no haze around the object). Trainable gaussians that end below
            --prune-opacity are dropped. Writes <out>.ply + <out>_distill.json (real-frame PSNR before/after).
 
     python scripts/cosmetic_afx.py paths --objects S/objects --sim3-json sim3.json --dataset DS --cloud lidar.ply --out W
@@ -407,7 +408,8 @@ def distill(args):
             real.append((name, cam, c2w, load_rgb(os.path.join(args.dataset, "images", name), dev)))
     # repaired path frames
     pf = {n: (cam, c2w) for n, cam, c2w in frames(args.paths, 0, "all")}
-    orb = []
+    from build_depth_targets import zbuffer_target
+    orb, surf_d = [], {}
     for sc in meta["scenes"]:
         if args.only_objects and sc["object"] not in args.only_objects:
             continue
@@ -417,10 +419,21 @@ def distill(args):
                 continue
             m = np.asarray(Image.open(os.path.join(args.paths, "mask", nm))) > 127
             sv = np.asarray(Image.open(os.path.join(args.paths, "seen", nm))) > 127
+            out_m = None
+            if args.tight_mask:                                             # the object's own pixels: closed-surface z-buffer
+                cam, c2w = pf[nm]; fx, fy, cx, cy, W, H = cam_args(cam); w2c = np.linalg.inv(c2w)
+                if sc["object"] not in surf_d:
+                    surf_d[sc["object"]] = torch.tensor(((Z[sc["object"]][1] - t) @ R) / s, device=dev)
+                Ds, _ = zbuffer_target(surf_d[sc["object"]], torch.tensor(w2c[:3, :3], device=dev), torch.tensor(w2c[:3, 3], device=dev),
+                                       W, H, (fx, fy, cx, cy), 0.03 / s, 1e6, min_support=1)
+                tm = Ds > 0
+                k_ = 2 * args.out_margin + 1
+                out_m = ~(torch.nn.functional.max_pool2d(tm.float()[None, None], k_, 1, args.out_margin)[0, 0] > 0.5)
+                m = m & tm.cpu().numpy()
             w = m * np.where(sv, args.seen_weight, 1.0)
             if m.sum() < 200:
                 continue
-            orb.append((nm, *pf[nm], load_rgb(f, dev), torch.tensor(w, dtype=torch.float32, device=dev)))
+            orb.append((nm, *pf[nm], load_rgb(f, dev), torch.tensor(w, dtype=torch.float32, device=dev), out_m))
     print(f"[distill] {len(real)}/{len(tr)} real frames see a zone, {len(orb)} repaired path frames", flush=True)
     assert real and orb
     centres = np.stack([c[:3, 3] for _, _, c in tr]); scene_scale = float(np.linalg.norm(centres - centres.mean(0), axis=1).max()) * 1.1
@@ -449,9 +462,9 @@ def distill(args):
             Rv.r = float(np.exp(np.random.uniform(np.log(rs[0]), np.log(rs[1]))))
         is_real = np.random.rand() < args.real_frac
         if is_real:
-            name, cam, c2w, gt = real[np.random.randint(len(real))]; wm = None
+            name, cam, c2w, gt = real[np.random.randint(len(real))]; wm = om = None
         else:
-            name, cam, c2w, gt, wm = orb[np.random.randint(len(orb))]
+            name, cam, c2w, gt, wm, om = orb[np.random.randint(len(orb))]
         img, alpha, _ = Rv.render(full(), to_t(np.linalg.inv(c2w), dev), *cam_args(cam), sh_degree=deg)
         g_ = gt.float() / 255
         if wm is None:
@@ -463,6 +476,9 @@ def distill(args):
             mk = (wm > 0).float()[..., None]
             ls = 1 - ssim((img * mk).permute(2, 0, 1)[None], (g_ * mk).permute(2, 0, 1)[None])
             loss = args.orbit_weight * ((1 - args.ssim_lambda) * l1 + args.ssim_lambda * ls)
+            if om is not None and args.lam_out > 0:                         # trainable gaussians off the object's silhouette: fade
+                _, at, _ = Rv.render(dict(params), to_t(np.linalg.inv(c2w), dev), *cam_args(cam), sh_degree=deg)
+                loss = loss + args.lam_out * (at * om).sum() / om.sum().clamp_min(1)
             if args.lam_alpha > 0:                                          # no see-through holes on the object
                 loss = loss + args.lam_alpha * ((1 - alpha).clamp_min(0) * (wm > 0)).sum() / (wm > 0).sum().clamp_min(1)
         opt.zero_grad(set_to_none=True); loss.backward()
@@ -540,6 +556,10 @@ def main():
     d.add_argument("--opacity-lr", type=float, default=0.025)
     d.add_argument("--display-scale", default="1.5:4"); d.add_argument("--sort", default="dual", choices=("depth", "radial", "dual"))
     d.add_argument("--only-objects", type=int, nargs="*", default=[], help="object ids to repair (default: all)")
+    d.add_argument("--tight-mask", action="store_true", help="repaired-frame loss only on the object's own pixels (closed-"
+                   "surface z-buffer, no dilation)")
+    d.add_argument("--lam-out", type=float, default=0.0, help="alpha of the trainable gaussians outside that silhouette (+margin)")
+    d.add_argument("--out-margin", type=int, default=3, help="px tolerance around the silhouette for --lam-out")
     d.add_argument("--seed-min-h", type=float, default=0.0, help="no seeds below this height above the floor (m)")
     d.add_argument("--zone-min-h", type=float, default=-0.02, help="zone starts this high above the floor (0.02: floor layer frozen)")
     d.add_argument("--max-scale-m", type=float, default=0.0, help="cap trainable gaussians' scales (m); 0 = off")
