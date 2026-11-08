@@ -42,6 +42,12 @@ def main():
     ap.add_argument("--face-w", type=float, default=0.2); ap.add_argument("--blend-m", type=float, default=0.015)
     ap.add_argument("--wholesale", action="store_true", help="delete every base row in the (tight) box above the floor and insert the "
                     "whole fitted splat (no visibility drop, no seam ramp): seen views of the stack change")
+    ap.add_argument("--hybrid", action="store_true", help="keep the base's well-seen front surfels on the SEVA hull surface (within "
+                    "--hull-tol-m of a hull point a training view shows), delete the rest of the box, SEVA rows only farther than --front-m "
+                    "from a kept surfel; then a joint refit on the real frames (front rows full, SEVA rows colour+opacity for --hyb-warm "
+                    "iters, then all params at x--new-lr-k)")
+    ap.add_argument("--hull-tol-m", type=float, default=0.01); ap.add_argument("--front-m", type=float, default=0.01)
+    ap.add_argument("--hyb-warm", type=int, default=400); ap.add_argument("--new-lr-k", type=float, default=0.3)
     ap.add_argument("--harm-iters", type=int, default=400); ap.add_argument("--display-scale", type=float, default=1.8)
     # trellis_complete.Vis parameters (training-view visibility)
     ap.add_argument("--frame-stride", type=int, default=1); ap.add_argument("--max-incidence", type=float, default=85.0)
@@ -144,16 +150,23 @@ def main():
         r = reg[oid]; c0, A = np.array(r["c0"]), np.array(r["axes"])
         L = (Xm - c0) @ A; lo, hi = np.array(r["box_lo"]) - a.zone_m, np.array(r["box_hi"]) + a.zone_m
         inz = np.all((L[:, :2] >= lo[:2]) & (L[:, :2] <= hi[:2]), 1) & (L[:, 2] > a.floor_m) & (L[:, 2] <= hi[2])
-        if a.wholesale:                                                    # the stack is replaced by its fitted splat
+        if a.hybrid:                                                       # real front faces + SEVA backs
+            AXo = AX[Ao == oid]; shown_h = vis.shows(AXo); ii = np.nonzero(inz)[0]
+            dh, ih = cKDTree(AXo).query(Xb[ii])
+            fr = (dh * s <= a.hull_tol_m) & shown_h[ih] & (wmax[ii] >= a.face_w) & (opb[ii] > 0.5)
+            ks = np.zeros(N0, bool); ks[ii[fr]] = True; d_ = inz & ~ks
+        elif a.wholesale:                                                  # the stack is replaced by its fitted splat
             d_ = inz; ks = np.zeros(N0, bool)
         else:
             d_ = inz & (wmax < a.del_w); ks = inz & (wmax >= a.face_w) & (opb > 0.5)
         dele |= d_; kept_seen |= ks
         Xq = Q["means"].cpu().numpy().astype(np.float64)
-        shown = vis.shows(Xq) if not a.wholesale else np.zeros(len(Xq), bool)
+        shown = vis.shows(Xq) if not (a.wholesale or a.hybrid) else np.zeros(len(Xq), bool)
         dist = cKDTree(Xb[ks]).query(Xq)[0] * s if ks.any() else np.full(len(Xq), 1e9)
         keep = ~shown
         ramp = np.clip(dist / a.blend_m, 0.05, 1.0)
+        if a.hybrid:                                                       # SEVA rows only where no kept front surfel is near
+            keep = dist > a.front_m; ramp = np.ones(len(Xq))
         with torch.no_grad():
             op = torch.sigmoid(Q["opacities"]) * torch.tensor(ramp, device=dev, dtype=torch.float32)
             Q["opacities"] = torch.logit(op.clamp(1e-4, 1 - 1e-4))
@@ -176,13 +189,36 @@ def main():
         if np.any((Pc[:, 2] > 0.05) & (u > 0) & (u < W) & (v > 0) & (v < H)):
             seen_fr.append(i)
     gtf = lambda n_: next(os.path.join(ds, "images", n_) for ds in a.dataset if os.path.exists(os.path.join(ds, "images", n_)))
-    Rv.r = a.display_scale; opt = torch.optim.Adam([params["sh0"]], lr=2.5e-3, eps=1e-15); newm = torch.zeros(len(src), dtype=torch.bool, device=dev); newm[nb:] = True
+    Rv.r = a.display_scale; newm = torch.zeros(len(src), dtype=torch.bool, device=dev); newm[nb:] = True
+    if a.hybrid:   # joint refit: kept front rows full params; SEVA rows colour+opacity, then everything at x--new-lr-k
+        frontm = torch.zeros(len(src), dtype=torch.bool, device=dev); frontm[:nb] = torch.tensor(kept_seen[~dele], device=dev)
+        trm = frontm | newm; scene_scale = float(np.linalg.norm(np.stack([c[:3, 3] for _, _, c in tr]) - np.stack([c[:3, 3] for _, _, c in tr]).mean(0), axis=1).max()) * 1.1
+        lrs = {"means": 1.6e-5 * scene_scale, "scales": 5e-3, "quats": 1e-3, "opacities": 0.025, "sh0": 2.5e-3, "shN": 2.5e-3 / 20}
+        opt = torch.optim.Adam([{"params": [params[k]], "lr": lrs[k], "name": k} for k in params], eps=1e-15)
+    else:
+        opt = torch.optim.Adam([params["sh0"]], lr=2.5e-3, eps=1e-15)
     for step in range(1, a.harm_iters + 1 if seen_fr else 1):
         i = seen_fr[np.random.randint(len(seen_fr))]; n_, cam, c2w = tr[i]
         img, _, _ = Rv.render(params, to_t(np.linalg.inv(c2w), dev), *cam_args(cam), sh_degree=deg)
         gt = load_rgb(gtf(n_), dev).float() / 255
         l = 0.8 * (img - gt).abs().mean() + 0.2 * (1 - ssim(img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None]))
-        opt.zero_grad(set_to_none=True); l.backward(); params["sh0"].grad[~newm] = 0; opt.step()
+        opt.zero_grad(set_to_none=True); l.backward()
+        if not a.hybrid:
+            params["sh0"].grad[~newm] = 0; opt.step(); continue
+        geo = ("means", "scales", "quats", "shN")
+        for k in params:
+            g = params[k].grad
+            if g is None:
+                continue
+            g[~trm] = 0; g[~torch.isfinite(g)] = 0
+            if step <= a.hyb_warm and k in geo:
+                g[newm] = 0
+        old = {k: params[k].detach()[newm].clone() for k in geo}
+        opt.step()
+        if step > a.hyb_warm:
+            with torch.no_grad():
+                for k in geo:
+                    params[k][newm] = old[k] + a.new_lr_k * (params[k][newm] - old[k])
     with torch.no_grad():
         pv, p0v = [], []
         for i in seen_fr[::max(1, len(seen_fr) // 30)]:
