@@ -22,6 +22,10 @@
 #   the same renders vs the real frames resampled into the viewer_shots camera (scripts/register_gt.py; removes the
 #   ~0.2 px principal-point rounding of the centred canvas that costs every splat ~1.4 dB on CEAR).
 #SBATCH -J fm-bench
+#SBATCH -p gpu-highvram,gpu-preempt-highvram
+#SBATCH --gres=gpu:1
+#SBATCH --constraint=a100|a40|l40s
+#SBATCH --exclude=gpu010,gpu035
 #SBATCH -c 6
 #SBATCH --mem=48G
 #SBATCH -t 03:00:00
