@@ -34,6 +34,10 @@ Methods (module, flag):
   sam.py        --sam-lambda    sharpness-aware objective L(theta) + lambda L(theta + eps), eps = rho Adam steps uphill
                                 (momentum SAM; FASR 2025 for 3DGS generalisation), late phase only
   hparams.py    --lr-mult / --reset-mult  learning-rate multipliers per group, opacity-reset interval (random search)
+  hyworld.py    --hy-lpips      HY-World 2.0 (arXiv 2604.14268) World-Composition objective: LPIPS-VGG with the official
+                --hy-normal     linear weight schedules (0.2 -> 0.1), depth-to-normal loss vs WorldMirror 2.0 normals (0.1 -> 0.5)
+  sharpw.py     --sharp-gamma   per-frame loss weight from relative sharpness (motion-blurred frames count less)
+  subpix.py     --spj-px        sub-pixel principal-point jitter with a Lanczos-3 shifted target (band-limited fit)
   (here)        --aniso-reg     anti-needle: lambda x mean relu(s_max / s_min - --aniso-max) over the step's visible
                                 gaussians (PhysGaussian's anisotropy regulariser, Xie et al. CVPR 2024): no spikes off-path
 """
@@ -50,12 +54,16 @@ from .vwarp import VirtualWarp, add_vwarp_args
 from .posefit import PoseFit, add_posefit_args
 from .sam import SharpAware, add_sam_args
 from .hparams import add_hparam_args, apply_hparams
+from .hyworld import HYWorld, add_hyworld_args
+from .sharpw import SharpWeight, add_sharpw_args
+from .subpix import SubPixJitter, add_subpix_args
 
 
 def add_args(ap):
     g = ap.add_argument_group("fidelity methods (scripts/methods, default off)")
     add_loss_args(g); add_average_args(g); add_densify_args(g); add_schedule_args(g); add_blur_args(g)
     add_dropgs_args(g); add_vwarp_args(g); add_posefit_args(g); add_sam_args(g); add_hparam_args(g)
+    add_hyworld_args(g); add_sharpw_args(g); add_subpix_args(g)
     g.add_argument("--shn-reg", type=float, default=0.0, help="L2 weight on the visible gaussians' shN (0 = off)")
     g.add_argument("--aniso-reg", type=float, default=0.0, help="anti-needle scale-ratio penalty weight (0 = off)")
     g.add_argument("--aniso-max", type=float, default=10.0, help="allowed max/min scale ratio")
@@ -76,9 +84,11 @@ class Hooks:
         self.pose = PoseFit(args, views, scene_scale, dev)
         self.sam, self._v = SharpAware(args, rast, params, opts), None
         self.hp = apply_hparams(args, opts, strat)
+        self.hy, self.sw, self.spj = HYWorld(args, dev), SharpWeight(args, views or []), SubPixJitter(args)
+        self.need_depth = self.hy.need_depth                # the trainer renders z-depth on every step when set
         on = [k for k in ("freq_lambda", "hard_lambda", "grad_lambda", "ema_decay", "anneal_start", "pixelgs", "shn_reg", "c2f", "eas_error", "aniso_reg", "msssim_lambda", "blur_kernel",
-                                 "drop_rate", "vwarp_lambda", "pose_lr", "sam_lambda")
-              if getattr(args, k) not in (0, False, None, "off")]
+                                 "drop_rate", "vwarp_lambda", "pose_lr", "sam_lambda", "hy_lpips", "hy_normal", "sharp_gamma", "spj_px")
+              if getattr(args, k) not in (0, False, None, "off", "")]
         if on:
             print(f"[methods] on: " + ", ".join(f"{k}={getattr(args, k)}" for k in on), flush=True)
 
@@ -87,9 +97,14 @@ class Hooks:
         img, self._blur_reg = self.blur(img, name, step)
         return img
 
-    def loss(self, img, gt, step, info=None):
+    def loss(self, img, gt, step, info=None, depth=None, view=None):
         import torch
         l = self.losses(img, gt, step)
+        l = l + self.hy.loss(img, gt, step, depth, view)
+        if view is not None:
+            x = self.sw.loss(img, gt, view[0])
+            if x is not None:
+                l = l + x
         if self._blur_reg is not None:
             l = l + self._blur_reg
         deg = min(step // 1000, self.args.sh_degree)
@@ -109,7 +124,7 @@ class Hooks:
 
     def view(self, v, step, masked=False):
         self.drop.step(step)
-        self._v = self.pose.view(self.res.view(v, step, masked), step)
+        self._v = self.pose.view(self.spj.view(self.res.view(v, step, masked), step, masked), step)
         return self._v
 
     def after_step(self, step, stepping):
@@ -118,7 +133,8 @@ class Hooks:
     def finalize(self, out_dir):
         rec = {"losses": self.losses.summary(), "average": self.avg.finalize(), "densify": self.densify, "schedule": self.res.summary(), "blur": self.blur.summary(),
                "dropgs": self.drop.summary(), "vwarp": self.vwarp.summary(), "pose": self.pose.summary(out_dir),
-               "sam": self.sam.summary(), "hparams": self.hp}
+               "sam": self.sam.summary(), "hparams": self.hp, "hyworld": self.hy.summary(), "sharpw": self.sw.summary(out_dir),
+               "subpix": self.spj.summary()}
         if out_dir and any(v for v in rec.values()):
             json.dump(rec, open(os.path.join(out_dir, "methods.json"), "w"), indent=1)
             print(f"[methods] {json.dumps(rec)}", flush=True)
