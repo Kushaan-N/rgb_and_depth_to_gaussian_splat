@@ -9,8 +9,8 @@
 #   WHY=... scripts/sub.sh -A pi_donghyunkim_umass_edu --exclude=gpu010,gpu035 -o logs/%x-%j.out sbatch/mv_prior.sbatch \
 #     configs/mocap2_well-lit_trot.yaml
 # Env: PRIOR=zero123|seva (seva: scripts/object_priors/mv_seva.py, venv-seva, GEN_ARGS e.g. "--ids 3 4 5"), COMPARE=<variant dir>,
-#      NAME (viewer_msd60k_wd_clean_ft2_solid3), IN, TAG (variant suffix), GEN (generated-view dir, shared by TAGs: GEN_TAG),
-#      GEN_ARGS, REG_ARGS, REFIT_ARGS, BUDGET=1 (+BUDGET_ARGS: solidify_unseen.py budget after the refit), STOP_AFTER=register|refit, FORCE=1 (redo refit + later stages), MOVES, EVERY_OFF.
+#      NAME (viewer_msd60k_wd_clean_ft2_solid3), IN, REF_NAME (stage-0 objects/orbit source for a new NAME), TAG (variant suffix), GEN (generated-view dir, shared by TAGs: GEN_TAG),
+#      GEN_ARGS, REG_ARGS, REFIT_ARGS, BUDGET=1 (+BUDGET_ARGS: solidify_unseen.py budget after the refit), STOP_AFTER=prep|register|refit, FORCE=1 (redo refit + later stages), MOVES, EVERY_OFF.
 #SBATCH -J mv-prior
 #SBATCH -p gpu-highvram,gpu-preempt-highvram
 #SBATCH --gres=gpu:1
@@ -42,7 +42,15 @@ hostname; date; nvidia-smi --query-gpu=name --format=csv,noheader || true; mkdir
 module load cuda/12.4.1 gcc/9.4.0 2>/dev/null || true
 export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")" TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0}"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-12}"
-[ -f "$IN" ] && [ -f "$D/objects.json" ] && [ -d "$D/depth" ] && [ -f "$D/support.npz" ] || { echo "run object_priors.sbatch stage 0 first"; exit 1; }
+# stage 0 for a new input: objects + orbit cameras are geometry (taken from REF_NAME's dir so orbit views stay comparable),
+# the input's depth at the training frames + per-gaussian support are computed here
+RD="$P/object_priors/${REF_NAME:-viewer_msd60k_wd_clean_ft2_solid3}"; mkdir -p "$D"
+for f in objects.json objects.npz objects.png; do [ -e "$D/$f" ] || [ ! -e "$RD/$f" ] || cp "$RD/$f" "$D/$f"; done
+[ -e "$D/orbit" ] || [ ! -d "$RD/orbit" ] || cp -r "$RD/orbit" "$D/orbit"
+[ -f "$IN" ] && [ -f "$D/objects.json" ] || { echo "missing input / objects (run object_priors.sbatch stage 0)"; exit 1; }
+need "$D/depth" && "$SPY" scripts/render_ply_depth.py --ply "$IN" --dataset "$DATA" --out-dir "$D/depth"
+need "$D/support.npz" && "$SPY" "$SO" support --ply "$IN" --dataset "$DATA" "$TEST" --out "$D/support.npz"
+[ "${STOP_AFTER:-}" = prep ] && { echo MV_PRIOR_PREP_ONLY; exit 0; }
 [ -x "$MPY" ] || { echo "venv-mv missing: sbatch/mv_venv.sbatch"; exit 1; }
 echo "== $NAME TAG=${TAG:-<none>} GEN=$G"
 COMMON=(--objects "$D/objects" --sim3-json "$P/sim3.json" --dataset "$DATA" --splat-depth-dir "$D/depth" --out-dir "$G")
