@@ -154,7 +154,7 @@ def paths(args):
 
 
 # ---------------------------------------------------------------- zones (shared by prep / distill)
-def zones(Gm, ometa, opts, zone_m, min_h=-0.02):
+def zones(Gm, ometa, opts, zone_m, min_h=-0.02, max_h=None):
     """-> per object: (row indices of the gaussians in its zone, closed 2.5D surface samples (metric), Obj)."""
     from complete_objects import object_surface
     n_f = np.array(ometa["floor"]["n"]); d_f = float(ometa["floor"]["d"]); out = {}
@@ -162,7 +162,7 @@ def zones(Gm, ometa, opts, zone_m, min_h=-0.02):
         ob = obj_frame(X, n_f, d_f); Lx = ob.loc(X); hmax = float(np.percentile(Lx[:, 2], 99))
         Lg = ob.loc(Gm); zh = ob.half + zone_m
         inz = np.nonzero((np.abs(Lg[:, 0]) <= zh[0]) & (np.abs(Lg[:, 1]) <= zh[1]) & (Lg[:, 2] > min_h) &
-                         (Lg[:, 2] < hmax + zone_m))[0]
+                         (Lg[:, 2] < (hmax + zone_m if max_h is None else min(hmax + zone_m, max_h))))[0]
         out[o["id"]] = (inz, object_surface(X, n_f, d_f, 0.03, 0.03)[0], ob)
     return out
 
@@ -363,7 +363,7 @@ def distill(args):
     meta = json.load(open(os.path.join(args.paths, "paths.json")))
     vertex, p0 = load_ply(args.ply, dev); deg = sh_deg(p0); N = len(p0["means"])
     Gm = s * (p0["means"].double().cpu().numpy() @ R.T) + t
-    Z = zones(Gm, ometa, opts, args.zone_m, args.zone_min_h)
+    Z = zones(Gm, ometa, opts, args.zone_m, args.zone_min_h, args.zone_max_h)
     if args.only_objects:                                                   # e.g. only the A-frame
         Z = {k: v for k, v in Z.items() if k in args.only_objects}
     zone = np.zeros(N, bool)
@@ -561,6 +561,8 @@ def main():
     d.add_argument("--lam-out", type=float, default=0.0, help="alpha of the trainable gaussians outside that silhouette (+margin)")
     d.add_argument("--out-margin", type=int, default=3, help="px tolerance around the silhouette for --lam-out")
     d.add_argument("--seed-min-h", type=float, default=0.0, help="no seeds below this height above the floor (m)")
+    d.add_argument("--zone-max-h", type=float, default=None, help="zone ends this high above the floor (e.g. 0.08: a floor-"
+                   "band-only pass on an earlier output)")
     d.add_argument("--zone-min-h", type=float, default=-0.02, help="zone starts this high above the floor (0.02: floor layer frozen)")
     d.add_argument("--max-scale-m", type=float, default=0.0, help="cap trainable gaussians' scales (m); 0 = off")
     d.add_argument("--freeze-seen", action="store_true", help="zone gaussians on a training view's rendered surface stay frozen")
