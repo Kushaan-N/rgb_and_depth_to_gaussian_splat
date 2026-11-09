@@ -47,6 +47,11 @@ def main():
                     "from a kept surfel; then a joint refit on the real frames (front rows full, SEVA rows colour+opacity for --hyb-warm "
                     "iters, then all params at x--new-lr-k)")
     ap.add_argument("--hull-tol-m", type=float, default=0.01); ap.add_argument("--front-m", type=float, default=0.01)
+    ap.add_argument("--facing", action="store_true", help="hybrid v3: keep base surfels by a facing test (max |normal . view| over the "
+                    "cameras that see it > --facing-cos) instead of the hull distance")
+    ap.add_argument("--facing-cos", type=float, default=0.3); ap.add_argument("--grazing-cos", type=float, default=0.0,
+                    help="hybrid: SEVA rows get no gradient from a frame that sees them at |normal . view| below this")
+    ap.add_argument("--final-color-iters", type=int, default=0, help="hybrid: the last N refit iters train SEVA rows' colour only")
     ap.add_argument("--hyb-warm", type=int, default=400); ap.add_argument("--new-lr-k", type=float, default=0.3)
     ap.add_argument("--harm-iters", type=int, default=400); ap.add_argument("--display-scale", type=float, default=1.8)
     # trellis_complete.Vis parameters (training-view visibility)
@@ -145,6 +150,26 @@ def main():
     dele = np.zeros(N0, bool); kept_seen = np.zeros(N0, bool)
     vis = Vis(argparse.Namespace(dataset=a.dataset[0], frame_stride=a.frame_stride, splat_depth_dir=a.splat_depth_dir,
                                  max_incidence=a.max_incidence, depth_tol_m=a.depth_tol_m, splat_tol_rel=a.splat_tol_rel), s)
+    from finetune_ply_viewer import quat_to_rot
+
+    def normals(quats, scales):
+        Rm = quat_to_rot(torch.nn.functional.normalize(quats, dim=-1)); ax = torch.argmin(scales, 1)
+        return torch.gather(Rm, 2, ax[:, None, None].expand(-1, 3, 1))[..., 0]
+
+    def facing_cos(Xd, quats, scales):
+        """per point: max |normal . view| over the training cameras that see it (in frame, not behind the base depth)."""
+        with torch.no_grad():
+            Nn = normals(quats, scales).double(); X_ = torch.tensor(Xd, device=dev); best = torch.zeros(len(Xd), device=dev, dtype=torch.float64)
+            for cm_, SD in zip(vis.cams, vis.sdep):
+                Pc, u, v_, ok, Cw = vis.project(X_, cm_)
+                ia = torch.nonzero(ok, as_tuple=True)[0]
+                if not len(ia):
+                    continue
+                r = torch.linalg.norm(Pc[ia], dim=1); ds_ = vis.T(SD)[v_[ia], u[ia]]
+                ia = ia[(ds_ <= 0) | (r < ds_ * (1 + a.splat_tol_rel))]
+                dv = Cw[None] - X_[ia]; dv = dv / torch.linalg.norm(dv, dim=1, keepdim=True)
+                best[ia] = torch.maximum(best[ia], (dv * Nn[ia]).sum(1).abs())
+        return best.cpu().numpy()
     newrows, rep = [], {}
     for oid, Q in objs.items():
         r = reg[oid]; c0, A = np.array(r["c0"]), np.array(r["axes"])
@@ -153,7 +178,11 @@ def main():
         if a.hybrid:                                                       # real front faces + SEVA backs
             AXo = AX[Ao == oid]; shown_h = vis.shows(AXo); ii = np.nonzero(inz)[0]
             dh, ih = cKDTree(AXo).query(Xb[ii])
-            fr = (dh * s <= a.hull_tol_m) & shown_h[ih] & (wmax[ii] >= a.face_w) & (opb[ii] > 0.5)
+            if a.facing:   # v3: a surfel whose thinnest axis faces the camera that sees it (in front of the base depth)
+                cbest = facing_cos(Xb[ii], p0["quats"][torch.tensor(ii, device=dev)], p0["scales"][torch.tensor(ii, device=dev)])
+                fr = (cbest > a.facing_cos) & (wmax[ii] >= a.face_w) & (opb[ii] > 0.5)
+            else:
+                fr = (dh * s <= a.hull_tol_m) & shown_h[ih] & (wmax[ii] >= a.face_w) & (opb[ii] > 0.5)
             ks = np.zeros(N0, bool); ks[ii[fr]] = True; d_ = inz & ~ks
         elif a.wholesale:                                                  # the stack is replaced by its fitted splat
             d_ = inz; ks = np.zeros(N0, bool)
@@ -206,16 +235,25 @@ def main():
         if not a.hybrid:
             params["sh0"].grad[~newm] = 0; opt.step(); continue
         geo = ("means", "scales", "quats", "shN")
+        gm_ = trm
+        if a.grazing_cos > 0:   # v3: no gradient to SEVA rows this frame sees edge-on
+            with torch.no_grad():
+                ni_ = torch.nonzero(newm)[:, 0]; nn_ = normals(params["quats"][ni_], params["scales"][ni_])
+                dv = torch.tensor(c2w[:3, 3], device=dev, dtype=torch.float32)[None] - params["means"][ni_]
+                cs = (torch.nn.functional.normalize(dv, dim=-1) * nn_).sum(-1).abs()
+                gm_ = trm.clone(); gm_[ni_[cs < a.grazing_cos]] = False
         for k in params:
             g = params[k].grad
             if g is None:
                 continue
-            g[~trm] = 0; g[~torch.isfinite(g)] = 0
-            if step <= a.hyb_warm and k in geo:
+            g[~gm_] = 0; g[~torch.isfinite(g)] = 0
+            if (step <= a.hyb_warm or step > a.harm_iters - a.final_color_iters) and k in geo:
+                g[newm] = 0
+            if step > a.harm_iters - a.final_color_iters and k == "opacities":
                 g[newm] = 0
         old = {k: params[k].detach()[newm].clone() for k in geo}
         opt.step()
-        if step > a.hyb_warm:
+        if a.hyb_warm < step <= a.harm_iters - a.final_color_iters:
             with torch.no_grad():
                 for k in geo:
                     params[k][newm] = old[k] + a.new_lr_k * (params[k][newm] - old[k])
