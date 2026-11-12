@@ -12,6 +12,9 @@ option, the recipe and the outputs stay exactly those of the trainer:
               --pseudo-weight (value unchanged: x w + x.detach() (1 - w)), so the loss term, the densification
               gradients and Improved-GS's statistics all see the pseudo-view at that weight. Evaluation renders
               (no grad) are untouched. EAS edge maps of pseudo-views come from the teacher render.
+--pseudo-depth: pseudo-views carry a depth target (<stem>_depth.npy, ray distance) for the trainer's --depth-lambda
+term (alpha-normalised expected depth, full weight); the real frames' own targets are dropped, so the on-path recipe is
+unchanged. The pseudo dataset may also be LiDAR image-based renders (scripts/make_lidar_ibr_views.py) instead of teacher renders.
 Pseudo-views are drawn uniformly with the real frames (share = N_pseudo / (N_pseudo + N_train)).
 --tvg: the trainer module file to wrap (default: the repo's; the sbatch snapshots git HEAD so concurrent edits to
 the trainer cannot change a running comparison). Everything after the wrapper's own flags goes to the trainer.
@@ -30,6 +33,10 @@ def main():
     ap.add_argument("--pseudo-dataset", required=True, help="make_pseudo_views.py dataset (teacher renders + _mask.png)")
     ap.add_argument("--pseudo-weight", type=float, default=0.3, help="gradient weight of pseudo-view pixels")
     ap.add_argument("--pseudo-limit", type=int, default=0, help="use at most this many pseudo-views (0 = all)")
+    ap.add_argument("--pseudo-soft", action="store_true", help="_mask.png values are per-pixel weights (v / 255, x --pseudo-weight; "
+                    "0 = unsupervised) instead of a > 127 threshold (make_lidar_ibr_views.py --single-weight)")
+    ap.add_argument("--pseudo-depth", action="store_true", help="the trainer's --depth-lambda term at the PSEUDO-views only "
+                    "(their images/<stem>_depth.npy, e.g. LiDAR depth of make_lidar_ibr_views.py); real frames get none")
     ap.add_argument("--tvg", default=os.path.join(HERE, "train_viewer_gsplat.py"), help="trainer module file to wrap")
     a, rest = ap.parse_known_args()
     if rest and rest[0] == "--":
@@ -49,7 +56,10 @@ def main():
         out = orig_load(dataset, interval, subset, dev, *args, **kw)
         if subset != "train" or "n_pseudo" in stats:             # first training-set load only
             return out
-        ps = orig_load(a.pseudo_dataset, 0, "all", dev)
+        ps = orig_load(a.pseudo_dataset, 0, "all", dev, depth=a.pseudo_depth)
+        if a.pseudo_depth:                                       # depth supervision where the camera never was, only
+            out = [tuple(v[:6]) + (None,) + tuple(v[7:]) for v in out]
+            stats["pseudo_depth_views"] = sum(v[6] is not None for v in ps)
         if a.pseudo_limit and len(ps) > a.pseudo_limit:
             ps = [ps[i] for i in np.linspace(0, len(ps) - 1, a.pseudo_limit).astype(int)]
         names = {v[0] for v in out}
@@ -57,9 +67,10 @@ def main():
             if v[0] in names:
                 raise SystemExit(f"[distill] pseudo-view name {v[0]} collides with a real frame")
             f = os.path.join(a.pseudo_dataset, "images", os.path.splitext(v[0])[0] + "_mask.png")
-            m = np.asarray(Image.open(f).convert("L")) > 127 if os.path.exists(f) else np.ones((v[3], v[2]), bool)
+            m = np.asarray(Image.open(f).convert("L")) if os.path.exists(f) else np.full((v[3], v[2]), 255, np.uint8)
+            m = m.astype(np.float32) / 255 if a.pseudo_soft else (m > 127).astype(np.float32)   # per-pixel weight in [0, 1]
             masks[v[0]] = torch.from_numpy(m).to(dev)
-        share = [float(m.float().mean()) for m in masks.values()]
+        share = [float((m > 0).float().mean()) for m in masks.values()]
         stats.update(n_train_real=len(out), n_pseudo=len(ps), pseudo_step_share=round(len(ps) / max(1, len(out) + len(ps)), 4),
                      supervised_pixel_share=round(float(np.mean(share)), 4) if share else None)
         print(f"[distill] {len(out)} real training frames + {len(ps)} pseudo-views ({a.pseudo_dataset}), weight "
@@ -73,10 +84,10 @@ def main():
         if m is None or not torch.is_grad_enabled():
             return out
         img, alpha, d, info = out[0], out[1], out[2], out[3]
-        w = a.pseudo_weight
-        img = img * w + img.detach() * (1 - w); alpha = alpha * w + alpha.detach() * (1 - w)
-        img = torch.where(m[..., None], img, view[5].float() / 255)
-        alpha = torch.where(m, alpha, torch.ones_like(alpha))
+        w = a.pseudo_weight * m                                  # (H, W): 0 = unsupervised
+        img = img * w[..., None] + img.detach() * (1 - w[..., None]); alpha = alpha * w + alpha.detach() * (1 - w)
+        img = torch.where((m > 0)[..., None], img, view[5].float() / 255)
+        alpha = torch.where(m > 0, alpha, torch.ones_like(alpha))
         return (img, alpha, d, info) + tuple(out[4:])
 
     tvg.load_views, tvg.ViewerGS.render = load_views, render
