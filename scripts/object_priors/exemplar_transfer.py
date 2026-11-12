@@ -39,7 +39,15 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ply", required=True); ap.add_argument("--support", required=True); ap.add_argument("--objects", required=True)
     ap.add_argument("--sim3-json", required=True); ap.add_argument("--dataset", nargs="+", required=True); ap.add_argument("--out", required=True)
-    ap.add_argument("--ids", type=int, nargs="+", required=True); ap.add_argument("--exclude", type=int, nargs="*", default=[],
+    ap.add_argument("--ids", type=int, nargs="*", default=[]); ap.add_argument("--force", nargs="*", default=[],
+                    help="target:exemplar pairs (e.g. 5:1) used instead of the search")
+    ap.add_argument("--ring-ids", type=int, nargs="*", default=[], help="clean a ring behind these objects: unconstrained haze / needles pruned, "
+                    "floor discs where no opaque floor row is left")
+    ap.add_argument("--del-w", type=float, default=0.02, help="ring: rows below this support weight count as unconstrained")
+    ap.add_argument("--ring-m", type=float, default=0.5); ap.add_argument("--ring-cell", type=float, default=0.015)
+    ap.add_argument("--graze-ids", type=int, nargs="*", default=[], help="drop unconstrained rows of these objects that the training "
+                    "cameras see only edge-on (max |normal . view| < --graze-cos)")
+    ap.add_argument("--graze-cos", type=float, default=0.3); ap.add_argument("--exclude", type=int, nargs="*", default=[],
                     help="objects never used as exemplars (e.g. a different kind of object)")
     ap.add_argument("--face-w", type=float, default=0.2); ap.add_argument("--ex-w", type=float, default=0.05)
     ap.add_argument("--splat-depth-dir", default=None); ap.add_argument("--cam-max-m", type=float, default=4.0)
@@ -104,7 +112,9 @@ def main():
         if sT.sum() < 50:
             print(f"[exemplar] target {tid}: too few seen surfels", flush=True); continue
         treeT = cKDTree(LT[sT]); best = None
-        cands = [(e, False) for e in exemplars if e != tid] + ([] if a.no_self else [(tid, True)])
+        force = dict(tuple(int(x) for x in f.split(":")) for f in a.force)
+        cands = [(force[tid], False)] if tid in force else \
+            [(e, False) for e in exemplars if e != tid] + ([] if a.no_self else [(tid, True)])
         for eid, is_self in cands:
             E = O[eid]; rowsE = E["inb"] & (wmax >= a.ex_w) & (op > 0.3); LE = E["L"][rowsE]
             if len(LE) < 50:
@@ -180,13 +190,73 @@ def main():
                     "colour_sim": round(best["csim"], 3), "kept_front": int(kf.sum()), "deleted": int((T["inb"] & ~kf).sum()),
                     "transplanted": int(len(rows)), "recolour_gain": g_.round(2).tolist()}
         print(f"[exemplar] target {tid}: {rep[tid]}", flush=True)
+    # ---------------------------------------------------------------- grazing rows (white streaks on oblique faces)
+    qv = np.stack([v["rot_1"], v["rot_2"], v["rot_3"], v["rot_0"]], 1).astype(np.float64)
+    lsc = np.stack([v["scale_0"], v["scale_1"], v["scale_2"]], 1)
+    Xd_all = np.stack([v["x"], v["y"], v["z"]], 1).astype(np.float64)
+    for gid in a.graze_ids:
+        G_ = O[gid]; rows = np.nonzero(G_["inb"] & ~dele & (wmax < a.face_w))[0]
+        if not len(rows):
+            continue
+        Rg = Rotation.from_quat(qv[rows] / np.linalg.norm(qv[rows], axis=1, keepdims=True)).as_matrix()
+        nrm = Rg[np.arange(len(rows)), :, np.argmin(lsc[rows], 1)]; Xr = Xd_all[rows]
+        best_c = np.zeros(len(rows)); shown = np.zeros(len(rows), bool)
+        for (nm_, W, H, fx, fy, cx, cy, Rcw, tcw, _), SD in zip(cams, sdep):
+            Pc = Xr @ Rcw.T + tcw; z = Pc[:, 2]; ok = z > 0.05
+            u = np.floor(fx * Pc[:, 0] / np.where(ok, z, 1) + cx).astype(int); vv = np.floor(fy * Pc[:, 1] / np.where(ok, z, 1) + cy).astype(int)
+            ok &= (u >= 0) & (u < W) & (vv >= 0) & (vv < H)
+            if SD is not None:
+                r = np.linalg.norm(Pc, axis=1); ok[ok] &= (SD[vv[ok], u[ok]] <= 0) | (r[ok] < SD[vv[ok], u[ok]] * 1.02)
+            if not ok.any():
+                continue
+            C = -Rcw.T @ tcw; dv = C[None] - Xr[ok]; dv /= np.linalg.norm(dv, axis=1, keepdims=True)
+            best_c[ok] = np.maximum(best_c[ok], np.abs((dv * nrm[ok]).sum(1))); shown[ok] = True
+        drop = shown & (best_c < a.graze_cos); dele[rows[drop]] = True
+        rep.setdefault(f"graze_{gid}", {})["dropped"] = int(drop.sum())
+        print(f"[exemplar] object {gid}: {int(drop.sum())} unconstrained rows seen only edge-on dropped (of {len(rows)})", flush=True)
+    # ---------------------------------------------------------------- ring behind each object: haze prune + floor fill
+    boxes = [(k, O[k]) for k in O]
+    for rid in a.ring_ids:
+        Rr = O[rid]; ob = Rr["ob"]; L = Rr["L"]
+        dbox = np.maximum(np.abs(L[:, 0]) - ob.half[0], np.abs(L[:, 1]) - ob.half[1])
+        other = np.zeros(N0, bool)
+        for k, Ok in boxes:
+            if k != rid:
+                Lk = Ok["L"]; other |= (np.abs(Lk[:, 0]) <= Ok["ob"].half[0] + 0.03) & (np.abs(Lk[:, 1]) <= Ok["ob"].half[1] + 0.03)
+        ring = (dbox > 0.0) & (dbox <= a.ring_m) & (L[:, 2] < 0.6) & (L[:, 2] > -0.05) & ~other & ~dele
+        unc = ring & (wmax < a.del_w)
+        haze = unc & ((op < 0.3) | (ss[:, 2] > 4 * ss[:, 1]) | (L[:, 2] > 0.03))
+        dele |= haze
+        floor_ok = ring & ~dele & (op > 0.5) & (np.abs(L[:, 2]) < 0.02)
+        g_ = np.arange(-ob.half[0] - a.ring_m, ob.half[0] + a.ring_m, a.ring_cell); h_ = np.arange(-ob.half[1] - a.ring_m, ob.half[1] + a.ring_m, a.ring_cell)
+        U, Vv = np.meshgrid(g_, h_, indexing="ij"); Q = np.c_[U.ravel(), Vv.ravel()]
+        dq = np.maximum(np.abs(Q[:, 0]) - ob.half[0], np.abs(Q[:, 1]) - ob.half[1]); Q = Q[(dq > 0.01) & (dq <= a.ring_m)]
+        for k, Ok in boxes:                                                 # not under another object
+            if k != rid:
+                Lq = Ok["ob"].loc(ob.met(np.c_[Q, np.zeros(len(Q))]))
+                Q = Q[~((np.abs(Lq[:, 0]) <= Ok["ob"].half[0] + 0.03) & (np.abs(Lq[:, 1]) <= Ok["ob"].half[1] + 0.03))]
+        has = cKDTree(L[floor_ok][:, :2]).query(Q)[0] < a.ring_cell if floor_ok.any() else np.zeros(len(Q), bool)
+        Qf = Q[~has]
+        seenfloor = (np.abs(L[:, 2]) < 0.02) & (wmax >= a.face_w) & (op > 0.5) & (dbox <= a.ring_m + 0.3) & (dbox > 0)
+        if len(Qf) and seenfloor.sum() > 20:
+            sf = cKDTree(L[seenfloor][:, :2]); _, nn = sf.query(Qf, k=min(8, int(seenfloor.sum())))
+            cf = np.median(col[seenfloor][nn], 1)
+            Xm_f = ob.met(np.c_[Qf, np.full(len(Qf), 0.003)]); Xd_f = ((Xm_f - t) @ R) / s
+            Rm = R.T @ np.stack([ob.a1, ob.a2, ob.n], 1); sd_ = 0.6 * a.ring_cell / s
+            Cf = Rm @ np.diag([sd_ ** 2, sd_ ** 2, (0.1 * sd_) ** 2]) @ Rm.T
+            new["X"].append(Xd_f); new["cov"].append(np.repeat(Cf[None], len(Qf), 0)); new["dc"].append((cf - 0.5) / C0)
+            new["op"].append(np.full(len(Qf), np.log(0.95 / 0.05)))
+        rep[f"ring_{rid}"] = {"haze_pruned": int(haze.sum()), "floor_discs": int(len(Qf))}
+        print(f"[exemplar] ring behind object {rid}: {rep[f'ring_{rid}']}", flush=True)
     # ---------------------------------------------------------------- assemble
     vtx, p0 = load_ply(a.ply, dev); deg = sh_deg(p0); K = p0["shN"].shape[1]
-    Xn = np.concatenate(new["X"]); Cn = np.concatenate(new["cov"]); M = len(Xn)
+    Xn = np.concatenate(new["X"]) if new["X"] else np.zeros((0, 3)); Cn = np.concatenate(new["cov"]) if new["cov"] else np.zeros((0, 3, 3)); M = len(Xn)
     w_, V_ = np.linalg.eigh(Cn); w_ = np.maximum(w_, 1e-12); det = np.linalg.det(V_); V_[det < 0, :, 0] *= -1
     qn = Rotation.from_matrix(V_).as_quat(); qn = np.c_[qn[:, 3], qn[:, :3]]
     newp = {"means": Xn, "scales": 0.5 * np.log(w_), "quats": qn, "opacities": np.concatenate(new["op"]),
-            "sh0": np.concatenate(new["dc"])[:, None], "shN": np.zeros((M, K, 3))}
+            "sh0": (np.concatenate(new["dc"]) if new["dc"] else np.zeros((0, 3)))[:, None], "shN": np.zeros((M, K, 3))}
+    if not new["op"]:
+        newp["opacities"] = np.zeros(0)
     kb = torch.tensor(~dele, device=dev)
     P = {k: torch.cat([p0[k][kb], torch.tensor(newp[k], dtype=torch.float32, device=dev)]) for k in p0}
     nb = int(kb.sum()); src = np.r_[np.nonzero(~dele)[0], -np.ones(M, int)]
@@ -194,7 +264,7 @@ def main():
     # ---------------------------------------------------------------- refit on the real frames that see the targets
     newm = torch.zeros(len(src), dtype=torch.bool, device=dev); newm[nb:] = True
     frontm = torch.zeros(len(src), dtype=torch.bool, device=dev); frontm[:nb] = torch.tensor(keep_front[~dele], device=dev); trm = frontm | newm
-    tr = all_frames(a.dataset); cen = np.stack([O[k]["ob"].c0 for k in rep]) if rep else np.zeros((0, 3)); cd = ((cen - t) @ R) / s
+    tr = all_frames(a.dataset); ks_ = sorted(set(a.ids) | set(a.ring_ids) | set(a.graze_ids)); cen = np.stack([O[k]["ob"].c0 for k in ks_]) if ks_ else np.zeros((0, 3)); cd = ((cen - t) @ R) / s
     fr = []
     for i, (n_, cam, c2w) in enumerate(tr):
         fx, fy, cx, cy, W, H = cam_args(cam); w2c = np.linalg.inv(c2w); Pc = cd @ w2c[:3, :3].T + w2c[:3, 3]
