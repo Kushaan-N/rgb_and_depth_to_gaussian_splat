@@ -34,6 +34,7 @@ real supervision at views the robot never took.
             mask       >= --min-sources consistent sources of which one views the point from >= --min-parallax deg
                        away from the reference (agreement then tests the geometry too), best q >= --q-min, reliable
                        geometry.
+  floor   fit the floor plane once (CPU venv: open3d) -> scene.json for `views --scene-json`.
   merge   <real dataset> + <views dataset> -> one COLMAP dataset (links) + ignore_masks, for trainers without a
           pseudo-view hook (finetune_ply_viewer.py --dataset MERGED --mask-dir MERGED/ignore_masks).
 
@@ -304,7 +305,10 @@ def views(a):
         mv = (m * 255).astype(np.uint8); mv[m1] = int(round(min(a.single_weight, 0.49) * 255))          # stays below any > 127 test
         Image.fromarray(mv, mode="L").save(os.path.join(im_dir, stem + "_mask.png"))
         Image.fromarray((~m * 255).astype(np.uint8), mode="L").save(os.path.join(ig_dir, stem + "_mask.png"))
-        np.save(os.path.join(im_dir, stem + "_depth.npy"), D.float().cpu().numpy().astype(np.float16))
+        Dn = D.float().cpu().numpy()
+        if a.depth_where == "supervised":                       # geometry only where colour is taught too: surfaces no
+            Dn = Dn * (mv > 0)                                  # frame saw stay for the fill / inpaint stage
+        np.save(os.path.join(im_dir, stem + "_depth.npy"), Dn.astype(np.float16))
         cidw = sorted(cams)[0] if not a.poses_from else None
         rows.append((len(rows) + 1, rot2quat(Rcw_n), tcw_n, cidw or 1, name)); metas.append(st)
         if len(stats) % 25 == 0:
@@ -336,6 +340,21 @@ def views(a):
         info["val_psnr_single_pooled"] = round(float(-10 * np.log10((np.array([m_["mse_single"] for m_ in ms]) * w1).sum() / w1.sum())), 3)
     json.dump({**info, "views": metas}, open(os.path.join(a.out, "ibr.json"), "w"), indent=1)
     print("IBR_VIEWS " + json.dumps(info), flush=True)
+
+
+def floor(a):
+    from plyfile import PlyData
+    from floor_plane import find_floor_plane
+    j = json.load(open(a.sim3_json)); s, R, t = float(j["scale"]), np.asarray(j["R"]), np.asarray(j["t"])
+    v = PlyData.read(a.cloud)["vertex"]; L = np.stack([v["x"], v["y"], v["z"]], 1).astype(np.float64)
+    imgs = read_text_model(os.path.join(a.dataset, "sparse", "0"))[1]
+    Cm = s * np.array([-quat_to_R(q).T @ tt for _, _, q, tt in imgs]) @ R.T + t
+    fl = find_floor_plane(L, Cm)
+    if fl is None:
+        raise SystemExit("[ibr] no floor plane")
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+    json.dump({"floor": {"n": fl[0].tolist(), "d": float(fl[1])}, "sim3": {"scale": s, "R": R.tolist(), "t": t.tolist()}}, open(a.out, "w"), indent=1)
+    print(f"[ibr] floor -> {a.out}")
 
 
 def merge(a):
@@ -397,9 +416,15 @@ def main():
     p.add_argument("--min-sources", type=int, default=2); p.add_argument("--q-min", type=float, default=0.15)
     p.add_argument("--single-weight", type=float, default=0.0, help="> 0: pixels with a usable source (q >= --q-min) but no "
                    "verified consensus get this weight in _mask.png (value round(255 w) < 128; train_distill_gsplat.py --pseudo-soft)")
+    p.add_argument("--depth-where", choices=("all", "supervised"), default="all", help="_depth.npy target: every LiDAR-valid "
+                   "pixel, or only pixels with a colour weight (a depth-only surface gets an arbitrary colour: 'glassy' objects)")
     p.add_argument("--min-overlap", type=float, default=0.01, help="source considered if this share of the view projects into it")
     p.add_argument("--seed", type=int, default=0)
     p.set_defaults(func=views)
+    fl = sub.add_parser("floor", help="fit the floor plane (CPU venv with open3d) -> scene.json for `views --scene-json`")
+    fl.add_argument("--dataset", required=True); fl.add_argument("--cloud", required=True); fl.add_argument("--sim3-json", required=True)
+    fl.add_argument("--out", required=True)
+    fl.set_defaults(func=floor)
     m = sub.add_parser("merge")
     m.add_argument("--dataset", required=True); m.add_argument("--pseudo", required=True); m.add_argument("--out", required=True)
     m.set_defaults(func=merge)
