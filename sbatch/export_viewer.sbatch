@@ -19,6 +19,9 @@
 #      = all frames + extra low-blur frames, with ARM_FLAGS "... --iters 120000").
 #      CLEAN (1; 0 skips stage 4), CLEAN_DATA (harm-check frames, default the fine-tune frames; several datasets =
 #      union by image name, e.g. "$DATA <DF>/data" for a densified run), CLEAN_ARGS (extra clean_haze.py flags).
+#      PSEUDO_DS (a pseudo-view dataset, e.g. the LiDAR IBR views of sbatch/ibr_views.sbatch: stage 1 trains through
+#      scripts/train_distill_gsplat.py with them at gradient weight PSEUDO_W (0.3), PSEUDO_ARGS e.g. "--pseudo-depth" with
+#      "--depth-lambda 0.1" in ARM_FLAGS; the fine-tunes stay on the real frames),
 #      QAT=1 (stage 6): quantisation-aware fine-tune of the last export in the delivered frame (sbatch/qat_view.sbatch,
 #      QAT_ITERS 8000) -> <E>/<NAME><last variant>_refaxes_qat.ply + .compressed.ply (the laptop file), scored in the live
 #      SuperSplat at $P/onpath/test (in-sample for an all-frames export) and gated against the plain .compressed.ply.
@@ -51,9 +54,12 @@ echo "== 1. viewer-matched training ($PROF kernels): $ARM_FLAGS"
 if [ -n "${TRAIN_PLY:-}" ] && [ ! -f "$F/train/splat.ply" ]; then mkdir -p "$F/train"; cp "$TRAIN_PLY" "$F/train/splat.ply"; fi
 if [ ! -f "$F/train/splat.ply" ]; then
   mkdir -p "$F/train"
+  TRAINER=(scripts/train_viewer_gsplat.py)
+  # shellcheck disable=SC2206
+  [ -z "${PSEUDO_DS:-}" ] || TRAINER=(scripts/train_distill_gsplat.py --pseudo-dataset "$PSEUDO_DS" --pseudo-weight "${PSEUDO_W:-0.3}" --pseudo-soft ${PSEUDO_ARGS:-} --)
   # shellcheck disable=SC2086
   PATH="$(dirname "$SPY"):$PATH" PYTHONPATH="$CEAR_WS/gsplat-viewer-$PROF" TORCH_EXTENSIONS_DIR="$CEAR_WS/torch-ext-gsplat-viewer-$PROF" \
-    "$SPY" scripts/train_viewer_gsplat.py --dataset "$EDGS" --out "$F/train" --test-split-interval 0 \
+    "$SPY" "${TRAINER[@]}" --dataset "$EDGS" --out "$F/train" --test-split-interval 0 \
     --eval-dataset "$P/onpath/test" --viewer "$PROF" $ARM_FLAGS > "$F/train.log" 2>&1 || { tail -40 "$F/train.log"; exit 1; }
 fi
 grep -E '^\[vgs\] (held-out|[0-9]+ gaussians)' "$F/train.log" 2>/dev/null || true
