@@ -166,3 +166,9 @@ pipeline:
 # --- outputs --------------------------------------------------------------
 paths:
   out_root: "${CEAR_OUT}/{seq}"
+
+# generated 3D assets for one-sided free-standing objects (sbatch/mv_prior.sbatch REFIT_MODE=asset; cosmetic: invented backs)
+object_assets:
+  enable: true
+  min_back_coverage: 0.5      # objects whose share of camera-covered azimuth bins is below this are replaced
+  max_onpath_loss_db: 1.0     # per object: mean PSNR drop on the real frames that see it; above -> original kept
