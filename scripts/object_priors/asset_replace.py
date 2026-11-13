@@ -97,12 +97,17 @@ def main():
     ap.add_argument("--gen-dir", required=True); ap.add_argument("--sim3-json", required=True); ap.add_argument("--splat-depth-dir", default=None)
     ap.add_argument("--dataset", nargs="+", required=True); ap.add_argument("--out", required=True)
     ap.add_argument("--ids", type=int, nargs="*", default=None, help="debug override of the automatic target selection")
-    ap.add_argument("--min-back-coverage", type=float, default=0.5); ap.add_argument("--max-onpath-loss-db", type=float, default=0.3)
+    ap.add_argument("--min-back-coverage", type=float, default=0.5); ap.add_argument("--max-onpath-loss-db", type=float, default=0.5)
     ap.add_argument("--hybrid", type=int, default=1, help="1: keep the base gaussians the training views constrain (support weight >= --keep-w) and insert "
                     "asset gaussians only where no training camera sees them at / in front of the base surface (within --front-m); colour = the "
                     "kept front's statistics (no optimisation). 0: wholesale replacement + colour harmonisation on real frames")
     ap.add_argument("--keep-w", type=float, default=0.02, help="hybrid: base rows with training-view support weight >= this stay (below it no "
                     "training view can tell the row is there, so deleting it costs nothing on-path)")
+    ap.add_argument("--keep-rule", default="surface", choices=["surface", "weight"], help="hybrid: surface = keep only base rows that are the "
+                    "first visible surface (within --front-m of the base's rendered depth) in >= --min-views training views AND on / in front of the "
+                    "registered asset's surface there (never behind or inside it); weight = keep rows with support weight >= --keep-w")
+    ap.add_argument("--min-views", type=int, default=3); ap.add_argument("--refit-iters", type=int, default=800)
+    ap.add_argument("--front-move-k", type=float, default=0.3, help="refit: position / scale / rotation learning-rate factor of the kept front rows")
     ap.add_argument("--front-m", type=float, default=0.015); ap.add_argument("--max-scale-m", type=float, default=0.02)
     ap.add_argument("--max-resid-m", type=float, default=0.02); ap.add_argument("--max-outside", type=float, default=0.15)
     ap.add_argument("--bins", type=int, default=16); ap.add_argument("--cam-max-m", type=float, default=4.0)
@@ -123,6 +128,7 @@ def main():
     v = read_vertex(a.ply); Gm, op, sc = gauss_geom(v, s, R, t); N0 = len(v); ss = np.sort(sc, 1)
     wmax = np.load(a.support)["wmax"]; assert len(wmax) == N0, "support was computed for another PLY"
     dcb = np.stack([v[f"f_dc_{i}"] for i in range(3)], 1).astype(np.float64)
+    Xd_all = np.stack([v["x"], v["y"], v["z"]], 1).astype(np.float64)
     surfel = (wmax >= a.face_w) & (op > 0.7) & (ss[:, 0] < 0.3 * ss[:, 1]) & (ss[:, 2] < 3 * ss[:, 1])
     ometa, opts = load_objects(a.objects); n_f = np.array(ometa["floor"]["n"]); d_f = float(ometa["floor"]["d"])
     cams = cams_of(a.dataset[0])
@@ -160,29 +166,42 @@ def main():
         opa = np.clip(np.maximum(al["opacity"][k][k2], a.opaque), 1e-4, 1 - 1e-4)
         scl = np.minimum(scl, a.max_scale_m)                               # no large blobs: surface-sized gaussians only
         xd = ((xyz - t) @ R) / s; dele_k = inb; r["kept_front"] = 0
-        if a.hybrid:   # the real front stays: asset rows only where no training camera sees them at / in front of the base surface
-            kf = inb & (wmax >= a.keep_w); dele_k = inb & ~kf; r["kept_front"] = int(kf.sum())
-            shown = np.zeros(len(xd), bool)
+        vis_new = np.ones(len(xd), bool); kf = np.zeros(N0, bool)
+        if a.hybrid:   # the real front stays; back and interior are asset-only
+            import cv2
+            from scipy.spatial import cKDTree
+            ii = np.nonzero(inb)[0]; Xb = Xd_all[ii]; votes = np.zeros(len(ii), int); avis = np.zeros(len(xd), bool); fset = set(frames_k); tol = a.front_m / s
             for (nm_, W, H, fx, fy, cx, cy, Rcw, tcw, _), SD in zip(cams, sdep):
-                if SD is None or nm_ not in set(frames_k):
+                if SD is None or nm_ not in fset:
                     continue
-                Pc = xd @ Rcw.T + tcw; z = Pc[:, 2]; ok = z > 0.05; zz = np.where(ok, z, 1.0)
-                u = np.floor(fx * Pc[:, 0] / zz + cx).astype(int); vv = np.floor(fy * Pc[:, 1] / zz + cy).astype(int)
-                ok &= (u >= 0) & (u < W) & (vv >= 0) & (vv < H)
-                rr = np.linalg.norm(Pc, axis=1); dd = SD[vv[ok], u[ok]]
-                sh = np.zeros(len(xd), bool); sh[ok] = (dd <= 0) | (rr[ok] < dd + a.front_m / s); shown |= sh
+                Pa = xd @ Rcw.T + tcw; oka = Pa[:, 2] > 0.05; zz = np.where(oka, Pa[:, 2], 1.0)       # the asset's z-buffer in this view
+                ua = np.floor(fx * Pa[:, 0] / zz + cx).astype(int); va = np.floor(fy * Pa[:, 1] / zz + cy).astype(int)
+                oka &= (ua >= 0) & (ua < W) & (va >= 0) & (va < H); ra = np.linalg.norm(Pa, axis=1)
+                zb = np.full((H, W), 1e9, np.float32); np.minimum.at(zb, (va[oka], ua[oka]), ra[oka].astype(np.float32))
+                zb = cv2.erode(zb, np.ones((5, 5), np.uint8))
+                va_ = np.zeros(len(xd), bool); va_[oka] = ra[oka] <= zb[va[oka], ua[oka]] + tol; avis |= va_
+                Pb = Xb @ Rcw.T + tcw; okb = Pb[:, 2] > 0.05; zz = np.where(okb, Pb[:, 2], 1.0)
+                ub = np.floor(fx * Pb[:, 0] / zz + cx).astype(int); vb = np.floor(fy * Pb[:, 1] / zz + cy).astype(int)
+                okb &= (ub >= 0) & (ub < W) & (vb >= 0) & (vb < H); rb = np.linalg.norm(Pb, axis=1)
+                d_ = SD[vb[okb], ub[okb]]; za_ = zb[vb[okb], ub[okb]]
+                # first visible surface of the base here AND on / in front of the asset's surface (not behind or inside it)
+                votes[okb] += (d_ > 0) & (np.abs(rb[okb] - d_) < tol) & (za_ < 1e8) & (rb[okb] <= za_ + tol)
+            if a.keep_rule == "surface":
+                kf[ii[(votes >= a.min_views) & (op[ii] > 0.3)]] = True
+            else:
+                kf = inb & (wmax >= a.keep_w)
+            dele_k = inb & ~kf; r["kept_front"] = int(kf.sum()); drop = np.zeros(len(xd), bool)
             if kf.any():
-                from scipy.spatial import cKDTree
-                shown |= cKDTree(Gm[kf]).query(xyz)[0] < a.front_m          # coincident with a kept surfel
+                drop = cKDTree(Gm[kf]).query(xyz)[0] < a.front_m             # coincident with a kept surfel
                 rgb_a = 0.5 + C0 * dc; rgb_f = np.clip(0.5 + C0 * dcb[kf], 0, 1)   # seam: the kept front's colour statistics
                 gn = np.clip(rgb_f.std(0) / np.maximum(rgb_a.std(0), 1e-3), 0.7, 1.4)
                 dc = (np.clip((rgb_a - rgb_a.mean(0)) * gn + rgb_f.mean(0), 0, 1) - 0.5) / C0
-            xyz, xd, rot, scl, dc, opa = xyz[~shown], xd[~shown], rot[~shown], scl[~shown], dc[~shown], opa[~shown]
-            r["asset_rows_seen_dropped"] = int(shown.sum())
+            xyz, xd, rot, scl, dc, opa = xyz[~drop], xd[~drop], rot[~drop], scl[~drop], dc[~drop], opa[~drop]; vis_new = avis[~drop]
+            r["asset_rows_coincident_dropped"] = int(drop.sum()); r["asset_rows_visible"] = int(vis_new.sum())
         dc = (np.clip(0.5 + C0 * dc, 0, 1) - 0.5) / C0                       # DC colour only, in gamut
         Rd = R.T[None] @ rot; det = np.linalg.det(Rd); Rd[det < 0, :, 0] *= -1
         q = Rotation.from_matrix(Rd).as_quat(); q = np.c_[q[:, 3], q[:, :3]]
-        cand[oid] = {"del": dele_k, "frames": set(frames_k), "new": {"means": xd, "scales": np.log(np.maximum(scl / s, 1e-9)), "quats": q,
+        cand[oid] = {"del": dele_k, "kf": kf, "vis": vis_new, "frames": set(frames_k), "new": {"means": xd, "scales": np.log(np.maximum(scl / s, 1e-9)), "quats": q,
                                                                      "opacities": np.log(opa / (1 - opa)), "sh0": dc[:, None]}}
         r["deleted"], r["inserted"] = int(dele_k.sum()), int(len(xyz))
     vtx, p0 = load_ply(a.ply, dev); deg = sh_deg(p0); K = p0["shN"].shape[1]
@@ -190,14 +209,22 @@ def main():
     tr = all_frames(a.dataset); name2i = {n_: i for i, (n_, _, _) in enumerate(tr)}
     gtf = lambda n_: next(os.path.join(ds, "images", n_) for ds in a.dataset if os.path.exists(os.path.join(ds, "images", n_)))
 
-    def assemble(ids_):
-        dele = np.zeros(N0, bool)
+    refined = {k_: p0[k_].clone() for k_ in p0}                             # base rows after the front refit (kept rows only)
+
+    def assemble(ids_, use_refined=True):
+        dele = np.zeros(N0, bool); B = {k_: p0[k_] for k_ in p0}
         for i_ in ids_:
             dele |= cand[i_]["del"]
+        if use_refined and ids_ and a.hybrid:
+            B = {k_: p0[k_].clone() for k_ in p0}
+            for i_ in ids_:
+                m_ = torch.tensor(cand[i_]["kf"], device=dev)
+                for k_ in B:
+                    B[k_][m_] = refined[k_][m_]
         kb = torch.tensor(~dele, device=dev); P = {}
         for k_ in p0:
             add = [np.zeros((len(cand[i_]["new"]["means"]), K, 3)) if k_ == "shN" else cand[i_]["new"][k_] for i_ in ids_]
-            P[k_] = torch.cat([p0[k_][kb]] + [torch.tensor(x, dtype=torch.float32, device=dev) for x in add])
+            P[k_] = torch.cat([B[k_][kb]] + [torch.tensor(x, dtype=torch.float32, device=dev) for x in add])
         return P, dele, int(kb.sum())
     ids_ = sorted(cand)
     if ids_ and a.harm_iters > 0 and not a.hybrid:                         # wholesale mode: colour-only harmonisation on real frames
@@ -214,6 +241,38 @@ def main():
         off = nb
         for i_ in ids_:
             m_ = len(cand[i_]["new"]["means"]); cand[i_]["new"]["sh0"] = params["sh0"].detach()[off:off + m_].cpu().numpy(); off += m_
+    if ids_ and a.hybrid and a.refit_iters > 0:   # recover on-path: kept front rows (all params) + colour of the asset rows the cameras see
+        P, dele, nb = assemble(ids_, use_refined=False); params = torch.nn.ParameterDict({k_: torch.nn.Parameter(x.clone()) for k_, x in P.items()})
+        kf_all = np.zeros(N0, bool)
+        for i_ in ids_:
+            kf_all |= cand[i_]["kf"]
+        n_all = len(P["means"]); frontm = torch.zeros(n_all, dtype=torch.bool, device=dev); frontm[:nb] = torch.tensor(kf_all[~dele], device=dev)
+        vism = torch.zeros(n_all, dtype=torch.bool, device=dev); vism[nb:] = torch.tensor(np.concatenate([cand[i_]["vis"] for i_ in ids_]), device=dev)
+        fr = sorted({name2i[n_] for i_ in ids_ for n_ in cand[i_]["frames"] if n_ in name2i})
+        cen_ = np.stack([c[:3, 3] for _, _, c in tr]); ssc = float(np.linalg.norm(cen_ - cen_.mean(0), axis=1).max()) * 1.1
+        lrs = {"means": 1.6e-5 * ssc * a.front_move_k, "scales": 5e-3 * a.front_move_k, "quats": 1e-3 * a.front_move_k, "opacities": 0.025, "sh0": 2.5e-3, "shN": 2.5e-3 / 20}
+        opt = torch.optim.Adam([{"params": [params[k_]], "lr": lrs[k_]} for k_ in params], eps=1e-15)
+        for step in range(1, a.refit_iters + 1 if fr else 1):
+            i = fr[np.random.randint(len(fr))]; n_, cam, c2w = tr[i]
+            img, _, _ = Rv.render(params, to_t(np.linalg.inv(c2w), dev), *cam_args(cam), sh_degree=deg)
+            gt = load_rgb(gtf(n_), dev).float() / 255
+            l = 0.8 * (img - gt).abs().mean() + 0.2 * (1 - ssim(img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None]))
+            opt.zero_grad(set_to_none=True); l.backward()
+            for k_ in params:
+                g = params[k_].grad
+                if g is None:
+                    continue
+                g[~torch.isfinite(g)] = 0; g[~(frontm | vism)] = 0
+                if k_ != "sh0":
+                    g[vism] = 0                                             # asset geometry / opacity frozen
+            opt.step()
+        with torch.no_grad():
+            idx = torch.tensor(np.nonzero(~dele)[0], device=dev)[frontm[:nb]]
+            for k_ in refined:
+                refined[k_][idx] = params[k_].detach()[:nb][frontm[:nb]]
+            off = nb
+            for i_ in ids_:
+                m_ = len(cand[i_]["new"]["means"]); cand[i_]["new"]["sh0"] = params["sh0"].detach()[off:off + m_].cpu().numpy(); off += m_
     acc = []
     with torch.no_grad():                                                  # accept test: only this object replaced
         for i_ in ids_:
