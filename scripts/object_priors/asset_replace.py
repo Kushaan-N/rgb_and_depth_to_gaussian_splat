@@ -11,8 +11,10 @@ a rejected object keeps its original gaussians. No per-object or per-scene const
 Per target: the generated assets <gen-dir>/obj<id>_s<seed>.npz (learned_prior.py: TRELLIS multi-image gaussians in
 a unit cube, +z up) are registered to the object's evidence (well-seen splat surfels + a LiDAR subsample) by
 object_priors.align_generated (yaw scan x scale, trimmed ICP with yaw + scale + translation; lowest residual of the
-seeds), colour-calibrated on the seen part (per-channel affine), then every base row in the object's tight box above the
-floor is deleted and the asset's gaussians (opacity > --min-op, made opaque: opacity >= --opaque) are inserted.
+seeds). Default (--hybrid 1): the base's well-seen front gaussians stay, the rest of the object's tight box above the floor
+is deleted, and the asset's gaussians (made opaque, DC colour matched to the kept front's statistics) come in only where no
+training camera sees them at / in front of the base surface: the asset is the unseen side and the interior shell.
+--hybrid 0: every base row in the box is deleted and the whole asset inserted.
 Harmonisation: colour only (SH-DC of the asset rows; geometry frozen) on the real training frames that see the object,
 viewer-exact L1+SSIM, --harm-iters.
 
@@ -95,12 +97,18 @@ def main():
     ap.add_argument("--gen-dir", required=True); ap.add_argument("--sim3-json", required=True); ap.add_argument("--splat-depth-dir", default=None)
     ap.add_argument("--dataset", nargs="+", required=True); ap.add_argument("--out", required=True)
     ap.add_argument("--ids", type=int, nargs="*", default=None, help="debug override of the automatic target selection")
-    ap.add_argument("--min-back-coverage", type=float, default=0.5); ap.add_argument("--max-onpath-loss-db", type=float, default=1.0)
+    ap.add_argument("--min-back-coverage", type=float, default=0.5); ap.add_argument("--max-onpath-loss-db", type=float, default=0.3)
+    ap.add_argument("--hybrid", type=int, default=1, help="1: keep the base gaussians the training views constrain (support weight >= --keep-w) and insert "
+                    "asset gaussians only where no training camera sees them at / in front of the base surface (within --front-m); colour = the "
+                    "kept front's statistics (no optimisation). 0: wholesale replacement + colour harmonisation on real frames")
+    ap.add_argument("--keep-w", type=float, default=0.02, help="hybrid: base rows with training-view support weight >= this stay (below it no "
+                    "training view can tell the row is there, so deleting it costs nothing on-path)")
+    ap.add_argument("--front-m", type=float, default=0.015); ap.add_argument("--max-scale-m", type=float, default=0.02)
     ap.add_argument("--max-resid-m", type=float, default=0.02); ap.add_argument("--max-outside", type=float, default=0.15)
     ap.add_argument("--bins", type=int, default=16); ap.add_argument("--cam-max-m", type=float, default=4.0)
     ap.add_argument("--face-w", type=float, default=0.2); ap.add_argument("--ev-min-h", type=float, default=0.03)
     ap.add_argument("--zone-m", type=float, default=0.02); ap.add_argument("--floor-m", type=float, default=0.01)
-    ap.add_argument("--min-op", type=float, default=0.3); ap.add_argument("--opaque", type=float, default=0.9)
+    ap.add_argument("--min-op", type=float, default=0.3); ap.add_argument("--opaque", type=float, default=0.98)
     ap.add_argument("--align", default="box", choices=["box", "icp"], help="box: scale / position constrained by the object's box "
                     "(box_align); icp: object_priors.align_generated (free scale: ambiguous on box-like objects)")
     ap.add_argument("--harm-iters", type=int, default=800); ap.add_argument("--display-scale", type=float, default=1.8)
@@ -148,12 +156,35 @@ def main():
         if r["resid_m"] is not None and (r["resid_m"] > a.max_resid_m or r["outside_box"] > a.max_outside):
             r["decision"] = f"rejected: registration (residual {r['resid_m']} m > {a.max_resid_m} or outside box {r['outside_box']} > {a.max_outside})"; continue
         k = al["opacity"] > a.min_op; k2 = ob.loc(al["xyz"][k])[:, 2] > a.floor_m * 0.5
-        xyz = al["xyz"][k][k2]; rot = al["rot"][k][k2]; scl = al["scale"][k][k2]; dc = al["dc"][k][k2]; opa = np.clip(np.maximum(al["opacity"][k][k2], a.opaque), 1e-4, 1 - 1e-4)
+        xyz = al["xyz"][k][k2]; rot = al["rot"][k][k2]; scl = al["scale"][k][k2]; dc = al["dc"][k][k2]
+        opa = np.clip(np.maximum(al["opacity"][k][k2], a.opaque), 1e-4, 1 - 1e-4)
+        scl = np.minimum(scl, a.max_scale_m)                               # no large blobs: surface-sized gaussians only
+        xd = ((xyz - t) @ R) / s; dele_k = inb; r["kept_front"] = 0
+        if a.hybrid:   # the real front stays: asset rows only where no training camera sees them at / in front of the base surface
+            kf = inb & (wmax >= a.keep_w); dele_k = inb & ~kf; r["kept_front"] = int(kf.sum())
+            shown = np.zeros(len(xd), bool)
+            for (nm_, W, H, fx, fy, cx, cy, Rcw, tcw, _), SD in zip(cams, sdep):
+                if SD is None or nm_ not in set(frames_k):
+                    continue
+                Pc = xd @ Rcw.T + tcw; z = Pc[:, 2]; ok = z > 0.05; zz = np.where(ok, z, 1.0)
+                u = np.floor(fx * Pc[:, 0] / zz + cx).astype(int); vv = np.floor(fy * Pc[:, 1] / zz + cy).astype(int)
+                ok &= (u >= 0) & (u < W) & (vv >= 0) & (vv < H)
+                rr = np.linalg.norm(Pc, axis=1); dd = SD[vv[ok], u[ok]]
+                sh = np.zeros(len(xd), bool); sh[ok] = (dd <= 0) | (rr[ok] < dd + a.front_m / s); shown |= sh
+            if kf.any():
+                from scipy.spatial import cKDTree
+                shown |= cKDTree(Gm[kf]).query(xyz)[0] < a.front_m          # coincident with a kept surfel
+                rgb_a = 0.5 + C0 * dc; rgb_f = np.clip(0.5 + C0 * dcb[kf], 0, 1)   # seam: the kept front's colour statistics
+                gn = np.clip(rgb_f.std(0) / np.maximum(rgb_a.std(0), 1e-3), 0.7, 1.4)
+                dc = (np.clip((rgb_a - rgb_a.mean(0)) * gn + rgb_f.mean(0), 0, 1) - 0.5) / C0
+            xyz, xd, rot, scl, dc, opa = xyz[~shown], xd[~shown], rot[~shown], scl[~shown], dc[~shown], opa[~shown]
+            r["asset_rows_seen_dropped"] = int(shown.sum())
+        dc = (np.clip(0.5 + C0 * dc, 0, 1) - 0.5) / C0                       # DC colour only, in gamut
         Rd = R.T[None] @ rot; det = np.linalg.det(Rd); Rd[det < 0, :, 0] *= -1
         q = Rotation.from_matrix(Rd).as_quat(); q = np.c_[q[:, 3], q[:, :3]]
-        cand[oid] = {"del": inb, "frames": set(frames_k), "new": {"means": ((xyz - t) @ R) / s, "scales": np.log(np.maximum(scl / s, 1e-9)), "quats": q,
-                                                                  "opacities": np.log(opa / (1 - opa)), "sh0": dc[:, None]}}
-        r["deleted"], r["inserted"] = int(inb.sum()), int(len(xyz))
+        cand[oid] = {"del": dele_k, "frames": set(frames_k), "new": {"means": xd, "scales": np.log(np.maximum(scl / s, 1e-9)), "quats": q,
+                                                                     "opacities": np.log(opa / (1 - opa)), "sh0": dc[:, None]}}
+        r["deleted"], r["inserted"] = int(dele_k.sum()), int(len(xyz))
     vtx, p0 = load_ply(a.ply, dev); deg = sh_deg(p0); K = p0["shN"].shape[1]
     Rv = ViewerRaster("ss352", "exact", display_scale=a.display_scale)
     tr = all_frames(a.dataset); name2i = {n_: i for i, (n_, _, _) in enumerate(tr)}
@@ -169,7 +200,7 @@ def main():
             P[k_] = torch.cat([p0[k_][kb]] + [torch.tensor(x, dtype=torch.float32, device=dev) for x in add])
         return P, dele, int(kb.sum())
     ids_ = sorted(cand)
-    if ids_:                                                               # colour-only harmonisation (geometry frozen)
+    if ids_ and a.harm_iters > 0 and not a.hybrid:                         # wholesale mode: colour-only harmonisation on real frames
         P, dele, nb = assemble(ids_); params = torch.nn.ParameterDict({k_: torch.nn.Parameter(x.clone()) for k_, x in P.items()})
         newm = torch.zeros(len(P["means"]), dtype=torch.bool, device=dev); newm[nb:] = True
         fr = sorted({name2i[n_] for i_ in ids_ for n_ in cand[i_]["frames"] if n_ in name2i})
