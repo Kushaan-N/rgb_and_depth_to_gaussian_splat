@@ -13,7 +13,8 @@
 #             centre; scripts/offpath_bench_prep.py) + the SuperSplat editor's default view of the PLY in the delivered
 #             axes -> <OB>/shots/eyeball/<arm>/_montage.jpg.
 # Arm = <train>[+<post>...]:
-#   train  base | ibr<w>[_n<N>][_d<lambda>][_ftp]   ibr: LiDAR image-based-rendering pseudo-views far from the path
+#   train  base | ibr<w>[_n<N>][_d<lambda>][_u<frac>][_ftp]   (u: pseudo-views only for the first frac of the steps)
+#            ibr: LiDAR image-based-rendering pseudo-views far from the path
 #          (scripts/make_lidar_ibr_views.py, N views, default 200) added to training through scripts/train_distill_gsplat.py at
 #          gradient weight w; d<lambda>: LiDAR depth term at the pseudo-views (--pseudo-depth, trainer --depth-lambda);
 #          ftp: the WD fine-tune also sees the pseudo-views (merged dataset, unsupervised pixels masked).
@@ -21,7 +22,8 @@
 #   ARMS="base base+shfit" WHY=... scripts/sub.sh -A $CEAR_SLURM_ACCOUNT -o logs/%x-%j.out sbatch/offpath_bench.sbatch configs/<seq>.yaml
 # MODE (space-separated, default "arms report"): arms | ibrval (IBR generator validated at the 108 held-out poses from the
 #   training frames only -> <OB>/ibr/val, report/_ibr.*.json; then every arm in ARMS is (re)scored on that mask) | report.
-# Env: ITERS (30000), FT_ITERS (2000), OB_OUT ($P/offpath_bench), SORTS ("depth radial"), TRAIN_SRC ($P/edgs/off/data),
+# Env: PSEUDO_EXTRA (more pseudo-datasets added to an ibr arm's views, e.g. the generated ones of sbatch/afx_scene.sbatch;
+#      name the arm with a t<label> token), TRAIN_ARGS (extra trainer flags, e.g. "--hy-lpips 0.2:0.1"), ITERS (30000), FT_ITERS (2000), OB_OUT ($P/offpath_bench), SORTS ("depth radial"), TRAIN_SRC ($P/edgs/off/data),
 #      IBR_ARGS (extra make_lidar_ibr_views.py views flags), IBR_TAG (suffix of the IBR view / validation dirs and of
 #      the *_ibrmask reports: a new generator version next to the old one), IBR_EVERY (1; validation stride), SHFIT_ARGS.
 #      A train token t<label> is name-only (e.g. ibr0.3_tv2 = the IBR_TAG=_v2 views).
@@ -80,9 +82,9 @@ ibr_views() {  # <N> -> V: the pseudo-dataset (virtual cameras in LiDAR free spa
 
 RECIPE=(--test-split-interval 0 --strategy improved --budget 4000000 --viewer pc274 --sort dual --msssim-lambda 0.2)
 train_arm() {  # base | ibr<w>[_n<N>][_d<lambda>][_ftp]
-  local arm="$1" R="$OB/arms/$1" t W="" N=200 DL="" FTP=0; IFS=_ read -ra T <<< "$1"
+  local arm="$1" R="$OB/arms/$1" t W="" N=200 DL="" FTP=0 UN=""; IFS=_ read -ra T <<< "$1"
   for t in "${T[@]}"; do case "$t" in
-    base) ;; ibr[0-9]*) W="${t#ibr}" ;; n[0-9]*) N="${t#n}" ;; d[0-9]*) DL="${t#d}" ;; ftp) FTP=1 ;; t*) ;;
+    base) ;; ibr[0-9]*) W="${t#ibr}" ;; n[0-9]*) N="${t#n}" ;; d[0-9]*) DL="${t#d}" ;; ftp) FTP=1 ;; u[0-9]*) UN="${t#u}" ;; t*) ;;
     *) echo "unknown token $t in $1"; return 1 ;; esac; done
   mkdir -p "$R"
   if [ ! -f "$R/train/splat.ply" ]; then
@@ -93,9 +95,14 @@ train_arm() {  # base | ibr<w>[_n<N>][_d<lambda>][_ftp]
         > "$R/train.log" 2>&1 || { tail -40 "$R/train.log"; return 1; }
     else
       ibr_views "$N" || return 1
+      if [ -n "${PSEUDO_EXTRA:-}" ]; then                      # + generated pseudo-views (sbatch/afx_scene.sbatch <W>/pseudo ...)
+        # shellcheck disable=SC2086
+        [ -f "$R/pseudo/sparse/0/images.txt" ] || "$CPUPY" scripts/afx_scene.py union --inputs "$V" $PSEUDO_EXTRA --out "$R/pseudo"
+        V="$R/pseudo"
+      fi
       echo "== [$arm] train ($ITERS its) + $V at weight $W${DL:+, pseudo depth lambda $DL}"
-      GS pc274 scripts/train_distill_gsplat.py --pseudo-dataset "$V" --pseudo-weight "$W" --pseudo-soft ${DL:+--pseudo-depth} -- \
-        --dataset "$DS" --out "$R/train" --eval-dataset "$ONTEST" --iters "$ITERS" "${RECIPE[@]}" ${DL:+--depth-lambda "$DL"} \
+      GS pc274 scripts/train_distill_gsplat.py --pseudo-dataset "$V" --pseudo-weight "$W" --pseudo-soft ${DL:+--pseudo-depth} ${UN:+--pseudo-until "$UN"} -- \
+        --dataset "$DS" --out "$R/train" --eval-dataset "$ONTEST" --iters "$ITERS" "${RECIPE[@]}" ${DL:+--depth-lambda "$DL"} ${TRAIN_ARGS:-} \
         > "$R/train.log" 2>&1 || { tail -40 "$R/train.log"; return 1; }
     fi
   fi
