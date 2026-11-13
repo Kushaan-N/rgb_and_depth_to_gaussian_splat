@@ -86,7 +86,8 @@ if [ "${REFIT_MODE:-zone}" = asset ]; then   # whole generated 3D asset per obje
   echo "== 3. generated-asset replacement (asset_replace.py)"
   needt "$T/refit.ply" && "$SPY" scripts/object_priors/asset_replace.py --ply "$IN" --support "$D/support.npz" --objects "$D/objects" \
     --gen-dir "$AG" --sim3-json "$P/sim3.json" --dataset "$DATA" "$TEST" --splat-depth-dir "$D/depth" --out "$T/refit.ply" \
-    --min-back-coverage "$(get object_assets.min_back_coverage 0.5)" --max-onpath-loss-db "$(get object_assets.max_onpath_loss_db 0.3)" \
+    --min-back-coverage "$(get object_assets.min_back_coverage 0.5)" --max-onpath-loss-db "$(get object_assets.max_onpath_loss_db 0.5)" \
+    --keep-rule "$(get object_assets.keep_rule surface)" --min-views "$(get object_assets.min_views 3)" --refit-iters "$(get object_assets.refit_iters 800)" \
     --hybrid "$(get object_assets.hybrid 1)" --front-m "$(get object_assets.front_m 0.015)" --keep-w "$(get object_assets.front_keep_w 0.02)" ${REFIT_ARGS:-}
 elif [ "${REFIT_MODE:-zone}" = exemplar ]; then   # real gaussians of a well-covered similar object / own mirrored side
   echo "== 3. exemplar transfer (exemplar_transfer.py)"
