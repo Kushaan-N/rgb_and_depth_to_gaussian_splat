@@ -34,6 +34,8 @@ real supervision at views the robot never took.
             mask       >= --min-sources consistent sources of which one views the point from >= --min-parallax deg
                        away from the reference (agreement then tests the geometry too), best q >= --q-min, reliable
                        geometry.
+          views --floor-map F.npz: no views; the top-down floor texture from the same IBR (floor_map) for
+          scripts/floor_fill_ibr.py (floor cells no frame saw -> inpainted floor gaussians).
   floor   fit the floor plane once (CPU venv: open3d) -> scene.json for `views --scene-json`.
   merge   <real dataset> + <views dataset> -> one COLMAP dataset (links) + ignore_masks, for trainers without a
           pseudo-view hook (finetune_ply_viewer.py --dataset MERGED --mask-dir MERGED/ignore_masks).
@@ -76,6 +78,44 @@ def dense_floor(L, n, d, cell=0.04, sub=4, thr=0.03, close_m=0.3):
     gx = (ci[:, None, None] + o[None, :, None]) * cell + x0; gy = (cj[:, None, None] + o[None, None, :]) * cell + y0
     gx, gy = np.broadcast_arrays(gx, gy)
     return gx.reshape(-1, 1) * e1 + gy.reshape(-1, 1) * e2 - d * n                                   # h = n.x + d = 0
+
+
+def floor_map(a, L, G, n, d, s, R, t, to_ds, T, ibr_points, src, dev):
+    """Top-down texture of the floor from the training frames (the same IBR, at an orthographic --map-cell grid on the
+    fitted plane) -> npz {rgb, hard, single, any (source colour exists), occ (floor exists: LiDAR floor returns, holes
+    closed), obj (LiDAR returns 0.04-2.2 m above the cell: something stands there), x0, y0, cell, e1, e2, n, d, sim3}.
+    scripts/floor_fill_ibr.py inpaints the cells no frame saw and turns them into floor gaussians."""
+    import torch
+    from scipy import ndimage
+    e1, e2 = floor_basis(n); mc = a.map_cell
+    F_ = G[np.abs(G @ n + d) < 0.03]; x, y = F_ @ e1, F_ @ e2; x0, y0 = x.min(), y.min()
+    gx, gy = int((x.max() - x0) / mc) + 1, int((y.max() - y0) / mc) + 1
+    occ = np.zeros((gx, gy), bool); occ[((x - x0) / mc).astype(int), ((y - y0) / mc).astype(int)] = True
+    occ = ndimage.binary_closing(np.pad(occ, 8), iterations=4)[8:-8, 8:-8]              # the dense floor is sampled at 1 cm
+    hh = L @ n + d; O = L[(hh > 0.04) & (hh < 2.2)]
+    oi, oj = ((O @ e1 - x0) / mc).astype(int), ((O @ e2 - y0) / mc).astype(int); ok = (oi >= 0) & (oi < gx) & (oj >= 0) & (oj < gy)
+    cnt = np.bincount(oi[ok] * gy + oj[ok], minlength=gx * gy).reshape(gx, gy)
+    k = max(1, int(round(0.04 / mc)))
+    obj = ndimage.binary_dilation(ndimage.uniform_filter(cnt.astype(np.float32), 2 * k + 1) * (2 * k + 1) ** 2 >= 3, iterations=k)
+    ci, cj = np.nonzero(occ)
+    Am = ((ci + 0.5) * mc + x0)[:, None] * e1 + ((cj + 0.5) * mc + y0)[:, None] * e2 - d * n
+    A = T(to_ds(Am)); du, dv = T(R.T @ e2) * (mc / s), T(R.T @ e1) * (mc / s)             # x = e2, y = e1: seen from above
+    rgb = np.zeros((gx, gy, 3), np.float32); hard = np.zeros((gx, gy), bool); single = np.zeros_like(hard); anym = np.zeros_like(hard)
+    W, H, K = src[0][4], src[0][5], src[0][3]
+    for c0 in range(0, len(A), 400000):
+        sl = slice(c0, c0 + 400000)
+        c, h_, s_, a_, _ = ibr_points(A[sl], A[sl] + du, A[sl] + dv, K[0], K[1], K[2], K[3], W, H)
+        rgb[ci[sl], cj[sl]] = c.cpu().numpy(); hard[ci[sl], cj[sl]] = h_.cpu().numpy()
+        single[ci[sl], cj[sl]] = s_.cpu().numpy(); anym[ci[sl], cj[sl]] = a_.cpu().numpy()
+    os.makedirs(os.path.dirname(os.path.abspath(a.floor_map)), exist_ok=True)
+    np.savez_compressed(a.floor_map, rgb=rgb, hard=hard, single=single, any=anym, occ=occ, obj=obj, x0=x0, y0=y0, cell=mc, e1=e1, e2=e2,
+                        n=n, d=d, sim3_s=s, sim3_R=R, sim3_t=t)
+    from PIL import Image
+    Image.fromarray(np.clip(rgb * 255, 0, 255).astype(np.uint8)).save(os.path.splitext(a.floor_map)[0] + ".png")
+    info = {"cells": int(occ.sum()), "cell_m": mc, "hard": round(float(hard[occ].mean()), 4), "single": round(float((single & ~hard)[occ].mean()), 4),
+            "any": round(float(anym[occ].mean()), 4), "object_cells": round(float(obj[occ].mean()), 4),
+            "unseen_free_floor_m2": round(float((occ & ~anym & ~obj).sum()) * mc * mc, 3)}
+    print("IBR_FLOOR_MAP " + json.dumps(info), flush=True)
 
 
 def get_floor(a, L, Cm):
@@ -181,6 +221,82 @@ def views(a):
     print(f"[ibr] source depths rendered ({time.time() - t_start:.0f}s); LiDAR-valid share median "
           f"{float(np.median([float((s_[6] > 0).float().mean()) for s_ in src])):.3f}", flush=True)
 
+    def ibr_points(A, B, Cc_, fx, fy, cx, cy, W, H):
+        """Colour of world points A (P,3; B / Cc_ = their neighbours one target pixel along +x / +y, seen from the FRONT)
+        from the source frames -> colour (P,3), hard (verified consensus), single (usable, unverified), any, #sources."""
+        P = len(A); nsrc = 0
+        # candidate sources: a sparse subset of the points inside the frustum
+        sub = A[:: max(1, P // 600)]
+        pc = torch.einsum("sij,nj->sni", SR, sub) + ST[:, None]
+        zz = pc[..., 2].clamp_min(1e-6)
+        inside = (pc[..., 2] > 0.05) & (pc[..., 0] / zz * fx + cx > 0) & (pc[..., 0] / zz * fx + cx < W) & \
+                 (pc[..., 1] / zz * fy + cy > 0) & (pc[..., 1] / zz * fy + cy < H)                  # (same intrinsics model)
+        cand = torch.nonzero(inside.float().mean(1) > a.min_overlap)[:, 0].tolist()
+        Qb = torch.zeros(P, a.topk, device=dev); Fb = torch.zeros(P, a.topk, 6, device=dev)          # q | colour, direction
+        gq = torch.zeros(P, device=dev); gf = torch.zeros(P, 6, device=dev); gcur = -1
+
+        def flush():                                                                               # group best -> top-K
+            i_ = torch.nonzero(gq > 0)[:, 0]
+            if len(i_):
+                allq = torch.cat([Qb[i_], gq[i_, None]], 1); allf = torch.cat([Fb[i_], gf[i_, None]], 1)
+                tq, ti = torch.topk(allq, a.topk, dim=1)
+                Qb[i_] = tq; Fb[i_] = torch.gather(allf, 1, ti[..., None].expand(-1, -1, 6))
+            gq.zero_()
+
+        for si in cand:
+            if si // a.group != gcur:                                                              # consecutive frames = one
+                flush(); gcur = si // a.group                                                      # vote (no parallax)
+            _, Rs, ts, Ks, Ws, Hs, Ds, Is = src[si]
+            fxs, fys, cxs, cys = Ks
+            pa = A @ Rs.T + ts; za = pa[:, 2]
+            ua, va = fxs * pa[:, 0] / za + cxs, fys * pa[:, 1] / za + cys
+            i = torch.nonzero((za > 0.05) & (ua >= 0.5) & (ua < Ws - 0.5) & (va >= 0.5) & (va < Hs - 0.5))[:, 0]
+            if len(i) == 0:
+                continue
+            ua, va, ra = ua[i], va[i], torch.linalg.norm(pa[i], dim=1)
+            ds_ = Ds[va.long(), ua.long()].double()
+            okd = (ds_ > 0) & ((ra - ds_).abs() < a.tol_rel * ds_ + a.tol_abs / s)
+            pb, pc_ = B[i] @ Rs.T + ts, Cc_[i] @ Rs.T + ts
+            okd &= (pb[:, 2] > 0.05) & (pc_[:, 2] > 0.05)
+            ja, jc = fxs * pb[:, 0] / pb[:, 2] + cxs - ua, fys * pb[:, 1] / pb[:, 2] + cys - va     # d(u_s, v_s) / d x_t
+            jb, jd = fxs * pc_[:, 0] / pc_[:, 2] + cxs - ua, fys * pc_[:, 1] / pc_[:, 2] + cys - va  # d(u_s, v_s) / d y_t
+            det = ja * jd - jb * jc
+            s1 = ja * ja + jb * jb + jc * jc + jd * jd
+            s2 = torch.sqrt((ja * ja + jb * jb - jc * jc - jd * jd) ** 2 + 4 * (ja * jc + jb * jd) ** 2)
+            smin = torch.sqrt(((s1 - s2) / 2).clamp_min(0))
+            q = torch.where(smin <= 1, smin, smin.clamp_min(1e-6) ** -0.25)
+            q = torch.where(okd & (det > 0) & torch.isfinite(q), q, torch.zeros_like(q)).float()
+            kq = torch.nonzero(q > 0)[:, 0]
+            if len(kq) == 0:
+                continue
+            i, q = i[kq], q[kq]
+            grid = torch.stack([ua[kq] / Ws * 2 - 1, va[kq] / Hs * 2 - 1], -1).float()[None, None]
+            c = F.grid_sample(Is.float() / 255, grid, mode="bilinear", align_corners=False)[0, :, 0].T   # (n,3)
+            dv = F.normalize((-ts @ Rs) - A[i], dim=-1).float()                                    # point -> source centre
+            b = q > gq[i]; ib = i[b]
+            gq[ib] = q[b]; gf[ib] = torch.cat([c[b], dv[b]], 1); nsrc += 1
+        flush()
+        Cb, Db = Fb[..., :3], Fb[..., 3:]
+        vq = Qb > 0
+        diff = (Cb[:, :, None] - Cb[:, None]).abs().amax(-1)
+        agree = (diff < a.tau) & vq[:, :, None] & vq[:, None]
+        cnt = agree.sum(2)
+        ref = torch.argmax(cnt.float() + 0.5 * Qb / Qb.amax(1, keepdim=True).clamp_min(1e-6), 1)
+        sel = agree[torch.arange(P, device=dev), ref]
+        w = (Qb ** a.sharp) * sel
+        c = (w[..., None] * Cb).sum(1) / w.sum(1, keepdim=True).clamp_min(1e-12)
+        c = torch.where(sel.any(1, keepdim=True), c, Cb[:, 0])                                     # no source: zeros
+        qref = (Qb * sel).amax(1); nag = sel.sum(1)
+        anyv = vq.any(1)
+        ar = torch.arange(P, device=dev)
+        par = (((Db * Db[ar, ref][:, None]).sum(-1) < np.cos(np.radians(a.min_parallax))) & sel).any(1)   # a second,
+        hard = (nag >= a.min_sources) & (qref >= a.q_min) & par                             # really different view
+        single = (qref >= a.q_min) & ((vq.sum(1) == 1) | (nag >= 2))    # not: several sources that disagree
+        return c, hard, single, anyv, nsrc
+
+    if a.floor_map:
+        return floor_map(a, L, G, n, d, s, R, t, to_ds, T, ibr_points, src, dev)
+
     # ---- target cameras (dataset frame: Rcw, tcw)
     if a.poses_from:
         tc_, ti_ = read_text_model(os.path.join(a.poses_from, "sparse", "0")); ti_ = sorted(ti_, key=lambda i: i[0])
@@ -213,74 +329,8 @@ def views(a):
         col = torch.zeros(H, W, 3, device=dev); msk = torch.zeros(H, W, dtype=torch.bool, device=dev); anyc = torch.zeros_like(msk); sing = torch.zeros_like(msk)
         nsrc = 0
         if P > 0:
-            A, B, Cc_ = Xw[vi, ui], Xw[vi, ui + 1], Xw[vi + 1, ui]
-            # candidate sources: a sparse subset of the points inside the frustum
-            sub = A[:: max(1, P // 600)]
-            pc = torch.einsum("sij,nj->sni", SR, sub) + ST[:, None]
-            zz = pc[..., 2].clamp_min(1e-6)
-            inside = (pc[..., 2] > 0.05) & (pc[..., 0] / zz * fx + cx > 0) & (pc[..., 0] / zz * fx + cx < W) & \
-                     (pc[..., 1] / zz * fy + cy > 0) & (pc[..., 1] / zz * fy + cy < H)                  # (same intrinsics model)
-            cand = torch.nonzero(inside.float().mean(1) > a.min_overlap)[:, 0].tolist()
-            Qb = torch.zeros(P, a.topk, device=dev); Fb = torch.zeros(P, a.topk, 6, device=dev)          # q | colour, direction
-            gq = torch.zeros(P, device=dev); gf = torch.zeros(P, 6, device=dev); gcur = -1
-
-            def flush():                                                                               # group best -> top-K
-                i_ = torch.nonzero(gq > 0)[:, 0]
-                if len(i_):
-                    allq = torch.cat([Qb[i_], gq[i_, None]], 1); allf = torch.cat([Fb[i_], gf[i_, None]], 1)
-                    tq, ti = torch.topk(allq, a.topk, dim=1)
-                    Qb[i_] = tq; Fb[i_] = torch.gather(allf, 1, ti[..., None].expand(-1, -1, 6))
-                gq.zero_()
-
-            for si in cand:
-                if si // a.group != gcur:                                                              # consecutive frames = one
-                    flush(); gcur = si // a.group                                                      # vote (no parallax)
-                _, Rs, ts, Ks, Ws, Hs, Ds, Is = src[si]
-                fxs, fys, cxs, cys = Ks
-                pa = A @ Rs.T + ts; za = pa[:, 2]
-                ua, va = fxs * pa[:, 0] / za + cxs, fys * pa[:, 1] / za + cys
-                i = torch.nonzero((za > 0.05) & (ua >= 0.5) & (ua < Ws - 0.5) & (va >= 0.5) & (va < Hs - 0.5))[:, 0]
-                if len(i) == 0:
-                    continue
-                ua, va, ra = ua[i], va[i], torch.linalg.norm(pa[i], dim=1)
-                ds_ = Ds[va.long(), ua.long()].double()
-                okd = (ds_ > 0) & ((ra - ds_).abs() < a.tol_rel * ds_ + a.tol_abs / s)
-                pb, pc_ = B[i] @ Rs.T + ts, Cc_[i] @ Rs.T + ts
-                okd &= (pb[:, 2] > 0.05) & (pc_[:, 2] > 0.05)
-                ja, jc = fxs * pb[:, 0] / pb[:, 2] + cxs - ua, fys * pb[:, 1] / pb[:, 2] + cys - va     # d(u_s, v_s) / d x_t
-                jb, jd = fxs * pc_[:, 0] / pc_[:, 2] + cxs - ua, fys * pc_[:, 1] / pc_[:, 2] + cys - va  # d(u_s, v_s) / d y_t
-                det = ja * jd - jb * jc
-                s1 = ja * ja + jb * jb + jc * jc + jd * jd
-                s2 = torch.sqrt((ja * ja + jb * jb - jc * jc - jd * jd) ** 2 + 4 * (ja * jc + jb * jd) ** 2)
-                smin = torch.sqrt(((s1 - s2) / 2).clamp_min(0))
-                q = torch.where(smin <= 1, smin, smin.clamp_min(1e-6) ** -0.25)
-                q = torch.where(okd & (det > 0) & torch.isfinite(q), q, torch.zeros_like(q)).float()
-                kq = torch.nonzero(q > 0)[:, 0]
-                if len(kq) == 0:
-                    continue
-                i, q = i[kq], q[kq]
-                grid = torch.stack([ua[kq] / Ws * 2 - 1, va[kq] / Hs * 2 - 1], -1).float()[None, None]
-                c = F.grid_sample(Is.float() / 255, grid, mode="bilinear", align_corners=False)[0, :, 0].T   # (n,3)
-                dv = F.normalize((-ts @ Rs) - A[i], dim=-1).float()                                    # point -> source centre
-                b = q > gq[i]; ib = i[b]
-                gq[ib] = q[b]; gf[ib] = torch.cat([c[b], dv[b]], 1); nsrc += 1
-            flush()
-            Cb, Db = Fb[..., :3], Fb[..., 3:]
-            vq = Qb > 0
-            diff = (Cb[:, :, None] - Cb[:, None]).abs().amax(-1)
-            agree = (diff < a.tau) & vq[:, :, None] & vq[:, None]
-            cnt = agree.sum(2)
-            ref = torch.argmax(cnt.float() + 0.5 * Qb / Qb.amax(1, keepdim=True).clamp_min(1e-6), 1)
-            sel = agree[torch.arange(P, device=dev), ref]
-            w = (Qb ** a.sharp) * sel
-            c = (w[..., None] * Cb).sum(1) / w.sum(1, keepdim=True).clamp_min(1e-12)
-            c = torch.where(sel.any(1, keepdim=True), c, Cb[:, 0])                                     # no source: zeros
-            qref = (Qb * sel).amax(1); nag = sel.sum(1)
-            col[vi, ui] = c; anyc[vi, ui] = vq.any(1)
-            ar = torch.arange(P, device=dev)
-            par = (((Db * Db[ar, ref][:, None]).sum(-1) < np.cos(np.radians(a.min_parallax))) & sel).any(1)   # a second,
-            msk[vi, ui] = (nag >= a.min_sources) & (qref >= a.q_min) & par                             # really different view
-            sing[vi, ui] = (qref >= a.q_min) & ((vq.sum(1) == 1) | (nag >= 2))    # not: several sources that disagree
+            c, hard_, single_, anyv_, nsrc = ibr_points(Xw[vi, ui], Xw[vi, ui + 1], Xw[vi + 1, ui], fx, fy, cx, cy, W, H)
+            col[vi, ui] = c; anyc[vi, ui] = anyv_; msk[vi, ui] = hard_; sing[vi, ui] = single_
         m = cv2.morphologyEx(cv2.morphologyEx(msk.cpu().numpy().astype(np.uint8), cv2.MORPH_CLOSE, k3), cv2.MORPH_OPEN, k3).astype(bool)
         m &= anyc.cpu().numpy()
         m1 = np.zeros_like(m)
@@ -418,6 +468,8 @@ def main():
                    "verified consensus get this weight in _mask.png (value round(255 w) < 128; train_distill_gsplat.py --pseudo-soft)")
     p.add_argument("--depth-where", choices=("all", "supervised"), default="all", help="_depth.npy target: every LiDAR-valid "
                    "pixel, or only pixels with a colour weight (a depth-only surface gets an arbitrary colour: 'glassy' objects)")
+    p.add_argument("--floor-map", default=None, help="instead of views: write the top-down floor texture (npz + png) here")
+    p.add_argument("--map-cell", type=float, default=0.01, help="m per floor-map cell")
     p.add_argument("--min-overlap", type=float, default=0.01, help="source considered if this share of the view projects into it")
     p.add_argument("--seed", type=int, default=0)
     p.set_defaults(func=views)
