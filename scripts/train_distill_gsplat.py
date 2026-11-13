@@ -12,6 +12,9 @@ option, the recipe and the outputs stay exactly those of the trainer:
               --pseudo-weight (value unchanged: x w + x.detach() (1 - w)), so the loss term, the densification
               gradients and Improved-GS's statistics all see the pseudo-view at that weight. Evaluation renders
               (no grad) are untouched. EAS edge maps of pseudo-views come from the teacher render.
+--pseudo-until f: pseudo-views are sampled only during the first f x --iters steps (the trainer's epoch permutation is
+restricted to the real frames afterwards). Sharing the steps costs in-sample fidelity (CEAR all-frames 60k: -0.5 dB at the
+training cameras with 22 % pseudo steps); the last stretch, at decayed learning rates, wins it back.
 --pseudo-depth: pseudo-views carry a depth target (<stem>_depth.npy, ray distance) for the trainer's --depth-lambda
 term (alpha-normalised expected depth, full weight); the real frames' own targets are dropped, so the on-path recipe is
 unchanged. The pseudo dataset may also be LiDAR image-based renders (scripts/make_lidar_ibr_views.py) instead of teacher renders.
@@ -35,6 +38,8 @@ def main():
     ap.add_argument("--pseudo-limit", type=int, default=0, help="use at most this many pseudo-views (0 = all)")
     ap.add_argument("--pseudo-soft", action="store_true", help="_mask.png values are per-pixel weights (v / 255, x --pseudo-weight; "
                     "0 = unsupervised) instead of a > 127 threshold (make_lidar_ibr_views.py --single-weight)")
+    ap.add_argument("--pseudo-until", type=float, default=1.0, help="fraction of --iters after which no pseudo-view is drawn "
+                    "any more (the last stretch fits the real frames alone: in-sample / on-path fidelity back, see docstring)")
     ap.add_argument("--pseudo-depth", action="store_true", help="the trainer's --depth-lambda term at the PSEUDO-views only "
                     "(their images/<stem>_depth.npy, e.g. LiDAR depth of make_lidar_ibr_views.py); real frames get none")
     ap.add_argument("--tvg", default=os.path.join(HERE, "train_viewer_gsplat.py"), help="trainer module file to wrap")
@@ -78,8 +83,22 @@ def main():
               f"{stats['pseudo_step_share']}", flush=True)
         return out + ps
 
+    iters = int(rest[rest.index("--iters") + 1]) if "--iters" in rest else 30000
+    cut = int(round(a.pseudo_until * iters)); stats["pseudo_until_step"] = cut; cnt = {"steps": 0}
+    orig_perm = np.random.permutation
+
+    def permutation(x, *args, **kw):                             # the trainer's epoch order: real frames only after the cut
+        if isinstance(x, (int, np.integer)) and "n_pseudo" in stats and x == stats["n_train_real"] + stats["n_pseudo"] \
+                and cnt["steps"] >= cut and stats["n_pseudo"] > 0:
+            if "pseudo_off_at" not in stats:
+                stats["pseudo_off_at"] = cnt["steps"]; print(f"[distill] step {cnt['steps']}: pseudo-views off (real frames only from here)", flush=True)
+            return orig_perm(stats["n_train_real"])
+        return orig_perm(x, *args, **kw)
+
     def render(self, p, view, deg, *args, **kw):
         out = orig_render(self, p, view, deg, *args, **kw)
+        if torch.is_grad_enabled():
+            cnt["steps"] += 1
         m = masks.get(view[0])
         if m is None or not torch.is_grad_enabled():
             return out
@@ -91,6 +110,8 @@ def main():
         return (img, alpha, d, info) + tuple(out[4:])
 
     tvg.load_views, tvg.ViewerGS.render = load_views, render
+    if a.pseudo_until < 1.0:
+        np.random.permutation = permutation
     sys.argv = [a.tvg] + rest
     tvg.main()
     o = rest[rest.index("--out") + 1] if "--out" in rest else None
