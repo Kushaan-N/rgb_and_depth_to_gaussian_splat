@@ -9,7 +9,7 @@
 #   WHY=... scripts/sub.sh -A pi_donghyunkim_umass_edu --exclude=gpu010,gpu035 -o logs/%x-%j.out sbatch/mv_prior.sbatch \
 #     configs/mocap2_well-lit_trot.yaml
 # Env: PRIOR=zero123|seva (seva: scripts/object_priors/mv_seva.py, venv-seva, GEN_ARGS e.g. "--ids 3 4 5"), COMPARE=<variant dir>,
-#      REFIT_MODE=exemplar (exemplar_transfer.py, REFIT_ARGS "--ids 3 4 5 --exclude 2") | brickbox (mv_brickbox.py, REFIT_ARGS "--ids 3 4 5") | objfit (mv_objfit.py: standalone object splats swapped in; REFIT_ARGS e.g. "--ids 3 4"),
+#      REFIT_MODE=asset (mv_asset_gen.py + asset_replace.py: automatic targets / accept test, config object_assets.{enable,min_back_coverage,max_onpath_loss_db}; ASSET_GEN=<asset dir>, REFIT_ARGS "--ids ..." only for debugging) | exemplar (exemplar_transfer.py, REFIT_ARGS "--ids 3 4 5 --exclude 2") | brickbox (mv_brickbox.py, REFIT_ARGS "--ids 3 4 5") | objfit (mv_objfit.py: standalone object splats swapped in; REFIT_ARGS e.g. "--ids 3 4"),
 #      NAME (viewer_msd60k_wd_clean_ft2_solid3), IN, REF_NAME (stage-0 objects/orbit source for a new NAME), TAG (variant suffix), GEN (generated-view dir, shared by TAGs: GEN_TAG),
 #      GEN_ARGS, REG_ARGS, REFIT_ARGS, BUDGET=1 (+BUDGET_ARGS: solidify_unseen.py budget after the refit), STOP_AFTER=prep|register|refit, FORCE=1 (redo refit + later stages), MOVES, EVERY_OFF.
 #SBATCH -J mv-prior
@@ -48,14 +48,26 @@ export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-12}"
 RD="$P/object_priors/${REF_NAME:-viewer_msd60k_wd_clean_ft2_solid3}"; mkdir -p "$D"
 for f in objects.json objects.npz objects.png; do [ -e "$D/$f" ] || [ ! -e "$RD/$f" ] || cp "$RD/$f" "$D/$f"; done
 [ -e "$D/orbit" ] || [ ! -d "$RD/orbit" ] || cp -r "$RD/orbit" "$D/orbit"
-[ -f "$IN" ] && [ -f "$D/objects.json" ] || { echo "missing input / objects (run object_priors.sbatch stage 0)"; exit 1; }
+[ -f "$IN" ] || { echo "missing input $IN"; exit 1; }
+GTM="$OUT/colmap_train/sparse/0"                                       # no objects yet (new scene): detect them here
+need "$D/objects.json" && [ -f "$CLOUD" ] && [ -d "$GTM" ] && "$CPUPY" scripts/find_objects.py --cloud "$CLOUD" --gt-model "$GTM" --out "$D/objects"
+[ -f "$D/objects.json" ] || { echo "no free-standing objects detected / no LiDAR cloud: nothing to do"; exit 0; }
+need "$D/orbit/sparse/0/images.txt" && "$CPUPY" "$SO" orbit --objects "$D/objects" --sim3-json "$P/sim3.json" --dataset "$DATA" \
+  --cloud "$CLOUD" --out "$D/orbit"
 need "$D/depth" && "$SPY" scripts/render_ply_depth.py --ply "$IN" --dataset "$DATA" --out-dir "$D/depth"
 need "$D/support.npz" && "$SPY" "$SO" support --ply "$IN" --dataset "$DATA" "$TEST" --out "$D/support.npz"
 [ "${STOP_AFTER:-}" = prep ] && { echo MV_PRIOR_PREP_ONLY; exit 0; }
 [ -x "$MPY" ] || { echo "venv-mv missing: sbatch/mv_venv.sbatch"; exit 1; }
 echo "== $NAME TAG=${TAG:-<none>} GEN=$G"
 COMMON=(--objects "$D/objects" --sim3-json "$P/sim3.json" --dataset "$DATA" --splat-depth-dir "$D/depth" --out-dir "$G")
-if [ "${REFIT_MODE:-zone}" = brickbox ] || [ "${REFIT_MODE:-zone}" = exemplar ]; then
+if [ "${REFIT_MODE:-zone}" = asset ]; then   # complete generated assets of every object (mv_asset_gen.py), config: object_assets.*
+  [ "$(get object_assets.enable 1)" = 1 ] || { echo "object_assets.enable = false: skipped"; exit 0; }
+  AG="${ASSET_GEN:-$D/asset_gen}"; TPY="${TRELLIS_VENV:-$CEAR_WS/venv-trellis}/bin/python"; export TORCH_HOME_T="$CEAR_WS/torch-hub"
+  echo "== 1. object crops (BiRefNet)"
+  need "$AG/crops.json" && "$MPY" scripts/object_priors/mv_asset_gen.py crops "${COMMON[@]:0:8}" --out-dir "$AG" ${GEN_ARGS:-}
+  echo "== 2. image-to-3D assets (TRELLIS, multi-image)"
+  need "$AG/generate.json" && TORCH_HOME="$TORCH_HOME_T" "$TPY" scripts/object_priors/mv_asset_gen.py generate --out-dir "$AG" ${TRELLIS_ARGS:-}
+elif [ "${REFIT_MODE:-zone}" = brickbox ] || [ "${REFIT_MODE:-zone}" = exemplar ]; then
   echo "== 1-2. (${REFIT_MODE}: no generated views)"
 elif [ "${PRIOR:-zero123}" = seva ]; then   # Stable Virtual Camera: real crops + real cameras in, orbit views out (mv_seva.py)
   SVPY="${SEVA_VENV:-$CEAR_WS/venv-seva}/bin/python"; MS=scripts/object_priors/mv_seva.py
@@ -70,7 +82,12 @@ else
   { need "$G/register.json" || [ "${FORCE_REG:-0}" = 1 ]; } && "$MPY" "$MG" register "${COMMON[@]}" --ply "$IN" --support "$D/support.npz" ${REG_ARGS:-}
 fi
 [ "${STOP_AFTER:-}" = register ] && { echo MV_PRIOR_REGISTER_ONLY; exit 0; }
-if [ "${REFIT_MODE:-zone}" = exemplar ]; then   # real gaussians of a well-covered similar object / own mirrored side
+if [ "${REFIT_MODE:-zone}" = asset ]; then   # whole generated 3D asset per object (asset_replace.py; ASSET_GEN = learned_prior.py dir)
+  echo "== 3. generated-asset replacement (asset_replace.py)"
+  needt "$T/refit.ply" && "$SPY" scripts/object_priors/asset_replace.py --ply "$IN" --support "$D/support.npz" --objects "$D/objects" \
+    --gen-dir "$AG" --sim3-json "$P/sim3.json" --dataset "$DATA" "$TEST" --splat-depth-dir "$D/depth" --out "$T/refit.ply" \
+    --min-back-coverage "$(get object_assets.min_back_coverage 0.5)" --max-onpath-loss-db "$(get object_assets.max_onpath_loss_db 1.0)" ${REFIT_ARGS:-}
+elif [ "${REFIT_MODE:-zone}" = exemplar ]; then   # real gaussians of a well-covered similar object / own mirrored side
   echo "== 3. exemplar transfer (exemplar_transfer.py)"
   needt "$T/refit.ply" && "$SPY" scripts/object_priors/exemplar_transfer.py --ply "$IN" --support "$D/support.npz" --objects "$D/objects" --splat-depth-dir "$D/depth" \
     --sim3-json "$P/sim3.json" --dataset "$DATA" "$TEST" --out "$T/refit.ply" ${REFIT_ARGS:-}
