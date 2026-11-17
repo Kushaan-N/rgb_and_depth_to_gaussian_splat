@@ -1,7 +1,7 @@
 """Vision-language stage of the layered object pipeline (scripts/object_layers/object_layers.py). Tiny HTTP client: runs on
 any node with internet (login node / short CPU job), never on the GPU path. Official `anthropic` SDK ($CEAR_WS/venv-vlm).
 
-  recipe   per object: real cutouts + context crops (<dir>/vlm_in/obj<id>_{cut,ctx}<k>.jpg, written by `object_layers.py
+  recipe   per object: real object cut-outs on black (<dir>/vlm_in/obj<id>_cut<k>.jpg, written by `object_layers.py
            evidence`) -> strict-JSON shape recipe (primitives, stacking, materials, symmetry, detection check)
            -> <dir>/vlm/recipe_obj<id>.json
   select   per object: candidate sheet (<dir>/cand/obj<id>_sheet.jpg: primitive fit vs generated mesh, real + novel views)
@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse, base64, glob, hashlib, json, os, re, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
-import prompts_v1 as PR  # noqa: E402
+import prompts_v2 as PR  # noqa: E402  (versioned prompts: a new version = a new file)
 
 PRICE = {"claude-opus-5-5": (4.0, 20.0)}          # $ / 1M input, output tokens (claude-api reference, 2026-11)
 
@@ -93,12 +93,11 @@ def recipe(a):
     for o in ev["objects"]:
         i = o["id"]; out = os.path.join(a.dir, "vlm", f"recipe_obj{i}.json")
         cut = sorted(glob.glob(os.path.join(a.dir, "vlm_in", f"obj{i}_cut*.jpg")))[:a.max_images]
-        ctx = sorted(glob.glob(os.path.join(a.dir, "vlm_in", f"obj{i}_ctx*.jpg")))[:a.max_images]
         if not cut:
             continue
         bx, by = sorted(o["box_m"][:2], reverse=True)
-        p = PR.RECIPE.format(n_cut=len(cut), c0=len(cut) + 1, c1=len(cut) + len(ctx), bx=bx, by=by, bz=o["box_m"][2])
-        js = c.ask(f"recipe_obj{i}", p, cut + ctx)
+        p = PR.RECIPE.format(n_cut=len(cut), bx=bx, by=by, bz=o["box_m"][2])
+        js = c.ask(f"recipe_obj{i}", p, cut)                                # object cut-outs only: no room context leaves the cluster
         if js is not None:
             json.dump(js, open(out, "w"), indent=1)
 
