@@ -36,7 +36,7 @@ get() { "$CPUPY" scripts/cfg_get.py "$CFG" "$@"; }
 OUT="$(get paths.out_root)"; P="$OUT/pipeline"; E="$OUT/exports"; FRAME="$(get pipeline.export_frame_model "")"
 NAME="${NAME:-viewer_ibr70k_wd_clean_ft2_solid3_floor}"; IN="${IN:-$E/$NAME.ply}"; TAG="${TAG:-}"
 D="$P/object_priors/$NAME"; T="$D/layers${TAG:+_$TAG}"; AG="${ASSET_GEN:-$D/asset_gen}"; IV="$P/ibr_views"
-OUTPLY="$E/${NAME}_layers${TAG:+_$TAG}.ply"
+OUTPLY="${OUTPLY_OVERRIDE:-$E/${NAME}_layers${TAG:+_$TAG}.ply}"   # OUTPLY_OVERRIDE: evaluate any finished PLY against NAME (STAGES=eval)
 DATA="$P/onpath/data_orig"; TEST="$P/onpath/test"; RT="$P/viewer_bench/reference_dataset"
 CLOUD="$P/offpath/depth/lidar_static.ply"; [ -f "$CLOUD" ] || CLOUD="$P/depth_cloud.ply"
 SO=scripts/solidify_unseen.py; OL=scripts/object_layers/object_layers.py; VL=scripts/object_layers/vlm.py; VS=(scripts/viewer_shots.py --engine current)
@@ -80,7 +80,7 @@ HYD="$D/asset_gen_hunyuan"; HPY="${HUNYUAN_VENV:-$CEAR_WS/venv-hunyuan}/bin/pyth
 if has assets && [ "$(get object_layers.hunyuan 1)" = 1 ] && [ -x "$HPY" ] && [ -d "$CEAR_WS/Hunyuan3D-2.1" ]; then   # second generator
   need "$HYD/generate_hy.json" && HF_HUB_OFFLINE=0 "$HPY" scripts/object_priors/mv_asset_gen.py generate_hy --crops-dir "$AG" --out-dir "$HYD" || echo "hunyuan generation failed: TRELLIS only"
 fi
-[ -d "$HYD" ] && COMMON+=(--extra-gen-dir "$HYD")
+[ -d "$HYD" ] && [ "${HUNYUAN:-1}" = 1 ] && COMMON+=(--extra-gen-dir "$HYD")
 if has evidence; then
   need "$T/evidence.json" && "$TPY" "$OL" evidence "${COMMON[@]}" ${IDS:-}
 fi
