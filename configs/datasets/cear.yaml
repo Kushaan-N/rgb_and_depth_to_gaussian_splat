@@ -198,7 +198,9 @@ object_layers:
                               #   object keeps its splat. Catches broken fronts (o2 trot: 8 dB); ~1-2 dB here is ~0.1-0.3 dB on the full on-path set
   zone_m: 0.03                # splat gaussians within this of an object's mesh box are replaced by the mesh
   floor_close_m: 0.25         # floor continues across gaps up to twice this (occlusion shadows behind objects)
-  shadow_reach_m: 1.0         # ... up to this far from the object
+  shadow_reach_m: 1.0         # floor next to an accepted object that no training camera saw unoccluded is completed up to this far
+  colour_reach_m: 0.15        # ... and floor cells this close whose colour is nearer the object's material than the floor (smeared object pixels)
+  floor_harm_check: false     # true: drop completion discs that change any training view (fill_harm_ply.py); false ships them all
   vlm:                        # vision-language stage (scripts/object_layers/vlm.py; needs ~/.config/scan2sim/anthropic_key + internet;
     enable: true              #   without them the generated mesh is used). Prompts: scripts/object_layers/prompts_v1.py
     model: claude-opus-5-5
