@@ -33,6 +33,8 @@ C0 = 0.28209479177387814
 def hole_of(z, min_cells=400):
     """unseen free floor: floor exists, no frame saw it, nothing stands on it; specks dropped."""
     from scipy import ndimage
+    if "hole_override" in z:                                     # cells chosen by the caller (object_layers.py floormap: under / behind objects)
+        return np.asarray(z["hole_override"], bool)
     h = z["occ"] & ~z["any"] & ~z["obj"]
     h = ndimage.binary_opening(h, iterations=2)
     lab, n = ndimage.label(h)
