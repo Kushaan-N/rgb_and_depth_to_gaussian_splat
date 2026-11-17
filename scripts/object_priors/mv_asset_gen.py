@@ -88,6 +88,38 @@ def generate(a):
     json.dump(log, open(os.path.join(a.out_dir, "generate.json"), "w"), indent=1)
 
 
+def generate_hy(a):
+    """Hunyuan3D-2.1 shape (venv-hunyuan): one mesh per object from its best crop (alpha from the black background) ->
+    <out>/obj<id>_shy<seed>.npz in the same format as `generate` (surface samples as gaussians, unit cube, +z up, no colour:
+    object_layers.py textures from the real photos)."""
+    import torch, trimesh
+    from PIL import Image
+    sys.path.insert(0, os.path.join(a.hunyuan_dir, "hy3dshape"))
+    from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
+    pipe = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(a.hy_model); os.makedirs(a.out_dir, exist_ok=True); log = []
+    for c in json.load(open(os.path.join(a.crops_dir, "crops.json"))):
+        f = sorted(glob.glob(os.path.join(a.crops_dir, "crops", f"obj{c['id']}_*.png")))
+        if not f:
+            continue
+        im = np.asarray(Image.open(f[0]).convert("RGB")); al = (im.max(2) > 8).astype(np.uint8) * 255
+        rgba = Image.fromarray(np.dstack([im, al]), "RGBA")
+        for seed in a.seeds:
+            dst = os.path.join(a.out_dir, f"obj{c['id']}_shy{seed}.npz")
+            if os.path.exists(dst):
+                continue
+            torch.manual_seed(seed); mesh = pipe(image=rgba, generator=torch.Generator("cuda").manual_seed(seed))[0]
+            if not isinstance(mesh, trimesh.Trimesh):
+                mesh = trimesh.Trimesh(np.asarray(mesh.vertices), np.asarray(mesh.faces))
+            V = np.asarray(mesh.vertices, np.float64); V = np.stack([V[:, 0], -V[:, 2], V[:, 1]], 1)   # y-up -> z-up
+            mesh = trimesh.Trimesh(V, mesh.faces, process=False); P, _ = trimesh.sample.sample_surface_even(mesh, 200000)
+            P = (P - (P.max(0) + P.min(0)) / 2) / max(np.ptp(P, 0).max(), 1e-6)
+            n = len(P); np.savez_compressed(dst, xyz=P.astype(np.float32), scale=np.full((n, 3), 0.004, np.float32), rot=np.tile([1, 0, 0, 0], (n, 1)).astype(np.float32),
+                                           opacity=np.ones(n, np.float32), dc=np.zeros((n, 3), np.float32), id=c["id"], seed=seed, generator="hunyuan3d-2.1")
+            mesh.export(os.path.join(a.out_dir, f"obj{c['id']}_shy{seed}.glb")); log.append({"id": c["id"], "seed": seed, "vertices": int(len(V))})
+            print(f"[asset-gen] hunyuan object {c['id']} seed {seed}: {len(V):,} vertices", flush=True)
+    json.dump(log, open(os.path.join(a.out_dir, "generate_hy.json"), "w"), indent=1)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -106,7 +138,10 @@ def main():
     g.add_argument("--out-dir", required=True); g.add_argument("--trellis-dir", default=os.path.join(os.environ.get("CEAR_WS", ""), "TRELLIS"))
     g.add_argument("--model", default="microsoft/TRELLIS-image-large"); g.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     g.add_argument("--mode", default="stochastic", choices=["stochastic", "multidiffusion"])
-    a = ap.parse_args(); {"crops": crops, "generate": generate}[a.cmd](a)
+    h = sub.add_parser("generate_hy")
+    h.add_argument("--crops-dir", required=True); h.add_argument("--out-dir", required=True); h.add_argument("--seeds", type=int, nargs="+", default=[0])
+    h.add_argument("--hunyuan-dir", default=os.path.join(os.environ.get("CEAR_WS", ""), "Hunyuan3D-2.1")); h.add_argument("--hy-model", default="tencent/Hunyuan3D-2.1")
+    a = ap.parse_args(); {"crops": crops, "generate": generate, "generate_hy": generate_hy}[a.cmd](a)
 
 
 if __name__ == "__main__":
