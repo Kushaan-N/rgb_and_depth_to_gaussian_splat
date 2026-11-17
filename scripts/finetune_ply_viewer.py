@@ -653,6 +653,14 @@ def finetune(args):
                 if bool(mk.any()):
                     masks[k] = mk[..., None].float()
         print(f"[ftv] masks for {len(masks)}/{len(tr)} training frames", flush=True)
+    wmaps = {}
+    if args.weight_dir:                               # pseudo-views: <stem>_mask.png = per-pixel supervision weight (v/255 x --weight-scale)
+        from PIL import Image
+        for k, (n, _, _) in enumerate(tr):
+            f = os.path.join(args.weight_dir, os.path.splitext(os.path.basename(n))[0] + "_mask.png")
+            if os.path.exists(f):
+                wmaps[k] = (torch.from_numpy(np.asarray(Image.open(f).convert("L")).astype(np.float32) / 255).to(dev) * args.weight_scale)[..., None]
+        print(f"[ftv] supervision-weight maps for {len(wmaps)}/{len(tr)} frames (x {args.weight_scale})", flush=True)
     centres = np.stack([c[:3, 3] for _, _, c in tr])
     scene_scale = float(np.linalg.norm(centres - centres.mean(0), axis=1).max()) * 1.1
     params = torch.nn.ParameterDict({k: torch.nn.Parameter(v.clone()) for k, v in p0.items()})
@@ -725,6 +733,8 @@ def finetune(args):
         gt = rgb[k].float() / 255
         if k in masks:
             img = img * (1 - masks[k]) + gt * masks[k]
+        if k in wmaps:                                     # weighted pixels; unsupervised ones copy the target (no loss)
+            w_ = wmaps[k]; img = img * w_ + img.detach() * (1 - w_); img = torch.where(w_ > 0, img, gt)
         loss = args.rgb_scale * ((1 - args.ssim_lambda) * (img - gt).abs().mean() +
                                  args.ssim_lambda * (1 - ssim(img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None])))
         if wdnet is not None:                           # Wasserstein Distortion: local VGG-16 feature statistics
@@ -836,6 +846,9 @@ def main():
     f.add_argument("--rgb-scale", type=float, default=1.0, help="weight of the L1/SSIM terms")
     f.add_argument("--depth-lambda", type=float, default=0.0, help="LiDAR ray-distance L1 where <image>_depth.npy exists; 0 = off")
     f.add_argument("--mask-dir", default=None, help="<stem>_mask.png per training frame (255 = transient: no loss there)")
+    f.add_argument("--weight-dir", default=None, help="pseudo-views: <stem>_mask.png = supervision weight per pixel (0 = no loss); "
+                   "frames without a map are untouched (real frames)")
+    f.add_argument("--weight-scale", type=float, default=1.0)
     f.add_argument("--depth-trim", type=float, default=0.95)
     f.add_argument("--anchor", type=float, default=0.0, help="penalty on centre drift (scene-scale units^2)")
     f.add_argument("--eval-dataset", default=None, help="held-out set monitored during training (never trained on)")
