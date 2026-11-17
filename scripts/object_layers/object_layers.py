@@ -30,8 +30,8 @@ from build_depth_targets import quat_to_R, read_text_model  # noqa: E402
 
 C0 = 0.28209479177387814
 DEF = dict(voxel_m=0.005, max_voxels=6e6, margin_m=0.08, cam_max_m=4.0, max_views=160, tol_abs_m=0.012, tol_rel=0.01, min_free_views=3,
-           min_surf_views=3, texel_m=0.003, crust_m=0.03, carve_tol_m=0.015, max_resid_m=0.03, cos_min=0.2, q_min_px_m=60.0, top_k=4,
-           sharp_pow=4.0, solid_margin_m=0.015, floor_pixel_m=0.012, backing_m=0.008, backing_sigma=0.7, backing_inset_m=0.0015, shadow_cams=1000, colour_reach_m=0.15, refit_iters=600, max_object_loss_db=2.0, gate_frames=20, base_m=0.02, prefer_prim_iou_tol=0.03, foot_close_m=0.03, foot_grow_m=0.01, photo_tol_m=0.015, rest_m=0.06, auto_box_resid_m=0.012, seam_m=0.02, val_every=6, zone_m=0.03, floor_m=0.012, gauss_sigma=0.9, gauss_thick_m=0.0005, gauss_opacity=0.985,
+           min_surf_views=3, texel_m=0.003, crust_m=0.03, carve_tol_m=0.015, max_resid_m=0.03, cos_min=0.5, q_min_px_m=60.0, top_k=4,
+           sharp_pow=4.0, min_face_psnr=20.0, solid_margin_m=0.015, floor_pixel_m=0.012, backing_m=0.008, backing_sigma=0.7, backing_inset_m=0.0015, shadow_cams=1000, colour_reach_m=0.15, refit_iters=600, max_object_loss_db=2.0, gate_frames=20, base_m=0.02, prefer_prim_iou_tol=0.03, foot_close_m=0.03, foot_grow_m=0.01, photo_tol_m=0.015, rest_m=0.06, auto_box_resid_m=0.012, seam_m=0.02, val_every=6, zone_m=0.03, floor_m=0.012, gauss_sigma=0.9, gauss_thick_m=0.0005, gauss_opacity=0.985,
            floor_close_m=0.25, shadow_reach_m=1.0, min_prim_confidence=0.3, plane_snap=True, max_edit_m=0.05, vlm_images=4)
 
 
@@ -386,8 +386,11 @@ def prims_pack(prims):
     return np.array(v)
 
 
-def prims_unpack(prims0, v, lim=None):
-    """lim: (max |centre| m, max size m) -- an unconstrained optimiser must not grow a primitive without bound."""
+def prims_unpack(prims0, v, lim=None, lid=None, contain=0.9):
+    """lim: (max |centre| m, max size m) -- an unconstrained optimiser must not grow a primitive without bound.
+    lid: the object's cleaned LiDAR points (object frame): every box level contains the central --contain share of the points
+    in its own height band along each of its axes (the LiDAR saw the object from far more sides than the camera: its plan
+    extent is a lower bound; the camera / free-space terms may only grow a level beyond it)."""
     out = []; k = 1; ids = {p["id"]: i for i, p in enumerate(prims0)}; lc, ls = lim or (1.0, 2.0)
     for p in prims0:
         q = dict(p); q["cx"], q["cy"] = np.clip(v[k:k + 2], -lc, lc); q["sx"], q["sy"], q["sz"] = np.exp(np.clip(v[k + 2:k + 5], -7.0, np.log(ls))); k += 5
@@ -395,10 +398,23 @@ def prims_unpack(prims0, v, lim=None):
             q["tilt"] = float(np.clip(v[k], -1.2, 1.2)); k += 1
         if p["type"] == "cylinder" and p.get("axis", "z") == "z":
             q["sy"] = q["sx"]
-        q["yaw"] = p["yaw"] + v[0]; out.append(q)
+        q["yaw"] = p["yaw"]; out.append(q)                                  # yaw = the LiDAR min-area footprint rectangle's (the most reliable cue)
     for _ in range(len(out)):                                               # stacking: bottoms follow the supporter's top
         for q in out:
             j = ids.get(q["on"]); q["z0"] = 0.0 if j is None or out[j] is q else out[j]["z0"] + out[j]["sz"]
+    if lid is not None:
+        tl = (1 - contain) / 2 * 100
+        for q in out:
+            if q["type"] not in ("cuboid", "wedge"):
+                continue
+            B = lid[(lid[:, 2] > q["z0"] + 0.2 * q["sz"]) & (lid[:, 2] <= q["z0"] + q["sz"] + 0.01)]
+            if len(B) < 30:
+                continue
+            c, s_ = np.cos(q["yaw"]), np.sin(q["yaw"]); x, y = B[:, 0] - q["cx"], B[:, 1] - q["cy"]; xp, yp = c * x + s_ * y, -s_ * x + c * y
+            lo = np.minimum([-q["sx"] / 2, -q["sy"] / 2], [np.percentile(xp, tl), np.percentile(yp, tl)])
+            hi = np.maximum([q["sx"] / 2, q["sy"] / 2], [np.percentile(xp, 100 - tl), np.percentile(yp, 100 - tl)])
+            m_ = (lo + hi) / 2; q["sx"], q["sy"] = float(hi[0] - lo[0]), float(hi[1] - lo[1])
+            q["cx"], q["cy"] = q["cx"] + c * m_[0] - s_ * m_[1], q["cy"] + s_ * m_[0] + c * m_[1]
     return out
 
 
@@ -437,10 +453,11 @@ def fit_prims(rec, ev, cfg, rng, inits=None):
     Fp = Fp[rng.choice(len(Fp), min(6000, len(Fp)), replace=False)] if len(Fp) else np.zeros((0, 3))
     hmax = float(np.percentile(np.concatenate([E[:, 2], Lp[:, 2]]), 99.5)) if len(E) + len(Lp) else ev["hmax"]
 
+    Lb = ev["lidar"][ev["lidar"][:, 2] > 0.03]
     lim = (float(np.max(ev["half"])) + 0.05, 1.3 * float(max(2 * np.max(ev["half"]), ev["hmax"])) + 0.02)
 
     def cost(v, p0, v0):
-        pr = prims_unpack(p0, v, lim); c = 0.0
+        pr = prims_unpack(p0, v, lim, Lb); c = 0.0
         if len(E):
             c += 0.7 * np.minimum(np.abs(prims_sdf(pr, E)[0]), 0.05).mean()
         if len(Lp):
@@ -460,7 +477,7 @@ def fit_prims(rec, ev, cfg, rng, inits=None):
     for c0, p0, v0 in inits[:3]:
         r = minimize(cost, v0, args=(p0, v0), method="Powell", options=dict(maxfev=400 * len(v0), xtol=1e-3, ftol=1e-5))
         if best is None or r.fun < best[0]:
-            best = (float(r.fun), prims_unpack(p0, r.x, lim), float(c0))
+            best = (float(r.fun), prims_unpack(p0, r.x, lim, Lb), float(c0))
     pr = best[1]; res = float(np.minimum(np.abs(prims_sdf(pr, E)[0]), 0.05).mean()) if len(E) else None
     return dict(prims=pr, cost=round(best[0], 4), init_cost=round(best[2], 4), resid_m=None if res is None else round(res, 4),
                 free_pen_m=round(float(np.maximum(-prims_sdf(pr, Fp)[0], 0).mean()), 4) if len(Fp) else 0.0)
@@ -1020,7 +1037,13 @@ def final_meshes(d):
 
 def accepted_meshes(a, cfg):
     gf = os.path.join(a.dir, "gate.json"); gj = json.load(open(gf))["objects"] if os.path.exists(gf) else {}
-    return [m for m in final_meshes(a.dir) if gj.get(str(m["id"]), {}).get("loss_db", 0.0) <= cfg["max_object_loss_db"]]
+    return [m for m in final_meshes(a.dir) if gate_ok(gj.get(str(m["id"]), {}), cfg)]
+
+
+def gate_ok(g, cfg):
+    if "face_psnr_mesh" in g:
+        return g["face_psnr_mesh"] is None or g["face_psnr_mesh"] >= cfg["min_face_psnr"]
+    return g.get("loss_db", 0.0) <= cfg["max_object_loss_db"]
 
 
 def floormap(a):
@@ -1120,7 +1143,7 @@ def gate(a):
     from solidify_unseen import all_frames
     cfg = load_cfg(a); s, R, t = sim3(a.sim3_json); v = PlyData.read(a.ply)["vertex"].data; dev = "cuda"
     p0 = to_params(v, dev); deg = sh_deg(p0); Rv = ViewerRaster("ss352", "exact", display_scale=1.8)
-    fr = {n_: (cam, c2w) for n_, cam, c2w in all_frames([a.dataset])}; out = {}
+    fr = {n_: (cam, c2w) for n_, cam, c2w in all_frames([a.dataset])}; out = {}; cams_by = {c_["name"]: c_ for c_ in load_cams(a.dataset)}
     for oid, m, d_, new, sr in layer_rows(a, cfg, v, s, R, t):
         z = np.load(os.path.join(a.dir, "ev", f"obj{oid}.npz")); names = [str(x) for x in z["views"] if str(x) in fr]; names = names[::max(1, len(names) // cfg["gate_frames"])]
         pk = to_params(np.concatenate([v[~d_], new]), dev); pb, pa = [], []; nb = int((~d_).sum())
@@ -1134,15 +1157,57 @@ def gate(a):
                 l = 0.8 * (img - gt).abs().mean() + 0.2 * (1 - ssim(img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None])); opt.zero_grad(set_to_none=True); l.backward()
                 sh0.grad[~seen_t] = 0; opt.step()                           # unseen faces keep their completed texture: painting them with the
             pk["sh0"] = torch.cat([pk["sh0"][:nb], sh0.detach()]); np.save(os.path.join(a.dir, f"obj{oid}_refit_dc.npy"), sh0.detach()[:, 0].cpu().numpy())
+        # per-face gate: only pixels where the mesh shows a PHOTO-SEEN face and the original splat shows this object; the completed
+        # back and the silhouette change are not judged here (the orbit / behind renders judge them)
+        ev = load_ev(a, oid, cfg); pm = {k_: x[nb:].clone() for k_, x in pk.items()}; seen_c = torch.tensor(sr, device=dev, dtype=torch.float32)
+        pm["sh0"] = ((seen_c - 0.5) / C0)[:, None, None].repeat(1, 1, 3); pm["shN"] = torch.zeros_like(pm["shN"]); fb, fa, npx = [], [], []
         with torch.no_grad():
             for n_ in names:
                 cam, c2w = fr[n_]; gt = load_rgb(os.path.join(a.dataset, "images", n_), dev).float() / 255; w2c = to_t(np.linalg.inv(c2w), dev)
-                pb.append(float(psnr(Rv.render(p0, w2c, *cam_args(cam), sh_degree=deg)[0], gt))); pa.append(float(psnr(Rv.render(pk, w2c, *cam_args(cam), sh_degree=deg)[0], gt)))
+                ib = Rv.render(p0, w2c, *cam_args(cam), sh_degree=deg)[0]; ia = Rv.render(pk, w2c, *cam_args(cam), sh_degree=deg)[0]
+                pb.append(float(psnr(ib, gt))); pa.append(float(psnr(ia, gt)))
+                SD = depth_of(a.splat_depth_dir, n_) if a.splat_depth_dir else None; c_ = cams_by.get(n_)
+                if SD is None or c_ is None:
+                    continue
+                mk = (Rv.render(pm, w2c, *cam_args(cam), sh_degree=0)[0].mean(-1) > 0.5) & torch.tensor(obj_mask(c_, SD, ev, s, R, t), device=dev)
+                if int(mk.sum()) < 100:
+                    continue
+                fb.append(float(((ib - gt) ** 2)[mk].mean())); fa.append(float(((ia - gt) ** 2)[mk].mean())); npx.append(int(mk.sum()))
         loss = float(np.mean(pb) - np.mean(pa)) if names else 0.0
+        floss = float(10 * np.log10(np.average(fa, weights=npx) / max(np.average(fb, weights=npx), 1e-12))) if npx else 0.0
+        fpsnr = float(-10 * np.log10(max(np.average(fa, weights=npx), 1e-12))) if npx else None   # absolute: the splat is fitted to these very frames
         out[str(oid)] = dict(frames=len(names), psnr_splat=round(float(np.mean(pb)), 3) if names else None, psnr_mesh=round(float(np.mean(pa)), 3) if names else None,
-                             loss_db=round(loss, 3), accept=bool(loss <= cfg["max_object_loss_db"]))
+                             loss_db=round(loss, 3), face_frames=len(npx), face_px=int(np.sum(npx)) if npx else 0, face_loss_db=round(floss, 3),
+                             face_psnr_mesh=None if fpsnr is None else round(fpsnr, 2), accept=bool(fpsnr is None or fpsnr >= cfg["min_face_psnr"]))
         print(f"[layers] gate o{oid}: " + json.dumps(out[str(oid)]), flush=True)
-    json.dump(dict(objects=out, max_object_loss_db=cfg["max_object_loss_db"]), open(os.path.join(a.dir, "gate.json"), "w"), indent=1)
+    json.dump(dict(objects=out, min_face_psnr=cfg["min_face_psnr"]), open(os.path.join(a.dir, "gate.json"), "w"), indent=1)
+
+
+def floorviews(a):
+    """floor-only renders (gsplat venv, GPU): from behind / beside / above every meshed object, the input splat and the layered
+    background (the floor completion) with every object's zone removed -> <dir>/floorviews/obj<id>.jpg (top: before, bottom: after)."""
+    import cv2, torch
+    from plyfile import PlyData
+    from finetune_ply_viewer import ViewerRaster, sh_deg, to_t
+    cfg = load_cfg(a); s, R, t = sim3(a.sim3_json); dev = "cuda"; Rv = ViewerRaster("ss352", "exact", display_scale=1.8); od = os.path.join(a.dir, "floorviews"); os.makedirs(od, exist_ok=True)
+    c0 = load_cams(a.dataset)[0]; ps = {}
+    for tag, f in (("before", a.base_ply), ("after", a.ply)):
+        v = PlyData.read(f)["vertex"].data; dele = np.zeros(len(v), bool)
+        for _, m, d_, _, _ in layer_rows(a, cfg, v, s, R, t):
+            dele |= d_
+        ps[tag] = to_params(v[~dele], dev)
+    for m in accepted_meshes(a, cfg):
+        ev = load_ev(a, m["id"], cfg); rows = []
+        for tag in ("before", "after"):
+            tiles = []
+            for k, c in enumerate(novel_cams(ev, c0, s, R, t)):
+                w2c = np.eye(4); w2c[:3, :3] = c["R"]; w2c[:3, 3] = c["t"]
+                with torch.no_grad():
+                    img = Rv.render(ps[tag], to_t(w2c, dev), c["fx"], c["fy"], c["cx"], c["cy"], c["W"], c["H"], sh_degree=sh_deg(ps[tag]))[0].clamp(0, 1).cpu().numpy()
+                tiles.append(label(cv2.resize(img, (400, 300)), f"o{m['id']} {tag}: {('behind', 'behind-left', 'behind-right', 'above')[k]}"))
+            rows.append(np.hstack(tiles))
+        cv2.imwrite(os.path.join(od, f"obj{m['id']}.jpg"), np.vstack(rows)[..., ::-1], [cv2.IMWRITE_JPEG_QUALITY, 88])
+    print(f"[layers] floor views -> {od}", flush=True)
 
 
 def compose(a):
@@ -1151,8 +1216,8 @@ def compose(a):
     cfg = load_cfg(a); s, R, t = sim3(a.sim3_json); v = PlyData.read(a.ply)["vertex"].data; N0 = len(v); dele = np.zeros(N0, bool); rows = []; rep = {}
     gf = os.path.join(a.dir, "gate.json"); gj = json.load(open(gf))["objects"] if os.path.exists(gf) else {}; kept = []
     for oid, m, d_, new, _ in layer_rows(a, cfg, v, s, R, t):
-        if gj and gj.get(str(oid), {}).get("loss_db", 0.0) > cfg["max_object_loss_db"]:
-            rep[oid] = dict(decision=f"kept its splat: on-path loss {gj[str(oid)]['loss_db']} dB > {cfg['max_object_loss_db']}"); continue
+        if gj and not gate_ok(gj.get(str(oid), {}), cfg):
+            rep[oid] = dict(decision=f"kept its splat: seen-face PSNR {gj[str(oid)].get('face_psnr_mesh')} dB < {cfg['min_face_psnr']}"); continue
         rf = os.path.join(a.dir, f"obj{oid}_refit_dc.npy")
         if os.path.exists(rf):
             dc_ = np.load(rf)
@@ -1183,15 +1248,15 @@ def compose(a):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["evidence", "candidates", "finalize", "floormap", "gate", "compose"])
+    ap.add_argument("cmd", choices=["evidence", "candidates", "finalize", "floormap", "gate", "compose", "floorviews"])
     ap.add_argument("--dir", required=True, help="work dir of this run"); ap.add_argument("--cfg-json", default=None, help="the config's object_layers block as JSON")
     ap.add_argument("--objects"); ap.add_argument("--sim3-json"); ap.add_argument("--dataset"); ap.add_argument("--splat-depth-dir"); ap.add_argument("--gen-dir", default=None)
     ap.add_argument("--ids", type=int, nargs="*", default=None, help="debug override: only these objects")
     ap.add_argument("--extra-gen-dir", nargs="*", default=None, help="more generated-asset dirs (e.g. Hunyuan3D-2.1); every seed of every generator is registered");
     ap.add_argument("--apply-detection", action="store_true", help="evidence: split / merge clusters as the vision-language detection check says");
-    ap.add_argument("--round", type=int, default=1); ap.add_argument("--map"); ap.add_argument("--ply"); ap.add_argument("--out")
+    ap.add_argument("--base-ply", default=None, help="floorviews: the input splat (before)"); ap.add_argument("--round", type=int, default=1); ap.add_argument("--map"); ap.add_argument("--ply"); ap.add_argument("--out")
     a = ap.parse_args(); os.makedirs(a.dir, exist_ok=True)
-    {"evidence": evidence, "candidates": candidates, "finalize": finalize, "floormap": floormap, "gate": gate, "compose": compose}[a.cmd](a)
+    {"evidence": evidence, "candidates": candidates, "finalize": finalize, "floormap": floormap, "gate": gate, "compose": compose, "floorviews": floorviews}[a.cmd](a)
 
 
 if __name__ == "__main__":
