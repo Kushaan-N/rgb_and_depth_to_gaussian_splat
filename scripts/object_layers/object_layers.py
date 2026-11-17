@@ -31,7 +31,7 @@ from build_depth_targets import quat_to_R, read_text_model  # noqa: E402
 C0 = 0.28209479177387814
 DEF = dict(voxel_m=0.005, max_voxels=6e6, margin_m=0.08, cam_max_m=4.0, max_views=160, tol_abs_m=0.012, tol_rel=0.01, min_free_views=3,
            min_surf_views=3, texel_m=0.003, crust_m=0.03, carve_tol_m=0.015, max_resid_m=0.03, cos_min=0.2, q_min_px_m=60.0, top_k=4,
-           sharp_pow=4.0, backing_m=0.008, backing_sigma=0.7, backing_inset_m=0.0015, shadow_cams=200, shadow_frac=0.3, refit_iters=600, max_object_loss_db=2.0, gate_frames=20, base_m=0.02, prefer_prim_iou_tol=0.03, foot_close_m=0.03, foot_grow_m=0.01, photo_tol_m=0.025, auto_box_resid_m=0.012, seam_m=0.02, val_every=6, zone_m=0.03, floor_m=0.012, gauss_sigma=0.9, gauss_thick_m=0.0005, gauss_opacity=0.985,
+           sharp_pow=4.0, solid_margin_m=0.015, floor_pixel_m=0.012, backing_m=0.008, backing_sigma=0.7, backing_inset_m=0.0015, shadow_cams=1000, colour_reach_m=0.15, refit_iters=600, max_object_loss_db=2.0, gate_frames=20, base_m=0.02, prefer_prim_iou_tol=0.03, foot_close_m=0.03, foot_grow_m=0.01, photo_tol_m=0.015, rest_m=0.06, auto_box_resid_m=0.012, seam_m=0.02, val_every=6, zone_m=0.03, floor_m=0.012, gauss_sigma=0.9, gauss_thick_m=0.0005, gauss_opacity=0.985,
            floor_close_m=0.25, shadow_reach_m=1.0, min_prim_confidence=0.3, plane_snap=True, max_edit_m=0.05, vlm_images=4)
 
 
@@ -258,8 +258,6 @@ def evidence(a):
                 continue
             x0, x1, y0, y1 = u.min(), u.max(), v.min(), v.max(); S = 1.5 * max(x1 - x0, y1 - y0); cx_, cy_ = (x0 + x1) / 2, (y0 + y1) / 2
             M = np.array([[512 / S, 0, 256 - cx_ * 512 / S], [0, 512 / S, 256 - cy_ * 512 / S]])
-            ctx = cv2.warpAffine(img, M, (512, 512), flags=cv2.INTER_CUBIC, borderValue=0)
-            cv2.imwrite(os.path.join(a.dir, "vlm_in", f"obj{oid}_ctx{k}.jpg"), np.clip(ctx[..., ::-1] * 255, 0, 255).astype(np.uint8), [cv2.IMWRITE_JPEG_QUALITY, 90])
             cf = os.path.join(a.gen_dir or "", "crops", f"obj{oid}_{k}.png")
             if a.gen_dir and os.path.exists(cf) and nm in agc.get(oid, []):
                 cut = cv2.imread(cf)
@@ -295,6 +293,11 @@ def load_ev(a, oid, cfg):
     r_ = max(1, int(round(cfg["foot_close_m"] / G.vox))); f2 = ndimage.binary_closing(np.pad(f2, r_ + 1), iterations=r_)[r_ + 1:-r_ - 1, r_ + 1:-r_ - 1]
     f2 = ndimage.binary_fill_holes(f2); f2 = ndimage.binary_dilation(f2, iterations=max(1, int(round(cfg["foot_grow_m"] / G.vox))))
     foot = f2[:, :, None] & (Lc[..., 2] <= hmax + 0.015); surf &= foot
+    # LiDAR solid: under the LiDAR's top surface of each footprint cell the object is solid, whatever the splat's rendered depth
+    # says (a semi-transparent splat renders depths BEHIND its surface, which would read as free space inside the object)
+    Ht = np.full(G.shape[:2], -1.0); ij2, ok2 = G.index(np.c_[P[:, :2], np.zeros(len(P))]); np.maximum.at(Ht, (ij2[ok2, 0], ij2[ok2, 1]), P[ok2, 2])
+    Ht = ndimage.grey_closing(ndimage.maximum_filter(Ht, size=max(3, 2 * int(round(0.015 / G.vox)) + 1)), size=max(3, 2 * r_ + 1))
+    solid = f2[:, :, None] & (Lc[..., 2] <= Ht[:, :, None] - cfg["solid_margin_m"]); free = free & ~solid
     return dict(fr=fr, G=G, free=free, surf=surf, lidar=lid, half=z["half"], hmax=hmax, views=[str(x) for x in z["views"]], az=z["az"], Lc=Lc, foot=foot)
 
 
@@ -408,12 +411,16 @@ def auto_prims(ev, vox):
     tops = np.array([np.percentile(E[order][a:b, 2], 95) for a, b in zip(st, list(st[1:]) + [len(E)]) if b - a >= 3])
     if len(tops) < 10:
         return None
-    lv = top_levels(tops, 0.04, 0.08); lv = lv[lv >= max(0.06, 0.15 * hmax)]; prims = []; z0 = 0.0
-    for k, h in enumerate(lv):
-        P = E[E[:, 2] > (z0 + 0.6 * (h - z0) if k else 0.03)]
+    lv = top_levels(tops, 0.04, 0.08); lv = lv[lv >= max(0.06, 0.15 * hmax)]; prims = []; z0 = 0.0; rects = []
+    for h in lv:                                                            # footprint of each level: points in the upper 3/4 of its own band
+        zb = rects[-1][2] if rects else 0.0; P = E[(E[:, 2] > zb + 0.25 * (h - zb)) & (E[:, 2] <= h + 0.01)]
         if len(P) < 30:
-            break
+            continue
         lo, hi = np.percentile(P[:, :2], 1, 0), np.percentile(P[:, :2], 99, 0)
+        if rects and np.abs(np.r_[lo - rects[-1][0], hi - rects[-1][1]]).max() < 0.025:
+            rects[-1] = (np.minimum(lo, rects[-1][0]), np.maximum(hi, rects[-1][1]), float(h)); continue   # same box: one level
+        rects.append((lo, hi, float(h)))
+    for k, (lo, hi, h) in enumerate(rects):
         prims.append(dict(id=f"p{k}", type="cuboid", cx=float((lo[0] + hi[0]) / 2), cy=float((lo[1] + hi[1]) / 2), yaw=0.0, sx=float(max(hi[0] - lo[0], 2 * vox)),
                           sy=float(max(hi[1] - lo[1], 2 * vox)), sz=float(h - z0), on="floor" if not k else f"p{k - 1}", material="m0", z0=z0))
         z0 = float(h)
@@ -545,7 +552,10 @@ def gen_field(al, ev, cfg):
         ev_occ = ev["surf"].copy(); ij, ok = G.index(ev["lidar"][ev["lidar"][:, 2] > 0.03]); ev_occ[ij[ok, 0], ij[ok, 1], ij[ok, 2]] = True
         ii = np.argwhere(ev_occ); lo, hi = np.percentile(ii, 1, 0).astype(int), np.percentile(ii, 99, 0).astype(int) + 1
         occ = np.zeros(G.shape, bool); occ[lo[0]:hi[0], lo[1]:hi[1], 0:hi[2]] = True; occ &= ~free; info["hull"] = True
-    occ &= z_ok & ev["foot"]; occ = ndimage.binary_closing(np.pad(occ, 2), structure=ball(1.5))[2:-2, 2:-2, 2:-2] & ~free & z_ok
+    occ &= z_ok & ev["foot"]
+    low = np.argmax(occ, axis=2); has = occ.any(2) & (low * G.vox + G.lo[2] < cfg["rest_m"]); zi = np.arange(G.shape[2])[None, None, :]
+    occ |= has[..., None] & (zi <= low[..., None]) & z_ok                    # no gap under the object (the surface evidence starts above the contact line)
+    occ = ndimage.binary_closing(np.pad(occ, 2), structure=ball(1.5))[2:-2, 2:-2, 2:-2] & ~free & z_ok
     occ = solid_fill(occ) & ~free & z_ok & ev["foot"]; occ = ndimage.binary_opening(occ, structure=ball(1.0))
     lab, nl = ndimage.label(occ)
     if nl > 1:
@@ -635,7 +645,7 @@ def bilinear(img, x, y):
     return (img[y0, x0] * (1 - fx) * (1 - fy) + img[y0, x0 + 1] * fx * (1 - fy) + img[y0 + 1, x0] * (1 - fx) * fy + img[y0 + 1, x0 + 1] * fx * fy).astype(np.float32)
 
 
-def bake(Vd, Nd, F, cams, depth_dir, s, cfg):
+def bake(Vd, Nd, F, cams, depth_dir, s, cfg, height=None):
     """real photos onto the vertices the cameras saw -> colour (V,3), seen (V,), best quality (px / m)."""
     import cv2
     sc = ray_scene(Vd, F); nv = len(Vd); K = cfg["top_k"]; tw = np.zeros((nv, K), np.float32); tc = np.zeros((nv, K, 3), np.float32); tf_ = -np.ones((nv, K), np.int32)
@@ -650,6 +660,8 @@ def bake(Vd, Nd, F, cams, depth_dir, s, cfg):
         SD = depth_of(depth_dir, c["name"])
         if SD is not None:                                                  # the photo shows THIS surface there (not floor / background through a too-wide mesh)
             sd = SD[np.floor(v[i]).astype(int), np.floor(u[i]).astype(int)]; vis &= (sd > 0) & (np.abs(sd - r[i]) < np.maximum(cfg["photo_tol_m"] / s, 0.03 * r[i]))
+            if height is not None:                                          # the pixel's own surface point is floor: not this object's colour
+                Pp = c["C"] + (Vd[i] - c["C"]) * (sd / np.maximum(r[i], 1e-9))[:, None]; vis &= height(Pp) > cfg["floor_pixel_m"]
         i = i[vis]
         if not len(i):
             continue
@@ -855,7 +867,7 @@ def candidates(a):
                     r["prim"]["rejected"] = f"not box-like: residual {pf['resid_m']} m > {lim:.4f} (max of {cfg['auto_box_resid_m']} and 1.2 x the generated asset's)"
         else:
             r["prim"]["source"] = "vision-language recipe"
-        files = sorted(glob.glob(os.path.join(a.gen_dir, f"obj{oid}_s*.npz"))) if a.gen_dir else []
+        files = sorted(f_ for g_ in [a.gen_dir] + (a.extra_gen_dir or []) if g_ for f_ in glob.glob(os.path.join(g_, f"obj{oid}_s*.npz")))
         al = fit_asset(files, ev, cfg, rng) if files else None
         if al is not None:
             r["gen"] = dict(asset=al["chosen"], cost=al["cost"], resid_m=al["resid_m"], scale_xyz=al["scale_xyz"], seeds=al["cands"])
@@ -868,7 +880,7 @@ def candidates(a):
             if mm is None:
                 r[name]["failed"] = "empty mesh"; continue
             m, nsnap = mm; L = np.asarray(m.vertices); Nl = np.asarray(m.vertex_normals); Vd = to_ds(fr.met(L)); Nd = fr.vec(Nl) @ R; F = np.asarray(m.faces)
-            col, seen, q, gain = bake(Vd, Nd, F, trn, a.splat_depth_dir, s, cfg)
+            col, seen, q, gain = bake(Vd, Nd, F, trn, a.splat_depth_dir, s, cfg, height=lambda Pd_: fr.loc(s * (Pd_ @ R.T) + t)[:, 2])
             seen &= L[:, 2] > cfg["base_m"]                                  # the contact line photographs as floor: completed from above instead
             if name == "prim":
                 cid, uv, cls, mats = charts_of(aux["prims"], L, Nl); col, how = fill_same_material(col, seen, cid, uv, cls, mats, cfg["texel_m"])
@@ -881,7 +893,8 @@ def candidates(a):
             save_cand(os.path.join(a.dir, "cand", f"obj{oid}_{name}.npz"), m, col, seen, fr, r[name])
             reals = []
             for c in val[:: max(1, len(val) // 2)][:2]:
-                real = load_img(c); img, mk, _ = render(sc, F, col, c, bg=real); reals.append((real, img, mk))
+                SD_ = depth_of(a.splat_depth_dir, c["name"]); real = load_img(c) * (obj_mask(c, SD_, ev, s, R, t)[..., None] if SD_ is not None else 0)
+                img, mk, _ = render(sc, F, col, c, bg=np.zeros_like(real)); reals.append((real, img, mk))
             nov = [render(sc, F, col, c, floor=(nd, dd, (0.62, 0.62, 0.6), 0.25 / s)) for c in novel_cams(ev, vc[0], s, R, t)] if vc else []
             sheets[name] = (reals, nov)
         # comparison sheet (A = prim, B = gen) for the vision-language choice and for the report
@@ -889,7 +902,7 @@ def candidates(a):
         if names:
             for k in range(len(sheets[names[0]][0])):
                 real, _, mk0 = sheets[names[0]][0][k]; mk = mk0 if mk0.any() else np.ones_like(mk0)
-                row = [label(crop_to(real, mk), "REAL photo")] + [label(crop_to(sheets[n_][0][k][1], mk), "AB"[("prim", "gen").index(n_)] + " same camera") for n_ in names]
+                row = [label(crop_to(real, mk), "REAL photo (object only)")] + [label(crop_to(sheets[n_][0][k][1], mk), "AB"[("prim", "gen").index(n_)] + " same camera") for n_ in names]
                 rows.append(np.hstack(row + [np.zeros_like(row[0])] * (3 - len(row))))
             for k in range(len(sheets[names[0]][1])):
                 row = [label(crop_to(sheets[n_][1][k][0], sheets[n_][1][k][1]), "AB"[("prim", "gen").index(n_)] + f" NOVEL {('behind', 'behind-left', 'behind-right', 'above')[k]}") for n_ in names]
@@ -1001,42 +1014,58 @@ def final_meshes(d):
     out = []
     for f in sorted(glob.glob(os.path.join(d, "obj*_mesh.npz"))):
         z = np.load(f); out.append(dict(id=int(os.path.basename(f)[3:].split("_")[0]), V=z["V"].astype(float), F=z["F"], C=z["C"].astype(float), N=z["N"].astype(float),
-                                        area=z["area"].astype(float), L=z["L"].astype(float), fr=Frame(z["fr_c0"], z["fr_a1"], z["fr_a2"], z["fr_n"], float(z["fr_d"]))))
+                                        area=z["area"].astype(float), L=z["L"].astype(float), seen=z["seen"].astype(bool), fr=Frame(z["fr_c0"], z["fr_a1"], z["fr_a2"], z["fr_n"], float(z["fr_d"]))))
     return out
 
 
+def accepted_meshes(a, cfg):
+    gf = os.path.join(a.dir, "gate.json"); gj = json.load(open(gf))["objects"] if os.path.exists(gf) else {}
+    return [m for m in final_meshes(a.dir) if gj.get(str(m["id"]), {}).get("loss_db", 0.0) <= cfg["max_object_loss_db"]]
+
+
 def floormap(a):
-    """cells to complete in the top-down floor texture: under every meshed object + the unseen floor connected to it."""
+    """cells to complete in the top-down floor texture, next to every ACCEPTED object mesh: its footprint, the floor no training
+    camera ever saw unoccluded (its view ray passed through an object), and nearby cells whose re-projected colour is closer to
+    the object's material than to the surrounding floor (object pixels smeared onto the floor). Their colour is synthesised
+    from the seen floor around them (LaMa, floor_fill_ibr.py inpaint) with those cells excluded from the context."""
     from scipy import ndimage
     cfg = load_cfg(a); z = dict(np.load(a.map)); mc = float(z["cell"]); e1, e2 = z["e1"], z["e2"]; x0, y0 = float(z["x0"]), float(z["y0"]); sh = z["occ"].shape
-    foot = np.zeros(sh, bool); ms = final_meshes(a.dir)
+    foot = np.zeros(sh, bool); ms = accepted_meshes(a, cfg); info = {}
     for m in ms:
         i = ((m["V"] @ e1 - x0) / mc).astype(int); j = ((m["V"] @ e2 - y0) / mc).astype(int); ok = (i >= 0) & (i < sh[0]) & (j >= 0) & (j < sh[1])
         g = np.zeros(sh, bool); g[i[ok], j[ok]] = True; foot |= ndimage.binary_fill_holes(ndimage.binary_closing(g, iterations=2))
     it = lambda m_: max(1, int(round(m_ / mc)))
     foot_d = ndimage.binary_dilation(foot, iterations=it(0.02)); other = z["obj"] & ~ndimage.binary_dilation(foot, iterations=it(0.06))
     k = it(cfg["floor_close_m"]); dom = ndimage.binary_closing(np.pad(z["occ"] | foot_d, k), iterations=k)[k:-k, k:-k] & ~other
-    anyc = z["any"] & ~foot_d; cont = np.zeros(sh, bool)
-    if ms and a.dataset and a.sim3_json:                                    # occlusion shadows: floor cells the training cameras saw THROUGH an object
-        s, R, t = sim3(a.sim3_json); cams = load_cams(a.dataset)[::max(1, len(load_cams(a.dataset)) // cfg["shadow_cams"])]
+    dist = ndimage.distance_transform_edt(~foot_d) * mc; near = (dist <= cfg["shadow_reach_m"]) & ~foot_d & dom
+    never = np.zeros(sh, bool); colc = np.zeros(sh, bool)
+    if ms and a.dataset and a.sim3_json:                                    # floor cells no training camera saw without an object in the way
+        s, R, t = sim3(a.sim3_json); cams = load_cams(a.dataset); cams = cams[::max(1, len(cams) // cfg["shadow_cams"])]
         sc = ray_scene(np.concatenate([m["V"] for m in ms]), np.concatenate([m["F"] + o for m, o in zip(ms, np.cumsum([0] + [len(m["V"]) for m in ms[:-1]]))]))
-        near = (ndimage.distance_transform_edt(~foot_d) * mc <= cfg["shadow_reach_m"]) & ~foot_d & (z["occ"] | dom); ci, cj = np.nonzero(near)
-        n_ = z["n"]; Pm = ((ci + 0.5) * mc + x0)[:, None] * e1 + ((cj + 0.5) * mc + y0)[:, None] * e2 - float(z["d"]) * n_ + 0.01 * n_
-        vis = np.zeros(len(Pm), int); occl = np.zeros(len(Pm), int); Pd = ((Pm - t) @ R) / s
+        ci, cj = np.nonzero(near); n_ = z["n"]
+        Pm = ((ci + 0.5) * mc + x0)[:, None] * e1 + ((cj + 0.5) * mc + y0)[:, None] * e2 - float(z["d"]) * n_ + 0.01 * n_
+        free_ = np.zeros(len(Pm), int); Pd = ((Pm - t) @ R) / s
         for c in cams:
             u, v, r, ok = project(c, Pd); ok &= (u >= 0) & (u < c["W"]) & (v >= 0) & (v < c["H"]) & (r * s < cfg["cam_max_m"]); i = np.nonzero(ok)[0]
             if not len(i):
                 continue
-            Cm = s * (c["C"] @ R.T) + t; dv = Cm - Pm[i]; dist = np.linalg.norm(dv, axis=1); th, _, _ = cast(sc, Pm[i], dv / dist[:, None])
-            vis[i] += 1; occl[i] += th < dist
-        bad = (vis > 0) & (occl > cfg["shadow_frac"] * vis); cont[ci[bad], cj[bad]] = True; anyc &= ~cont
-    unseen = dom & ~anyc; lab, nl = ndimage.label(unseen); keep = np.unique(lab[foot_d & unseen]); keep = keep[keep > 0]
-    reach = ndimage.distance_transform_edt(~foot_d) * mc <= cfg["shadow_reach_m"]; hole = np.isin(lab, keep) & reach
+            Cm = s * (c["C"] @ R.T) + t; dv = Cm - Pm[i]; dd = np.linalg.norm(dv, axis=1); th, _, _ = cast(sc, Pm[i], dv / dd[:, None]); free_[i] += th >= dd
+        never[ci[free_ == 0], cj[free_ == 0]] = True
+        ring = (dist > cfg["colour_reach_m"]) & (dist <= 2 * cfg["colour_reach_m"] + 0.1) & z["any"]
+        fl = np.median(z["rgb"][ring], 0) if ring.any() else np.median(z["rgb"][z["any"]], 0)
+        cand = (dist <= cfg["colour_reach_m"]) & ~foot_d & z["any"]; rgb = z["rgb"][cand]; dfl = np.linalg.norm(rgb - fl, axis=1); dob = np.full(len(rgb), np.inf)
+        for m in ms:
+            dob = np.minimum(dob, np.linalg.norm(rgb - np.median(m["C"], 0), axis=1))
+        cc = np.zeros(sh, bool); cc[cand] = dob < dfl; colc = cc; info = dict(floor_rgb=np.round(fl, 3).tolist(), views=len(cams))
+    reg = foot_d | ((never | colc) & (near | ((dist <= cfg["colour_reach_m"]) & dom)))
+    lab, nl = ndimage.label(reg); keep = np.unique(lab[foot_d]); hole = np.isin(lab, keep[keep > 0])
+    anyc = z["any"] & ~hole
     z["any"] = anyc; z["occ"] = z["occ"] | hole; z["obj"] = other; z["hole_override"] = hole; z["foot_cells"] = foot_d; z["rgb"] = z["rgb"] * anyc[..., None]
     np.savez_compressed(a.out, **z)
     from PIL import Image
     v = np.clip(z["rgb"] * 255, 0, 255).astype(np.uint8); v[hole] = (255, 0, 255); v[foot] = (255, 255, 0); Image.fromarray(v).save(os.path.splitext(a.out)[0] + "_cells.png")
-    print("LAYERS_FLOORMAP " + json.dumps(dict(footprint_m2=round(float(foot.sum()) * mc * mc, 3), shadow_contaminated_m2=round(float(cont.sum()) * mc * mc, 3), completed_m2=round(float(hole.sum()) * mc * mc, 3), out=a.out)), flush=True)
+    print("LAYERS_FLOORMAP " + json.dumps(dict(objects=[m["id"] for m in ms], footprint_m2=round(float(foot.sum()) * mc * mc, 3), never_unoccluded_m2=round(float((never & hole).sum()) * mc * mc, 3),
+                                              object_colour_m2=round(float((colc & hole).sum()) * mc * mc, 3), completed_m2=round(float(hole.sum()) * mc * mc, 3), out=a.out, **info)), flush=True)
 
 
 def layer_rows(a, cfg, v, s, R, t):
@@ -1054,6 +1083,7 @@ def layer_rows(a, cfg, v, s, R, t):
         cell = np.floor(Vm / cfg["backing_m"]).astype(np.int64); _, first, inv = np.unique(cell, axis=0, return_index=True, return_inverse=True); inv = inv.reshape(-1)
         cb = np.zeros((len(first), 3)); np.add.at(cb, inv, Cv); cb /= np.bincount(inv, minlength=len(first))[:, None]
         nb_ = Nm[first] / np.maximum(np.linalg.norm(Nm[first], axis=1, keepdims=True), 1e-9)
+        sr = np.concatenate([m["seen"][k], m["seen"][k][first]])          # rows a training photo coloured (the refit may touch only these)
         Vm = np.concatenate([Vm, Vm[first] - cfg["backing_inset_m"] * nb_]); Nm = np.concatenate([Nm, Nm[first]]); Cv = np.concatenate([Cv, cb])
         sgm = np.concatenate([sgm, np.full(len(first), cfg["backing_sigma"] * cfg["backing_m"])])
         Vd = ((Vm - t) @ R) / s; Nd = Nm @ R; Nd /= np.maximum(np.linalg.norm(Nd, axis=1, keepdims=True), 1e-9)
@@ -1067,7 +1097,7 @@ def layer_rows(a, cfg, v, s, R, t):
             new[f"f_dc_{i}"] = dc[:, i]
         if "nx" in v.dtype.names:
             new["nx"], new["ny"], new["nz"] = Nd.T
-        out.append((m["id"], m, d_, new))
+        out.append((m["id"], m, d_, new, sr))
     return out
 
 
@@ -1091,16 +1121,18 @@ def gate(a):
     cfg = load_cfg(a); s, R, t = sim3(a.sim3_json); v = PlyData.read(a.ply)["vertex"].data; dev = "cuda"
     p0 = to_params(v, dev); deg = sh_deg(p0); Rv = ViewerRaster("ss352", "exact", display_scale=1.8)
     fr = {n_: (cam, c2w) for n_, cam, c2w in all_frames([a.dataset])}; out = {}
-    for oid, m, d_, new in layer_rows(a, cfg, v, s, R, t):
+    for oid, m, d_, new, sr in layer_rows(a, cfg, v, s, R, t):
         z = np.load(os.path.join(a.dir, "ev", f"obj{oid}.npz")); names = [str(x) for x in z["views"] if str(x) in fr]; names = names[::max(1, len(names) // cfg["gate_frames"])]
         pk = to_params(np.concatenate([v[~d_], new]), dev); pb, pa = [], []; nb = int((~d_).sum())
         allv = [str(x) for x in z["views"] if str(x) in fr]
         if cfg["refit_iters"] > 0 and allv:                                 # texture refit through the viewer itself: mesh colours only, geometry frozen
+            seen_t = torch.tensor(sr, device=dev)                            # background a training view shows past them would fake see-through holes
             sh0 = torch.nn.Parameter(pk["sh0"][nb:].clone()); opt = torch.optim.Adam([sh0], lr=2.5e-3, eps=1e-15); rng = np.random.default_rng(0)
             for it in range(cfg["refit_iters"]):
                 n_ = allv[rng.integers(len(allv))]; cam, c2w = fr[n_]; gt = load_rgb(os.path.join(a.dataset, "images", n_), dev).float() / 255
                 pp = dict(pk); pp["sh0"] = torch.cat([pk["sh0"][:nb], sh0]); img = Rv.render(pp, to_t(np.linalg.inv(c2w), dev), *cam_args(cam), sh_degree=deg)[0]
-                l = 0.8 * (img - gt).abs().mean() + 0.2 * (1 - ssim(img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None])); opt.zero_grad(set_to_none=True); l.backward(); opt.step()
+                l = 0.8 * (img - gt).abs().mean() + 0.2 * (1 - ssim(img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None])); opt.zero_grad(set_to_none=True); l.backward()
+                sh0.grad[~seen_t] = 0; opt.step()                           # unseen faces keep their completed texture: painting them with the
             pk["sh0"] = torch.cat([pk["sh0"][:nb], sh0.detach()]); np.save(os.path.join(a.dir, f"obj{oid}_refit_dc.npy"), sh0.detach()[:, 0].cpu().numpy())
         with torch.no_grad():
             for n_ in names:
@@ -1118,7 +1150,7 @@ def compose(a):
     from scipy.spatial.transform import Rotation
     cfg = load_cfg(a); s, R, t = sim3(a.sim3_json); v = PlyData.read(a.ply)["vertex"].data; N0 = len(v); dele = np.zeros(N0, bool); rows = []; rep = {}
     gf = os.path.join(a.dir, "gate.json"); gj = json.load(open(gf))["objects"] if os.path.exists(gf) else {}; kept = []
-    for oid, m, d_, new in layer_rows(a, cfg, v, s, R, t):
+    for oid, m, d_, new, _ in layer_rows(a, cfg, v, s, R, t):
         if gj and gj.get(str(oid), {}).get("loss_db", 0.0) > cfg["max_object_loss_db"]:
             rep[oid] = dict(decision=f"kept its splat: on-path loss {gj[str(oid)]['loss_db']} dB > {cfg['max_object_loss_db']}"); continue
         rf = os.path.join(a.dir, f"obj{oid}_refit_dc.npy")
@@ -1155,6 +1187,7 @@ def main():
     ap.add_argument("--dir", required=True, help="work dir of this run"); ap.add_argument("--cfg-json", default=None, help="the config's object_layers block as JSON")
     ap.add_argument("--objects"); ap.add_argument("--sim3-json"); ap.add_argument("--dataset"); ap.add_argument("--splat-depth-dir"); ap.add_argument("--gen-dir", default=None)
     ap.add_argument("--ids", type=int, nargs="*", default=None, help="debug override: only these objects")
+    ap.add_argument("--extra-gen-dir", nargs="*", default=None, help="more generated-asset dirs (e.g. Hunyuan3D-2.1); every seed of every generator is registered");
     ap.add_argument("--apply-detection", action="store_true", help="evidence: split / merge clusters as the vision-language detection check says");
     ap.add_argument("--round", type=int, default=1); ap.add_argument("--map"); ap.add_argument("--ply"); ap.add_argument("--out")
     a = ap.parse_args(); os.makedirs(a.dir, exist_ok=True)
