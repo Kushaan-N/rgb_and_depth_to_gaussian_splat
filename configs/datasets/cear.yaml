@@ -178,3 +178,31 @@ object_assets:
   refit_iters: 800            # refit of the kept front (+ colour of camera-visible asset gaussians) on the real frames
   front_keep_w: 0.02          # base gaussians with at least this training-view blend weight are kept (the real front)
   front_m: 0.015              # asset gaussians within this of / in front of the seen surface are not inserted
+
+# layered, object-centric scene (sbatch/object_layers.sbatch; scripts/object_layers/): every free-standing object becomes one
+# closed textured mesh (real photos on the seen faces), the floor under / behind it is completed, the rest stays a splat
+object_layers:
+  enable: true
+  voxel_m: 0.005              # evidence / geometry grid (grows automatically for large objects: max_voxels)
+  texel_m: 0.003              # surface sampling that carries the texture (one flat gaussian per vertex)
+  cam_max_m: 4.0              # training views farther than this from an object are not used for it
+  max_views: 160
+  min_free_views: 3           # a voxel is measured free space when this many views looked through it
+  crust_m: 0.03               # generated candidate: seen surface closer than this to the registered asset replaces it
+  carve_tol_m: 0.015          # primitive candidate: recipe volume deeper than this inside measured free space is cut out
+  max_resid_m: 0.03           # generated asset whose registration residual exceeds this is not used (evidence hull instead)
+  seam_m: 0.02                # feather between real and completed texture
+  plane_snap: true            # generated candidate: dominant planes are flattened
+  refit_iters: 600            # mesh texture refit through the viewer on the real training frames (colour only, geometry frozen)
+  max_object_loss_db: 2.0    # per object: PSNR drop on the training frames that see it (not the whole held-out set) above this -> the
+                              #   object keeps its splat. Catches broken fronts (o2 trot: 8 dB); ~1-2 dB here is ~0.1-0.3 dB on the full on-path set
+  zone_m: 0.03                # splat gaussians within this of an object's mesh box are replaced by the mesh
+  floor_close_m: 0.25         # floor continues across gaps up to twice this (occlusion shadows behind objects)
+  shadow_reach_m: 1.0         # ... up to this far from the object
+  vlm:                        # vision-language stage (scripts/object_layers/vlm.py; needs ~/.config/scan2sim/anthropic_key + internet;
+    enable: true              #   without them the generated mesh is used). Prompts: scripts/object_layers/prompts_v1.py
+    model: claude-opus-5-5
+    effort: high
+    recipe: true              # shape recipe (primitives) + detection check per object
+    select: true              # choose primitive fit vs generated mesh per object
+    review_rounds: 2          # look-and-fix rounds on the assembled mesh scene (0 = off)
