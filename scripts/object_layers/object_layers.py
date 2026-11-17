@@ -30,8 +30,9 @@ from build_depth_targets import quat_to_R, read_text_model  # noqa: E402
 
 C0 = 0.28209479177387814
 DEF = dict(voxel_m=0.005, max_voxels=6e6, margin_m=0.08, cam_max_m=4.0, max_views=160, tol_abs_m=0.012, tol_rel=0.01, min_free_views=3,
-           min_surf_views=3, texel_m=0.003, crust_m=0.03, carve_tol_m=0.015, max_resid_m=0.03, cos_min=0.5, q_min_px_m=60.0, top_k=4,
-           sharp_pow=4.0, min_face_psnr=20.0, solid_margin_m=0.015, floor_pixel_m=0.012, backing_m=0.008, backing_sigma=0.7, backing_inset_m=0.0015, shadow_cams=1000, colour_reach_m=0.15, refit_iters=600, max_object_loss_db=2.0, gate_frames=20, base_m=0.02, prefer_prim_iou_tol=0.03, foot_close_m=0.03, foot_grow_m=0.01, photo_tol_m=0.015, rest_m=0.06, auto_box_resid_m=0.012, seam_m=0.02, val_every=6, zone_m=0.03, floor_m=0.012, gauss_sigma=0.9, gauss_thick_m=0.0005, gauss_opacity=0.985,
+           min_surf_views=3, texel_m=0.003, crust_m=0.03, carve_tol_m=0.015, max_resid_m=0.03, cos_min=0.2, q_min_px_m=60.0, top_k=4,
+           sharp_pow=4.0, lidar_contain=0.0, yaw_free=1, lidar_solid=0, mv_n=24, mv_dist=(0.5, 1.5), mv_h=(0.3, 1.2), mv_floor_m=1.5, mv_clear_m=0.05,
+           mv_min_share=0.02, mv_feather_px=3, min_face_psnr=20.0, solid_margin_m=0.015, floor_pixel_m=-1.0, backing_m=0.008, backing_sigma=0.7, backing_inset_m=0.0015, shadow_cams=1000, colour_reach_m=0.15, refit_iters=600, max_object_loss_db=2.0, gate_frames=20, base_m=0.02, prefer_prim_iou_tol=0.03, foot_close_m=0.03, foot_grow_m=0.01, photo_tol_m=0.015, rest_m=0.06, auto_box_resid_m=0.012, seam_m=0.02, val_every=6, zone_m=0.03, floor_m=0.012, gauss_sigma=0.9, gauss_thick_m=0.0005, gauss_opacity=0.985,
            floor_close_m=0.25, shadow_reach_m=1.0, min_prim_confidence=0.3, plane_snap=True, max_edit_m=0.05, vlm_images=4)
 
 
@@ -297,7 +298,9 @@ def load_ev(a, oid, cfg):
     # says (a semi-transparent splat renders depths BEHIND its surface, which would read as free space inside the object)
     Ht = np.full(G.shape[:2], -1.0); ij2, ok2 = G.index(np.c_[P[:, :2], np.zeros(len(P))]); np.maximum.at(Ht, (ij2[ok2, 0], ij2[ok2, 1]), P[ok2, 2])
     Ht = ndimage.grey_closing(ndimage.maximum_filter(Ht, size=max(3, 2 * int(round(0.015 / G.vox)) + 1)), size=max(3, 2 * r_ + 1))
-    solid = f2[:, :, None] & (Lc[..., 2] <= Ht[:, :, None] - cfg["solid_margin_m"]); free = free & ~solid
+    solid = f2[:, :, None] & (Lc[..., 2] <= Ht[:, :, None] - cfg["solid_margin_m"])
+    if cfg["lidar_solid"]:
+        free = free & ~solid
     return dict(fr=fr, G=G, free=free, surf=surf, lidar=lid, half=z["half"], hmax=hmax, views=[str(x) for x in z["views"]], az=z["az"], Lc=Lc, foot=foot)
 
 
@@ -386,7 +389,7 @@ def prims_pack(prims):
     return np.array(v)
 
 
-def prims_unpack(prims0, v, lim=None, lid=None, contain=0.9):
+def prims_unpack(prims0, v, lim=None, lid=None, contain=0.9, yaw_free=True):
     """lim: (max |centre| m, max size m) -- an unconstrained optimiser must not grow a primitive without bound.
     lid: the object's cleaned LiDAR points (object frame): every box level contains the central --contain share of the points
     in its own height band along each of its axes (the LiDAR saw the object from far more sides than the camera: its plan
@@ -398,7 +401,7 @@ def prims_unpack(prims0, v, lim=None, lid=None, contain=0.9):
             q["tilt"] = float(np.clip(v[k], -1.2, 1.2)); k += 1
         if p["type"] == "cylinder" and p.get("axis", "z") == "z":
             q["sy"] = q["sx"]
-        q["yaw"] = p["yaw"]; out.append(q)                                  # yaw = the LiDAR min-area footprint rectangle's (the most reliable cue)
+        q["yaw"] = p["yaw"] + (v[0] if yaw_free else 0.0); out.append(q)    # yaw_free 0: the LiDAR min-area footprint rectangle's
     for _ in range(len(out)):                                               # stacking: bottoms follow the supporter's top
         for q in out:
             j = ids.get(q["on"]); q["z0"] = 0.0 if j is None or out[j] is q else out[j]["z0"] + out[j]["sz"]
@@ -453,11 +456,11 @@ def fit_prims(rec, ev, cfg, rng, inits=None):
     Fp = Fp[rng.choice(len(Fp), min(6000, len(Fp)), replace=False)] if len(Fp) else np.zeros((0, 3))
     hmax = float(np.percentile(np.concatenate([E[:, 2], Lp[:, 2]]), 99.5)) if len(E) + len(Lp) else ev["hmax"]
 
-    Lb = ev["lidar"][ev["lidar"][:, 2] > 0.03]
+    Lb = ev["lidar"][ev["lidar"][:, 2] > 0.03] if cfg["lidar_contain"] > 0 else None
     lim = (float(np.max(ev["half"])) + 0.05, 1.3 * float(max(2 * np.max(ev["half"]), ev["hmax"])) + 0.02)
 
     def cost(v, p0, v0):
-        pr = prims_unpack(p0, v, lim, Lb); c = 0.0
+        pr = prims_unpack(p0, v, lim, Lb, cfg["lidar_contain"] or 0.9, bool(cfg["yaw_free"])); c = 0.0
         if len(E):
             c += 0.7 * np.minimum(np.abs(prims_sdf(pr, E)[0]), 0.05).mean()
         if len(Lp):
@@ -477,7 +480,7 @@ def fit_prims(rec, ev, cfg, rng, inits=None):
     for c0, p0, v0 in inits[:3]:
         r = minimize(cost, v0, args=(p0, v0), method="Powell", options=dict(maxfev=400 * len(v0), xtol=1e-3, ftol=1e-5))
         if best is None or r.fun < best[0]:
-            best = (float(r.fun), prims_unpack(p0, r.x, lim, Lb), float(c0))
+            best = (float(r.fun), prims_unpack(p0, r.x, lim, Lb, cfg["lidar_contain"] or 0.9, bool(cfg["yaw_free"])), float(c0))
     pr = best[1]; res = float(np.minimum(np.abs(prims_sdf(pr, E)[0]), 0.05).mean()) if len(E) else None
     return dict(prims=pr, cost=round(best[0], 4), init_cost=round(best[2], 4), resid_m=None if res is None else round(res, 4),
                 free_pen_m=round(float(np.maximum(-prims_sdf(pr, Fp)[0], 0).mean()), 4) if len(Fp) else 0.0)
@@ -677,7 +680,7 @@ def bake(Vd, Nd, F, cams, depth_dir, s, cfg, height=None):
         SD = depth_of(depth_dir, c["name"])
         if SD is not None:                                                  # the photo shows THIS surface there (not floor / background through a too-wide mesh)
             sd = SD[np.floor(v[i]).astype(int), np.floor(u[i]).astype(int)]; vis &= (sd > 0) & (np.abs(sd - r[i]) < np.maximum(cfg["photo_tol_m"] / s, 0.03 * r[i]))
-            if height is not None:                                          # the pixel's own surface point is floor: not this object's colour
+            if height is not None and cfg["floor_pixel_m"] > 0:              # the pixel's own surface point is floor: not this object's colour
                 Pp = c["C"] + (Vd[i] - c["C"]) * (sd / np.maximum(r[i], 1e-9))[:, None]; vis &= height(Pp) > cfg["floor_pixel_m"]
         i = i[vis]
         if not len(i):
@@ -1183,6 +1186,115 @@ def gate(a):
     json.dump(dict(objects=out, min_face_psnr=cfg["min_face_psnr"]), open(os.path.join(a.dir, "gate.json"), "w"), indent=1)
 
 
+def look_at_cam(c0, eye_d, tgt_d, up_d):
+    z = tgt_d - eye_d; z /= np.linalg.norm(z); x = np.cross(z, up_d); x /= np.linalg.norm(x); y = np.cross(z, x); Rc = np.stack([x, y, z])
+    return dict(c0, R=Rc, t=-Rc @ eye_d, C=eye_d)
+
+
+def meshviews(a):
+    """3D-consistent pseudo-views of the completed objects + completed floor for scripts/train_distill_gsplat.py (CPU):
+    cameras orbit every meshed object at the viewer's distances / heights (--cfg mv_*; line of sight to the object clear of
+    other LiDAR returns); per view the meshes (vertex colours) and the completed floor (floor_map_inpainted rgb_filled) are
+    ray-cast. Supervision mask (soft, 0..255) = pixels whose surface point NO training camera saw: mesh vertices' seen flags
+    (barycentric), floor cells of the completion (hole_override); feathered by --mv_feather_px. Depth target = ray distance
+    (dataset units) where supervised. Pixels outside the mask are never used by the trainer (it swaps in the target there).
+    -> <out>/{sparse/0, images/<stem>.png, <stem>_mask.png, <stem>_depth.npy}, pseudo.json"""
+    import cv2
+    from scipy.spatial import cKDTree
+    from make_pseudo_views import rot2quat, write_images
+    cfg = load_cfg(a); s, R, t = sim3(a.sim3_json); to_ds = lambda X: ((X - t) @ R) / s; rng = np.random.default_rng(0)
+    cams = load_cams(a.dataset); c0 = cams[0]; ms = final_meshes(a.dir); out = a.out; os.makedirs(os.path.join(out, "images"), exist_ok=True); os.makedirs(os.path.join(out, "sparse", "0"), exist_ok=True)
+    z = np.load(a.map); mc = float(z["cell"]); e1, e2, nf, df = z["e1"], z["e2"], z["n"], float(z["d"]); x0, y0 = float(z["x0"]), float(z["y0"])
+    frgb = z["rgb_filled"]; fhole = z["hole_override"] if "hole_override" in z.files else np.zeros(frgb.shape[:2], bool)
+    Vd = np.concatenate([to_ds(m["V"]) for m in ms]); Fall = np.concatenate([m["F"] + o for m, o in zip(ms, np.cumsum([0] + [len(m["V"]) for m in ms[:-1]]))])
+    Call = np.concatenate([m["C"] for m in ms]); Sall = np.concatenate([m["seen"].astype(np.float32) for m in ms]); owner = np.concatenate([np.full(len(m["F"]), m["id"]) for m in ms])
+    sc = ray_scene(Vd, Fall); ltree = None
+    flc = np.median(z["rgb"][z["any"]], 0) if "any" in z.files and z["any"].any() else np.median(frgb.reshape(-1, 3), 0)
+    obc = np.stack([np.median(m["C"], 0) for m in ms])
+    if a.cloud and os.path.exists(a.cloud):
+        from plyfile import PlyData
+        cv_ = PlyData.read(a.cloud)["vertex"].data; Lp = np.stack([cv_["x"], cv_["y"], cv_["z"]], 1).astype(np.float64); Lp = Lp[np.unique(np.floor(Lp / 0.02).astype(np.int64), axis=0, return_index=True)[1]]
+        ltree = cKDTree(Lp)
+    W, H = c0["W"], c0["H"]; xs, ys = np.meshgrid(np.arange(W) + 0.5, np.arange(H) + 0.5); rows, info = [], []
+    for m in ms:
+        fr = m["fr"]; L = m["L"]; rad = float(np.linalg.norm(np.ptp(L[:, :2], 0)) / 2); hmax = float(L[:, 2].max()); ctr = fr.met(np.array([[0.0, 0.0, hmax / 2]]))[0]
+        tries, k = 0, 0
+        while k < cfg["mv_n"] and tries < 40 * cfg["mv_n"]:
+            tries += 1; th = rng.uniform(0, 2 * np.pi); dist = rad + rng.uniform(*cfg["mv_dist"]); hh = rng.uniform(*cfg["mv_h"])
+            eye = fr.met(np.array([[dist * np.cos(th), dist * np.sin(th), hh]]))[0]
+            tgt = fr.met(np.array([[rng.uniform(-0.3, 0.3) * rad, rng.uniform(-0.3, 0.3) * rad, rng.uniform(0.2, 0.7) * hmax]]))[0]
+            if ltree is not None:                                           # clear line of sight: no foreign LiDAR return on the way
+                Lg = np.linalg.norm(tgt - eye); u_ = (tgt - eye) / Lg; pts = eye + np.outer(np.arange(0.0, max(Lg - rad - 0.05, 0.0), 0.03), u_)
+                if len(pts) and ltree.query(pts)[0].min() < cfg["mv_clear_m"]:
+                    continue
+                if ltree.query(eye[None])[0][0] < 0.15:
+                    continue
+            c = look_at_cam(c0, to_ds(eye[None])[0], to_ds(tgt[None])[0], R.T @ fr.n)
+            dc = np.stack([(xs - c["cx"]) / c["fx"], (ys - c["cy"]) / c["fy"], np.ones_like(xs)], -1).reshape(-1, 3); dw = dc @ c["R"]; dn = np.linalg.norm(dw, axis=1); dw /= dn[:, None]
+            O = np.broadcast_to(c["C"], dw.shape); th_, pid, uv = cast(sc, O, dw); hit = np.isfinite(th_)
+            img = np.zeros((H * W, 3), np.float32); wgt = np.zeros(H * W, np.float32); dep = np.zeros(H * W, np.float32)
+            f = Fall[pid[hit]]; u, v = uv[hit, 0], uv[hit, 1]; b = np.stack([1 - u - v, u, v], 1)
+            img[hit] = (Call[f] * b[..., None]).sum(1); wgt[hit] = 1 - (Sall[f] * b).sum(1); dep[hit] = th_[hit]
+            # completed floor where no mesh is hit (plane, map cells within --mv_floor_m of this object)
+            Om = s * (c["C"] @ R.T) + t; dm = dw @ R.T; den = dm @ nf; tt = -(Om @ nf + df) / np.where(np.abs(den) > 1e-9, den, 1e-9)
+            fl = ~hit & (tt > 0) & (den < -1e-6); Pm = Om + dm[fl] * tt[fl, None]; ci = ((Pm @ e1 - x0) / mc).astype(int); cj = ((Pm @ e2 - y0) / mc).astype(int)
+            ok = (ci >= 0) & (ci < frgb.shape[0]) & (cj >= 0) & (cj < frgb.shape[1]) & (np.linalg.norm(fr.loc(Pm)[:, :2], axis=1) < rad + cfg["mv_floor_m"])
+            idx = np.nonzero(fl)[0][ok]; img[idx] = frgb[ci[ok], cj[ok]]; wgt[idx] = fhole[ci[ok], cj[ok]]; dep[idx] = tt[fl][ok] / s
+            cf = img[idx]; dfl = np.linalg.norm(cf - flc, axis=1); dob = np.min(np.linalg.norm(cf[:, None] - obc[None], axis=2), 1)
+            wgt[idx[dob < dfl]] = 0                                         # completed floor that still looks like an object: not a target
+            wgt = wgt.reshape(H, W)
+            if cfg["mv_feather_px"] > 0:                                    # no supervision right at silhouettes / seen-unseen seams
+                k_ = 2 * cfg["mv_feather_px"] + 1; wgt = np.minimum(wgt, cv2.erode(wgt, np.ones((k_, k_), np.uint8)))
+            share = float((wgt > 0.05).mean())
+            if share < cfg["mv_min_share"]:
+                continue
+            stem = f"msh_o{m['id']}_{k:03d}"; k += 1
+            cv2.imwrite(os.path.join(out, "images", stem + ".png"), np.clip(img.reshape(H, W, 3)[..., ::-1] * 255, 0, 255).astype(np.uint8))
+            cv2.imwrite(os.path.join(out, "images", stem + "_mask.png"), np.clip(wgt * 255, 0, 255).astype(np.uint8))
+            np.save(os.path.join(out, "images", stem + "_depth.npy"), np.where(wgt.reshape(-1) > 0.05, dep, 0).reshape(H, W).astype(np.float32))
+            rows.append((len(rows) + 1, rot2quat(c["R"]), c["t"], 1, stem + ".png")); info.append(dict(name=stem + ".png", object=m["id"], dist_m=round(dist, 2), eye_h=round(hh, 2), supervised_share=round(share, 3)))
+        print(f"[meshviews] o{m['id']}: {k} views ({tries} tries)", flush=True)
+    open(os.path.join(out, "sparse", "0", "cameras.txt"), "w").write(f"1 PINHOLE {W} {H} {c0['fx']} {c0['fy']} {c0['cx']} {c0['cy']}\n")
+    write_images(os.path.join(out, "sparse", "0", "images.txt"), rows); open(os.path.join(out, "sparse", "0", "points3D.txt"), "w").write("")
+    json.dump(dict(views=info, n=len(rows), cfg={k: cfg[k] for k in cfg if k.startswith("mv_")}), open(os.path.join(out, "pseudo.json"), "w"), indent=1, default=str)
+    # contact sheet: 16 views, image | mask
+    import random
+    pick = [info[i]["name"] for i in np.linspace(0, len(info) - 1, min(16, len(info))).astype(int)]; tiles = []
+    for nm in pick:
+        im = cv2.imread(os.path.join(out, "images", nm)); mk = cv2.imread(os.path.join(out, "images", nm[:-4] + "_mask.png"))
+        tiles.append(np.hstack([cv2.resize(im, (240, 180)), cv2.resize(mk, (240, 180))]))
+    while len(tiles) % 4:
+        tiles.append(np.zeros_like(tiles[0]))
+    cv2.imwrite(os.path.join(out, "contact.jpg"), np.vstack([np.hstack(tiles[i:i + 4]) for i in range(0, len(tiles), 4)]), [cv2.IMWRITE_JPEG_QUALITY, 85])
+    print("MESHVIEWS " + json.dumps(dict(views=len(rows), out=out, mean_supervised_share=round(float(np.mean([v["supervised_share"] for v in info])), 3) if info else 0)), flush=True)
+
+
+def mergeviews(a):
+    """one pseudo-view dataset from several (train_distill_gsplat.py takes one): --sources DS:weight ...; masks rescaled by
+    weight / --pseudo-weight (so each source keeps its own effective weight), images / depths linked; camera ids kept apart."""
+    import cv2
+    from make_pseudo_views import write_images
+    out = a.out; os.makedirs(os.path.join(out, "images"), exist_ok=True); os.makedirs(os.path.join(out, "sparse", "0"), exist_ok=True)
+    cam_lines, rows, n = [], [], {}
+    for ci, sw in enumerate(a.sources, 1):
+        ds, w = sw.rsplit(":", 1); f = float(w) / a.pseudo_weight; cams, imgs = read_text_model(os.path.join(ds, "sparse", "0"))
+        assert len(cams) == 1, "one camera per source"
+        (W, H, K), = cams.values(); cam_lines.append(f"{ci} PINHOLE {W} {H} {' '.join(str(x) for x in K)}\n"); n[ds] = len(imgs)
+        for name, _, q, tc in imgs:
+            st = os.path.splitext(name)[0]
+            for suf in (".png", "_depth.npy"):
+                src, dst = os.path.join(ds, "images", st + suf), os.path.join(out, "images", st + suf)
+                if os.path.exists(src) and not os.path.lexists(dst):
+                    os.symlink(src, dst)
+            mk = cv2.imread(os.path.join(ds, "images", st + "_mask.png"), cv2.IMREAD_GRAYSCALE)
+            cv2.imwrite(os.path.join(out, "images", st + "_mask.png"), np.clip(mk.astype(np.float32) * f, 0, 255).astype(np.uint8))
+            rows.append((len(rows) + 1, q, tc, ci, name))
+    open(os.path.join(out, "sparse", "0", "cameras.txt"), "w").writelines(cam_lines); write_images(os.path.join(out, "sparse", "0", "images.txt"), rows)
+    open(os.path.join(out, "sparse", "0", "points3D.txt"), "w").write("")
+    json.dump(dict(sources=a.sources, pseudo_weight=a.pseudo_weight, views=n), open(os.path.join(out, "pseudo.json"), "w"), indent=1)
+    print("MERGEVIEWS " + json.dumps(dict(views=len(rows), per_source=n, out=out)), flush=True)
+
+
 def floorviews(a):
     """floor-only renders (gsplat venv, GPU): from behind / beside / above every meshed object, the input splat and the layered
     background (the floor completion) with every object's zone removed -> <dir>/floorviews/obj<id>.jpg (top: before, bottom: after)."""
@@ -1248,15 +1360,16 @@ def compose(a):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["evidence", "candidates", "finalize", "floormap", "gate", "compose", "floorviews"])
+    ap.add_argument("cmd", choices=["evidence", "candidates", "finalize", "floormap", "gate", "compose", "floorviews", "meshviews", "mergeviews"])
     ap.add_argument("--dir", required=True, help="work dir of this run"); ap.add_argument("--cfg-json", default=None, help="the config's object_layers block as JSON")
     ap.add_argument("--objects"); ap.add_argument("--sim3-json"); ap.add_argument("--dataset"); ap.add_argument("--splat-depth-dir"); ap.add_argument("--gen-dir", default=None)
     ap.add_argument("--ids", type=int, nargs="*", default=None, help="debug override: only these objects")
     ap.add_argument("--extra-gen-dir", nargs="*", default=None, help="more generated-asset dirs (e.g. Hunyuan3D-2.1); every seed of every generator is registered");
     ap.add_argument("--apply-detection", action="store_true", help="evidence: split / merge clusters as the vision-language detection check says");
-    ap.add_argument("--base-ply", default=None, help="floorviews: the input splat (before)"); ap.add_argument("--round", type=int, default=1); ap.add_argument("--map"); ap.add_argument("--ply"); ap.add_argument("--out")
+    ap.add_argument("--base-ply", default=None, help="floorviews: the input splat (before)"); ap.add_argument("--cloud", default=None)
+    ap.add_argument("--sources", nargs="*", default=None, help="mergeviews: DS:weight ..."); ap.add_argument("--pseudo-weight", type=float, default=0.5); ap.add_argument("--round", type=int, default=1); ap.add_argument("--map"); ap.add_argument("--ply"); ap.add_argument("--out")
     a = ap.parse_args(); os.makedirs(a.dir, exist_ok=True)
-    {"evidence": evidence, "candidates": candidates, "finalize": finalize, "floormap": floormap, "gate": gate, "compose": compose, "floorviews": floorviews}[a.cmd](a)
+    {"evidence": evidence, "candidates": candidates, "finalize": finalize, "floormap": floormap, "gate": gate, "compose": compose, "floorviews": floorviews, "meshviews": meshviews, "mergeviews": mergeviews}[a.cmd](a)
 
 
 if __name__ == "__main__":
