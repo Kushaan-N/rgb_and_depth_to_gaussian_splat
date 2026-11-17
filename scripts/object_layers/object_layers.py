@@ -31,7 +31,7 @@ from build_depth_targets import quat_to_R, read_text_model  # noqa: E402
 C0 = 0.28209479177387814
 DEF = dict(voxel_m=0.005, max_voxels=6e6, margin_m=0.08, cam_max_m=4.0, max_views=160, tol_abs_m=0.012, tol_rel=0.01, min_free_views=3,
            min_surf_views=3, texel_m=0.003, crust_m=0.03, carve_tol_m=0.015, max_resid_m=0.03, cos_min=0.2, q_min_px_m=60.0, top_k=4,
-           sharp_pow=4.0, lidar_contain=0.0, yaw_free=1, lidar_solid=0, mv_n=24, mv_dist=(0.5, 1.5), mv_h=(0.3, 1.2), mv_floor_m=1.5, mv_clear_m=0.05,
+           sharp_pow=4.0, mv_floor_z=3.0, mv_black=0.03, seed_m=0.005, lidar_contain=0.0, yaw_free=1, lidar_solid=0, mv_n=24, mv_dist=(0.5, 1.5), mv_h=(0.3, 1.2), mv_floor_m=1.5, mv_clear_m=0.05,
            mv_min_share=0.02, mv_feather_px=3, min_face_psnr=20.0, solid_margin_m=0.015, floor_pixel_m=-1.0, backing_m=0.008, backing_sigma=0.7, backing_inset_m=0.0015, shadow_cams=1000, colour_reach_m=0.15, refit_iters=600, max_object_loss_db=2.0, gate_frames=20, base_m=0.02, prefer_prim_iou_tol=0.03, foot_close_m=0.03, foot_grow_m=0.01, photo_tol_m=0.015, rest_m=0.06, auto_box_resid_m=0.012, seam_m=0.02, val_every=6, zone_m=0.03, floor_m=0.012, gauss_sigma=0.9, gauss_thick_m=0.0005, gauss_opacity=0.985,
            floor_close_m=0.25, shadow_reach_m=1.0, min_prim_confidence=0.3, plane_snap=True, max_edit_m=0.05, vlm_images=4)
 
@@ -1210,7 +1210,12 @@ def meshviews(a):
     Call = np.concatenate([m["C"] for m in ms]); Sall = np.concatenate([m["seen"].astype(np.float32) for m in ms]); owner = np.concatenate([np.full(len(m["F"]), m["id"]) for m in ms])
     sc = ray_scene(Vd, Fall); ltree = None
     flc = np.median(z["rgb"][z["any"]], 0) if "any" in z.files and z["any"].any() else np.median(frgb.reshape(-1, 3), 0)
-    obc = np.stack([np.median(m["C"], 0) for m in ms])
+    obc = np.stack([np.median(m["C"], 0) for m in ms]); fmed, fmad = {}, {}
+    gi, gj = np.nonzero(z["any"]) if "any" in z.files else np.nonzero(np.ones(frgb.shape[:2], bool))
+    Gm = ((gi + 0.5) * mc + x0)[:, None] * e1 + ((gj + 0.5) * mc + y0)[:, None] * e2 - df * nf
+    for m in ms:                                                            # seen floor 0.3 - 1.5 m around each object: its colour distribution
+        dd_ = np.linalg.norm(m["fr"].loc(Gm)[:, :2], axis=1); sel = (dd_ > 0.3) & (dd_ < 1.5); sel = sel if sel.sum() > 200 else dd_ < 3.0
+        cc = z["rgb"][gi[sel], gj[sel]]; fmed[m["id"]] = np.median(cc, 0); fmad[m["id"]] = 1.4826 * np.median(np.abs(cc - fmed[m["id"]]), 0) + 0.01
     if a.cloud and os.path.exists(a.cloud):
         from plyfile import PlyData
         cv_ = PlyData.read(a.cloud)["vertex"].data; Lp = np.stack([cv_["x"], cv_["y"], cv_["z"]], 1).astype(np.float64); Lp = Lp[np.unique(np.floor(Lp / 0.02).astype(np.int64), axis=0, return_index=True)[1]]
@@ -1242,6 +1247,8 @@ def meshviews(a):
             idx = np.nonzero(fl)[0][ok]; img[idx] = frgb[ci[ok], cj[ok]]; wgt[idx] = fhole[ci[ok], cj[ok]]; dep[idx] = tt[fl][ok] / s
             cf = img[idx]; dfl = np.linalg.norm(cf - flc, axis=1); dob = np.min(np.linalg.norm(cf[:, None] - obc[None], axis=2), 1)
             wgt[idx[dob < dfl]] = 0                                         # completed floor that still looks like an object: not a target
+            zl = np.abs(cf - fmed[m["id"]]) / fmad[m["id"]]; wgt[idx[zl.max(1) > cfg["mv_floor_z"]]] = 0   # outside the local seen-floor colours
+            wgt[img.max(1) < cfg["mv_black"]] = 0                            # black / unfilled pixels are never targets
             wgt = wgt.reshape(H, W)
             if cfg["mv_feather_px"] > 0:                                    # no supervision right at silhouettes / seen-unseen seams
                 k_ = 2 * cfg["mv_feather_px"] + 1; wgt = np.minimum(wgt, cv2.erode(wgt, np.ones((k_, k_), np.uint8)))
@@ -1276,10 +1283,25 @@ def mergeviews(a):
     from make_pseudo_views import write_images
     out = a.out; os.makedirs(os.path.join(out, "images"), exist_ok=True); os.makedirs(os.path.join(out, "sparse", "0"), exist_ok=True)
     cam_lines, rows, n = [], [], {}
-    for ci, sw in enumerate(a.sources, 1):
+    if a.real:                                                              # real frames, no masks (fine-tunes: real + pseudo in one dataset)
+        cams, imgs = read_text_model(os.path.join(a.real, "sparse", "0")); (W, H, K), = cams.values()
+        cam_lines.append(f"1 PINHOLE {W} {H} {' '.join(str(x) for x in K)}\n"); n[a.real] = len(imgs)
+        for name, _, q, tc in imgs:
+            for suf in ("", ):
+                src, dst = os.path.join(a.real, "images", name), os.path.join(out, "images", name)
+                if not os.path.lexists(dst):
+                    os.symlink(os.path.realpath(src), dst)
+            rows.append((len(rows) + 1, q, tc, 1, name))
+    for ci, sw in enumerate(a.sources, 1 + bool(a.real)):
         ds, w = sw.rsplit(":", 1); f = float(w) / a.pseudo_weight; cams, imgs = read_text_model(os.path.join(ds, "sparse", "0"))
         assert len(cams) == 1, "one camera per source"
-        (W, H, K), = cams.values(); cam_lines.append(f"{ci} PINHOLE {W} {H} {' '.join(str(x) for x in K)}\n"); n[ds] = len(imgs)
+        (W, H, K), = cams.values(); line = f"PINHOLE {W} {H} {' '.join(str(x) for x in K)}\n"
+        same = next((i + 1 for i, l in enumerate(cam_lines) if l.split(" ", 1)[1] == line), None)
+        if same:
+            ci = same
+        else:
+            ci = len(cam_lines) + 1; cam_lines.append(f"{ci} {line}")
+        n[ds] = len(imgs)
         for name, _, q, tc in imgs:
             st = os.path.splitext(name)[0]
             for suf in (".png", "_depth.npy"):
@@ -1293,6 +1315,34 @@ def mergeviews(a):
     open(os.path.join(out, "sparse", "0", "points3D.txt"), "w").write("")
     json.dump(dict(sources=a.sources, pseudo_weight=a.pseudo_weight, views=n), open(os.path.join(out, "pseudo.json"), "w"), indent=1)
     print("MERGEVIEWS " + json.dumps(dict(views=len(rows), per_source=n, out=out)), flush=True)
+
+
+def seedpoints(a):
+    """copy of the EDGS training dataset (--edgs) whose init points3D.txt gets points on every object mesh's UNSEEN surface
+    (mesh colours, --seed_m spacing), so the trainer starts with gaussians there (no densification needed); --subset keeps
+    that share of the frames (evenly spaced; cheap tests). Images / depth targets are linked."""
+    cfg = load_cfg(a); s, R, t = sim3(a.sim3_json); out = a.out; s0 = os.path.join(out, "sparse", "0"); os.makedirs(s0, exist_ok=True)
+    src = os.path.join(a.edgs, "sparse", "0")
+    if not os.path.lexists(os.path.join(out, "images")):
+        os.symlink(os.path.realpath(os.path.join(a.edgs, "images")), os.path.join(out, "images"))
+    for f in ("edgs_init.json", "depth_targets.json", "point_cloud.ply"):
+        if os.path.exists(os.path.join(a.edgs, f)) and not os.path.lexists(os.path.join(out, f)):
+            os.symlink(os.path.realpath(os.path.join(a.edgs, f)), os.path.join(out, f))
+    open(os.path.join(s0, "cameras.txt"), "w").writelines(open(os.path.join(src, "cameras.txt")))
+    lines = [ln for ln in open(os.path.join(src, "images.txt")) if not ln.startswith("#")]; recs = [lines[i:i + 2] for i in range(0, len(lines), 2) if len(lines[i].split()) >= 10]
+    keep = recs if a.subset >= 1 else [recs[i] for i in np.unique(np.linspace(0, len(recs) - 1, max(1, int(round(a.subset * len(recs))))).astype(int))]
+    open(os.path.join(s0, "images.txt"), "w").writelines(["# IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME\n"] + [x for r in keep for x in r])
+    pts = [ln for ln in open(os.path.join(src, "points3D.txt"))]; nid = 1 + max(int(l.split()[0]) for l in pts if l.strip() and not l.startswith("#")); add = []
+    if not a.no_seed:
+        for m in final_meshes(a.dir):
+            V = m["V"][~m["seen"]]; C = m["C"][~m["seen"]]
+            if not len(V):
+                continue
+            _, first = np.unique(np.floor(V / cfg["seed_m"]).astype(np.int64), axis=0, return_index=True); Vd = ((V[first] - t) @ R) / s
+            for x, c in zip(Vd, np.clip(C[first] * 255, 0, 255).astype(int)):
+                add.append(f"{nid} {x[0]:.6f} {x[1]:.6f} {x[2]:.6f} {c[0]} {c[1]} {c[2]} 0\n"); nid += 1
+    open(os.path.join(s0, "points3D.txt"), "w").writelines(pts + add)
+    print("SEEDPOINTS " + json.dumps(dict(frames=len(keep), of=len(recs), seeds=len(add), out=out)), flush=True)
 
 
 def floorviews(a):
@@ -1360,16 +1410,17 @@ def compose(a):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["evidence", "candidates", "finalize", "floormap", "gate", "compose", "floorviews", "meshviews", "mergeviews"])
+    ap.add_argument("cmd", choices=["evidence", "candidates", "finalize", "floormap", "gate", "compose", "floorviews", "meshviews", "mergeviews", "seedpoints"])
     ap.add_argument("--dir", required=True, help="work dir of this run"); ap.add_argument("--cfg-json", default=None, help="the config's object_layers block as JSON")
     ap.add_argument("--objects"); ap.add_argument("--sim3-json"); ap.add_argument("--dataset"); ap.add_argument("--splat-depth-dir"); ap.add_argument("--gen-dir", default=None)
     ap.add_argument("--ids", type=int, nargs="*", default=None, help="debug override: only these objects")
     ap.add_argument("--extra-gen-dir", nargs="*", default=None, help="more generated-asset dirs (e.g. Hunyuan3D-2.1); every seed of every generator is registered");
     ap.add_argument("--apply-detection", action="store_true", help="evidence: split / merge clusters as the vision-language detection check says");
     ap.add_argument("--base-ply", default=None, help="floorviews: the input splat (before)"); ap.add_argument("--cloud", default=None)
-    ap.add_argument("--sources", nargs="*", default=None, help="mergeviews: DS:weight ..."); ap.add_argument("--pseudo-weight", type=float, default=0.5); ap.add_argument("--round", type=int, default=1); ap.add_argument("--map"); ap.add_argument("--ply"); ap.add_argument("--out")
+    ap.add_argument("--sources", nargs="*", default=None, help="mergeviews: DS:weight ..."); ap.add_argument("--real", default=None, help="mergeviews: real frames first"); ap.add_argument("--no-seed", action="store_true")
+    ap.add_argument("--subset", type=float, default=1.0, help="seedpoints: share of the training frames kept (cheap tests)"); ap.add_argument("--edgs", default=None); ap.add_argument("--pseudo-weight", type=float, default=0.5); ap.add_argument("--round", type=int, default=1); ap.add_argument("--map"); ap.add_argument("--ply"); ap.add_argument("--out")
     a = ap.parse_args(); os.makedirs(a.dir, exist_ok=True)
-    {"evidence": evidence, "candidates": candidates, "finalize": finalize, "floormap": floormap, "gate": gate, "compose": compose, "floorviews": floorviews, "meshviews": meshviews, "mergeviews": mergeviews}[a.cmd](a)
+    {"evidence": evidence, "candidates": candidates, "finalize": finalize, "floormap": floormap, "gate": gate, "compose": compose, "floorviews": floorviews, "meshviews": meshviews, "mergeviews": mergeviews, "seedpoints": seedpoints}[a.cmd](a)
 
 
 if __name__ == "__main__":
