@@ -107,7 +107,7 @@ if has finalize; then
   if [ -x "$LPY" ] && [ -f "$T/vlm/usage.jsonl" ]; then "$LPY" "$VL" cost "${VLM[@]}" && "$TPY" "$OL" finalize "${COMMON[@]}" --round 9 >/dev/null; fi
 fi
 BG="$T/bg_floor.ply"; [ "$(get object_layers.floor_harm_check 0)" = 1 ] || BG="$T/floor_filled.ply"
-GATE=(--dir "$T" --cfg-json "$T/config.json" --sim3-json "$P/sim3.json" --ply "$IN" --dataset "$DATA")
+GATE=(--dir "$T" --cfg-json "$T/config.json" --sim3-json "$P/sim3.json" --ply "$IN" --dataset "$DATA" --splat-depth-dir "$D/depth")
 if has floor; then
   # per-object viewer-exact accept test first (object_layers.max_object_loss_db): the floor is completed only around accepted objects
   needt "$T/gate.json" && "$SPY" "$OL" gate "${GATE[@]}"
@@ -130,6 +130,8 @@ if has compose; then
   [ -z "$FRAME" ] || { needt "${OUTPLY%.ply}_refaxes.ply" && "$CPUPY" scripts/sim3_align_splat.py --colmap-model "$P/dataset/sparse/0" \
     --gt-model "$FRAME" --in-ply "$OUTPLY" --out-ply "${OUTPLY%.ply}_refaxes.ply" | tail -1; }
   ls -la "$OUTPLY"*; md5sum "$OUTPLY" | tee "$T/output.md5"
+  # floor-only views behind / above every meshed object, input vs layered background (objects removed in both)
+  "$SPY" "$OL" floorviews --dir "$T" --cfg-json "$T/config.json" --sim3-json "$P/sim3.json" --dataset "$DATA" --base-ply "$IN" --ply "$BG" || true
 fi
 has eval || { date; echo OBJ_LAYERS_DONE; exit 0; }
 
