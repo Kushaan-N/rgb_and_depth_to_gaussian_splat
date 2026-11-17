@@ -75,6 +75,12 @@ if has assets; then
     --splat-depth-dir "$D/depth" --out-dir "$AG" ${GEN_ARGS:-}
   need "$AG/generate.json" && TORCH_HOME="$CEAR_WS/torch-hub" "$TPY" scripts/object_priors/mv_asset_gen.py generate --out-dir "$AG" ${TRELLIS_ARGS:-}
 fi
+export HY3DGEN_MODELS="$CEAR_WS/hy3dgen-cache"   # Hunyuan3D copies its weights here (default would be ~/.cache: never $HOME)
+HYD="$D/asset_gen_hunyuan"; HPY="${HUNYUAN_VENV:-$CEAR_WS/venv-hunyuan}/bin/python"
+if has assets && [ "$(get object_layers.hunyuan 1)" = 1 ] && [ -x "$HPY" ] && [ -d "$CEAR_WS/Hunyuan3D-2.1" ]; then   # second generator
+  need "$HYD/generate_hy.json" && HF_HUB_OFFLINE=0 "$HPY" scripts/object_priors/mv_asset_gen.py generate_hy --crops-dir "$AG" --out-dir "$HYD" || echo "hunyuan generation failed: TRELLIS only"
+fi
+[ -d "$HYD" ] && COMMON+=(--extra-gen-dir "$HYD")
 if has evidence; then
   need "$T/evidence.json" && "$TPY" "$OL" evidence "${COMMON[@]}" ${IDS:-}
 fi
@@ -100,8 +106,11 @@ if has finalize; then
   fi
   if [ -x "$LPY" ] && [ -f "$T/vlm/usage.jsonl" ]; then "$LPY" "$VL" cost "${VLM[@]}" && "$TPY" "$OL" finalize "${COMMON[@]}" --round 9 >/dev/null; fi
 fi
-BG="$T/bg_floor.ply"
+BG="$T/bg_floor.ply"; [ "$(get object_layers.floor_harm_check 0)" = 1 ] || BG="$T/floor_filled.ply"
+GATE=(--dir "$T" --cfg-json "$T/config.json" --sim3-json "$P/sim3.json" --ply "$IN" --dataset "$DATA")
 if has floor; then
+  # per-object viewer-exact accept test first (object_layers.max_object_loss_db): the floor is completed only around accepted objects
+  needt "$T/gate.json" && "$SPY" "$OL" gate "${GATE[@]}"
   [ -f "$IV/scene.json" ] || "$CPUPY" scripts/make_lidar_ibr_views.py floor --dataset "$DATA" --cloud "$CLOUD" --sim3-json "$P/sim3.json" --out "$IV/scene.json"
   # shellcheck disable=SC2086
   [ -f "$IV/floor_map.npz" ] || "$SPY" scripts/make_lidar_ibr_views.py views --dataset "$DATA" --cloud "$CLOUD" --sim3-json "$P/sim3.json" \
@@ -110,13 +119,14 @@ if has floor; then
   needt "$T/floor_map_inpainted.npz" && "$IPY" scripts/floor_fill_ibr.py inpaint --map "$T/floor_map.npz" --lama-pt "${LAMA_PT:-$CEAR_WS/torch-hub/lama/big-lama.pt}" | tail -2
   needt "$T/floor_filled.ply" && "$SPY" scripts/floor_fill_ibr.py apply --ply "$IN" --map "$T/floor_map_inpainted.npz" --dataset "$DATA" \
     --out-base "$T/floor_base.ply" --out-filled "$T/floor_filled.ply" ${APPLY_ARGS:-} | grep -E "floorfill|FLOOR_FILL" | cut -c1-900
-  needt "$BG" && "$SPY" scripts/fill_harm_ply.py --base "$T/floor_base.ply" --filled "$T/floor_filled.ply" --dataset "$DATA" --out "$BG" | tail -3
+  if [ "$BG" != "$T/floor_filled.ply" ] && needt "$BG"; then
+    "$SPY" scripts/fill_harm_ply.py --base "$T/floor_base.ply" --filled "$T/floor_filled.ply" --dataset "$DATA" --out "$BG" | tail -3
+  fi
 fi
 if has compose; then
-  [ -f "$BG" ] || BG="$IN"
-  # per-object viewer-exact accept test on the real frames (object_layers.max_object_loss_db): a broken front keeps its splat
-  needt "$T/gate.json" && "$SPY" "$OL" gate --dir "$T" --cfg-json "$T/config.json" --sim3-json "$P/sim3.json" --ply "$BG" --dataset "$DATA"
-  needt "$OUTPLY" && "$TPY" "$OL" compose --dir "$T" --cfg-json "$T/config.json" --sim3-json "$P/sim3.json" --ply "$BG" --map "$T/floor_map_inpainted.npz" --out "$OUTPLY"
+  MAPA=(); [ -f "$BG" ] || { BG="$IN"; MAPA=(--map "$T/floor_map_inpainted.npz"); }   # no floor stage: discs under the objects only
+  [ -f "$T/gate.json" ] || "$SPY" "$OL" gate "${GATE[@]}"
+  needt "$OUTPLY" && "$TPY" "$OL" compose --dir "$T" --cfg-json "$T/config.json" --sim3-json "$P/sim3.json" --ply "$BG" "${MAPA[@]}" --out "$OUTPLY"
   [ -z "$FRAME" ] || { needt "${OUTPLY%.ply}_refaxes.ply" && "$CPUPY" scripts/sim3_align_splat.py --colmap-model "$P/dataset/sparse/0" \
     --gt-model "$FRAME" --in-ply "$OUTPLY" --out-ply "${OUTPLY%.ply}_refaxes.ply" | tail -1; }
   ls -la "$OUTPLY"*; md5sum "$OUTPLY" | tee "$T/output.md5"
