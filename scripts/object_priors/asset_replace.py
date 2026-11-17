@@ -104,8 +104,11 @@ def main():
     ap.add_argument("--keep-w", type=float, default=0.02, help="hybrid: base rows with training-view support weight >= this stay (below it no "
                     "training view can tell the row is there, so deleting it costs nothing on-path)")
     ap.add_argument("--keep-rule", default="surface", choices=["surface", "weight"], help="hybrid: surface = keep only base rows that are the "
-                    "first visible surface (within --front-m of the base's rendered depth) in >= --min-views training views AND on / in front of the "
-                    "registered asset's surface there (never behind or inside it); weight = keep rows with support weight >= --keep-w")
+                    "first visible surface (within --front-m of the base's rendered depth) in >= --min-views training views (the whole real front layer; "
+                    "the asset is carved there instead); weight = keep rows with support weight >= --keep-w")
+    ap.add_argument("--carve-views", type=int, default=1, help="hybrid: an asset row is carved when it lies in observed free space / on the "
+                    "visible surface (nearer than the base's rendered depth + --front-m) in at least this many training views")
+    ap.add_argument("--keep-tol-rel", type=float, default=0.015, help="surface keep rule: slack on the rendered depth, relative to the distance")
     ap.add_argument("--min-views", type=int, default=3); ap.add_argument("--refit-iters", type=int, default=800)
     ap.add_argument("--front-move-k", type=float, default=0.3, help="refit: position / scale / rotation learning-rate factor of the kept front rows")
     ap.add_argument("--front-m", type=float, default=0.015); ap.add_argument("--max-scale-m", type=float, default=0.02)
@@ -170,34 +173,37 @@ def main():
         if a.hybrid:   # the real front stays; back and interior are asset-only
             import cv2
             from scipy.spatial import cKDTree
-            ii = np.nonzero(inb)[0]; Xb = Xd_all[ii]; votes = np.zeros(len(ii), int); avis = np.zeros(len(xd), bool); fset = set(frames_k); tol = a.front_m / s
+            ii = np.nonzero(inb)[0]; Xb = Xd_all[ii]; votes = np.zeros(len(ii), int); seen_cnt = np.zeros(len(xd), int); fset = set(frames_k); tol = a.front_m / s
             for (nm_, W, H, fx, fy, cx, cy, Rcw, tcw, _), SD in zip(cams, sdep):
                 if SD is None or nm_ not in fset:
                     continue
-                Pa = xd @ Rcw.T + tcw; oka = Pa[:, 2] > 0.05; zz = np.where(oka, Pa[:, 2], 1.0)       # the asset's z-buffer in this view
+                # asset rows a real camera saw THROUGH (base depth farther: observed free space) or that coincide with / lie in
+                # front of the base's visible surface: the asset may only occupy space no training camera saw
+                Pa = xd @ Rcw.T + tcw; oka = Pa[:, 2] > 0.05; zz = np.where(oka, Pa[:, 2], 1.0)
                 ua = np.floor(fx * Pa[:, 0] / zz + cx).astype(int); va = np.floor(fy * Pa[:, 1] / zz + cy).astype(int)
-                oka &= (ua >= 0) & (ua < W) & (va >= 0) & (va < H); ra = np.linalg.norm(Pa, axis=1)
-                zb = np.full((H, W), 1e9, np.float32); np.minimum.at(zb, (va[oka], ua[oka]), ra[oka].astype(np.float32))
-                zb = cv2.erode(zb, np.ones((5, 5), np.uint8))
-                va_ = np.zeros(len(xd), bool); va_[oka] = ra[oka] <= zb[va[oka], ua[oka]] + tol; avis |= va_
+                oka &= (ua >= 0) & (ua < W) & (va >= 0) & (va < H); ra = np.linalg.norm(Pa, axis=1); da = SD[va[oka], ua[oka]]
+                seen_cnt[oka] += (da > 0) & (ra[oka] < da + tol)
+                # base rows on the first visible surface in this view (the real front layer)
                 Pb = Xb @ Rcw.T + tcw; okb = Pb[:, 2] > 0.05; zz = np.where(okb, Pb[:, 2], 1.0)
                 ub = np.floor(fx * Pb[:, 0] / zz + cx).astype(int); vb = np.floor(fy * Pb[:, 1] / zz + cy).astype(int)
-                okb &= (ub >= 0) & (ub < W) & (vb >= 0) & (vb < H); rb = np.linalg.norm(Pb, axis=1)
-                d_ = SD[vb[okb], ub[okb]]; za_ = zb[vb[okb], ub[okb]]
-                # first visible surface of the base here AND on / in front of the asset's surface (not behind or inside it)
-                votes[okb] += (d_ > 0) & (np.abs(rb[okb] - d_) < tol) & (za_ < 1e8) & (rb[okb] <= za_ + tol)
+                okb &= (ub >= 0) & (ub < W) & (vb >= 0) & (vb < H); rb = np.linalg.norm(Pb, axis=1); d_ = SD[vb[okb], ub[okb]]
+                votes[okb] += (d_ > 0) & (np.abs(rb[okb] - d_) < np.maximum(tol, a.keep_tol_rel * d_))   # rendered depth is a blend: relative slack
             if a.keep_rule == "surface":
                 kf[ii[(votes >= a.min_views) & (op[ii] > 0.3)]] = True
             else:
                 kf = inb & (wmax >= a.keep_w)
-            dele_k = inb & ~kf; r["kept_front"] = int(kf.sum()); drop = np.zeros(len(xd), bool)
+            dele_k = inb & ~kf; r["kept_front"] = int(kf.sum()); drop = seen_cnt >= a.carve_views
             if kf.any():
-                drop = cKDTree(Gm[kf]).query(xyz)[0] < a.front_m             # coincident with a kept surfel
+                drop |= cKDTree(Gm[kf]).query(xyz)[0] < a.front_m            # coincident with a kept surfel
                 rgb_a = 0.5 + C0 * dc; rgb_f = np.clip(0.5 + C0 * dcb[kf], 0, 1)   # seam: the kept front's colour statistics
                 gn = np.clip(rgb_f.std(0) / np.maximum(rgb_a.std(0), 1e-3), 0.7, 1.4)
                 dc = (np.clip((rgb_a - rgb_a.mean(0)) * gn + rgb_f.mean(0), 0, 1) - 0.5) / C0
-            xyz, xd, rot, scl, dc, opa = xyz[~drop], xd[~drop], rot[~drop], scl[~drop], dc[~drop], opa[~drop]; vis_new = avis[~drop]
-            r["asset_rows_coincident_dropped"] = int(drop.sum()); r["asset_rows_visible"] = int(vis_new.sum())
+            edge = np.zeros(len(xd), bool)
+            if drop.any() and (~drop).any():                                # rows next to the carved boundary: small, so nothing bleeds over
+                edge = cKDTree(xyz[drop]).query(xyz)[0] < 2 * a.front_m
+                scl = np.where(edge[:, None], np.minimum(scl, 0.5 * a.front_m), scl)
+            xyz, xd, rot, scl, dc, opa = xyz[~drop], xd[~drop], rot[~drop], scl[~drop], dc[~drop], opa[~drop]; vis_new = edge[~drop]
+            r["asset_rows_carved_or_coincident"] = int(drop.sum()); r["asset_rows_boundary"] = int(vis_new.sum())
         dc = (np.clip(0.5 + C0 * dc, 0, 1) - 0.5) / C0                       # DC colour only, in gamut
         Rd = R.T[None] @ rot; det = np.linalg.det(Rd); Rd[det < 0, :, 0] *= -1
         q = Rotation.from_matrix(Rd).as_quat(); q = np.c_[q[:, 3], q[:, :3]]
