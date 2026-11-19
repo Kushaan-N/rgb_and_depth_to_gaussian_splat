@@ -33,7 +33,7 @@ DEF = dict(voxel_m=0.005, max_voxels=6e6, margin_m=0.08, cam_max_m=4.0, max_view
            min_surf_views=3, texel_m=0.003, crust_m=0.03, carve_tol_m=0.015, max_resid_m=0.03, cos_min=0.2, q_min_px_m=60.0, top_k=4,
            sharp_pow=4.0, mv_floor_z=3.0, mv_black=0.03, seed_m=0.005, lidar_contain=0.0, yaw_free=1, lidar_solid=0, mv_n=24, mv_dist=(0.5, 1.5), mv_h=(0.3, 1.2), mv_floor_m=1.5, mv_clear_m=0.05,
            mv_min_share=0.02, mv_feather_px=3, min_face_psnr=20.0, solid_margin_m=0.015, floor_pixel_m=-1.0, backing_m=0.008, backing_sigma=0.7, backing_inset_m=0.0015, shadow_cams=1000, colour_reach_m=0.15, refit_iters=600, max_object_loss_db=2.0, gate_frames=20, base_m=0.02, prefer_prim_iou_tol=0.03, foot_close_m=0.03, foot_grow_m=0.01, photo_tol_m=0.015, rest_m=0.06, auto_box_resid_m=0.012, seam_m=0.02, val_every=6, zone_m=0.03, floor_m=0.012, gauss_sigma=0.9, gauss_thick_m=0.0005, gauss_opacity=0.985,
-           floor_close_m=0.25, shadow_reach_m=1.0, min_prim_confidence=0.3, plane_snap=True, max_edit_m=0.05, vlm_images=4)
+           floor_close_m=0.25, shadow_reach_m=1.0, strict_gates=False, fallback_object_loss_db=0.0, unseen_fill='synth', synth_patch_m=0.06, synth_z=3.0, synth_q_mult=1.5, synth_contact_m=0.06, shell_m=0.02, extent_cap_m=0.05, zone_mode='sdf', seen_from='splat', inner_keep_m=10.0, local_floor=False, unseen_clear_m=0.10, unseen_clear_min_h=0.05, min_vis_views=2, keep_train_w=0.05, match_unseen_colour=True, vd_refit_iters=400, vd_cone_deg=50.0, vd_lambda=2.0, min_prim_confidence=0.3, plane_snap=True, max_edit_m=0.05, vlm_images=4)
 
 
 # ------------------------------------------------------------------ small helpers
@@ -252,7 +252,23 @@ def evidence(a):
             for nm in spread + [byd[len(byd) // 2], byd[-1], byd[len(byd) // 4]]:
                 if nm not in names:
                     names.append(nm)
-        names = names[:cfg["vlm_images"]]; byname = {c["name"]: c for c in cams}
+        byname = {c["name"]: c for c in cams}; pm_ = {}
+        if a.seg_dir and sel:                                               # more candidates: the person filter drops some
+            names += [nm for nm in byd[::max(1, len(byd) // 24)] if nm not in names]
+        if a.seg_dir:                                                       # only frames the segmenter checked, and none with a person
+            keep_ = []                                                       # anywhere in the crop (people never go to the API)
+            for nm in names:
+                pm = person_mask(a.seg_dir, nm)
+                if pm is None:
+                    continue
+                u, v, _, ok = project(byname[nm], boxd)
+                if ok.all():
+                    x0, x1, y0, y1 = u.min(), u.max(), v.min(), v.max(); S = 1.5 * max(x1 - x0, y1 - y0); cx_, cy_ = (x0 + x1) / 2, (y0 + y1) / 2
+                    if pm[max(0, int(cy_ - S / 2)):max(0, int(cy_ + S / 2)), max(0, int(cx_ - S / 2)):max(0, int(cx_ + S / 2))].any():
+                        continue
+                keep_.append(nm); pm_[nm] = pm
+            names = keep_
+        names = names[:cfg["vlm_images"]]
         for k, nm in enumerate(names):
             c = byname[nm]; img = load_img(c); u, v, _, ok = project(c, boxd)
             if not ok.all():
@@ -260,7 +276,7 @@ def evidence(a):
             x0, x1, y0, y1 = u.min(), u.max(), v.min(), v.max(); S = 1.5 * max(x1 - x0, y1 - y0); cx_, cy_ = (x0 + x1) / 2, (y0 + y1) / 2
             M = np.array([[512 / S, 0, 256 - cx_ * 512 / S], [0, 512 / S, 256 - cy_ * 512 / S]])
             cf = os.path.join(a.gen_dir or "", "crops", f"obj{oid}_{k}.png")
-            if a.gen_dir and os.path.exists(cf) and nm in agc.get(oid, []):
+            if a.gen_dir and os.path.exists(cf) and nm in agc.get(oid, []) and not a.seg_dir:
                 cut = cv2.imread(cf)
             else:                                                           # depth mask: pixels whose rendered surface lies in the object's box
                 SD = depth_of(a.splat_depth_dir, nm)
@@ -270,6 +286,8 @@ def evidence(a):
                 ray = np.stack([(xs + 0.5 - c["cx"]) / c["fx"], (ys + 0.5 - c["cy"]) / c["fy"], np.ones_like(xs, float)], -1); ray /= np.linalg.norm(ray, axis=-1, keepdims=True)
                 Pl = fr.loc(s * (((ray * SD[..., None]).reshape(-1, 3) - c["t"]) @ c["R"]) @ R.T + t).reshape(c["H"], c["W"], 3)
                 mk = (np.abs(Pl[..., 0]) < half[0] + 0.03) & (np.abs(Pl[..., 1]) < half[1] + 0.03) & (Pl[..., 2] > 0.015) & (Pl[..., 2] < hmax + 0.03) & (SD > 0)
+                if a.seg_dir and mk.sum() < 0.25 * (x1 - x0) * (y1 - y0):   # mostly hidden behind something in this frame: no use
+                    continue
                 cut = cv2.warpAffine(img * mk[..., None], M, (512, 512), flags=cv2.INTER_CUBIC, borderValue=0)
                 cut = np.clip(cut[..., ::-1] * 255, 0, 255).astype(np.uint8)
             cv2.imwrite(os.path.join(a.dir, "vlm_in", f"obj{oid}_cut{k}.jpg"), cut, [cv2.IMWRITE_JPEG_QUALITY, 90])
@@ -280,6 +298,25 @@ def evidence(a):
                         vlm_crops=len(names), seconds=round(time.time() - t0)))
         print("[layers] evidence " + json.dumps(rep[-1]), flush=True)
     json.dump(dict(objects=rep, floor=meta["floor"], cfg=cfg, detection_notes={str(k): v for k, v in notes.items()}), open(os.path.join(a.dir, "evidence.json"), "w"), indent=1)
+
+
+def ndimage_dilate(m, it):
+    from scipy import ndimage
+    return ndimage.binary_dilation(m, iterations=it)
+
+
+def person_mask(seg_dir, name):
+    """union of the segmenter's person masks in that frame (detect_objects.py segment), None when the frame was not segmented."""
+    f = os.path.join(seg_dir, os.path.splitext(name)[0] + ".npz")
+    if not os.path.exists(f):
+        return None
+    z = np.load(f); n, H, W = z["shape"]; kinds = [str(x) for x in z["kinds"]]
+    M = np.unpackbits(z["masks"], axis=-1, count=W).astype(bool) if n else np.zeros((0, H, W), bool)
+    out = np.zeros((H, W), bool)
+    for m, k in zip(M, kinds):
+        if k == "person":
+            out |= m
+    return out
 
 
 def load_ev(a, oid, cfg):
@@ -704,6 +741,19 @@ def bake(Vd, Nd, F, cams, depth_dir, s, cfg, height=None):
     return np.clip(col, 0, 1), seen, q, gain
 
 
+def cam_visible(Vd, Nd, F, cams, cfg, s):
+    """per vertex: number of training views that see it unoccluded by the mesh itself (inside the image, facing the camera).
+    Geometric only (no photo-consistency): what any camera COULD see is the splat's job; the rest is completed."""
+    sc = ray_scene(Vd, F); cnt = np.zeros(len(Vd), np.int32); eps = 0.004 / s
+    for c in cams:
+        u, v, r, ok = project(c, Vd); ok &= (u >= 0) & (u < c["W"]) & (v >= 0) & (v < c["H"])
+        dv = c["C"] - Vd; ok &= (Nd * dv).sum(1) / np.maximum(r, 1e-9) > cfg["cos_min"]; i = np.nonzero(ok)[0]
+        if not len(i):
+            continue
+        th, _, _ = cast(sc, np.broadcast_to(c["C"], (len(i), 3)), -dv[i] / r[i, None]); cnt[i[th >= r[i] - eps]] += 1
+    return cnt
+
+
 def charts_of(prims, L, Nl):
     """per vertex: chart id (primitive face), (u, v) in metres on it, orientation class, material."""
     _, D = prims_sdf(prims, L); pi = np.abs(D).argmin(1); cid = np.zeros(len(L), int); uv = np.zeros((len(L), 2)); cls = np.zeros(len(L), int); mats = {}
@@ -768,6 +818,69 @@ def fill_same_material(col, seen, cid, uv, cls, mats, texel):
         ij = np.floor(np.mod(du, np.maximum(ext, texel)) / texel).astype(int); ij = np.minimum(ij, D["sh"] - 1)
         col[m] = D["img"][ij[:, 0], ij[:, 1]]; info[int(c)] = f"face {k} (coverage {D['cov']:.2f})"
     return col, info
+
+
+def fill_synth(col, seen, q, cid, uv, cls, mats, texel, cfg, rng, hgt):
+    """generic texture completion for primitive candidates (replaces copying one seen face, which carried its shadows /
+    grazing-view smears onto the back): per material,
+      1. reliable seen texels = photo quality >= synth_q_mult x q_min AND colour within synth_z robust sigmas of the
+         material's seen colours (dark smears, floor pixels at the contact line, neighbours' colours are outliers);
+         everything else is completed as if unseen (returned `seen` flag shrinks accordingly)
+      2. exemplar per chart (primitive face) from its reliable texels; target texels are filled patch by patch
+         (synth_patch_m) from a random offset in the best exemplar of the same material and orientation class
+         (vertical faces keep their height: brick rows stay aligned), so the texture keeps its structure without
+         repeating one copied face
+      3. each completed chart's brightness follows the reliable faces of the same material + orientation class."""
+    from scipy import ndimage
+    col = col.copy(); info = {}; good = seen & (q >= cfg["synth_q_mult"] * cfg["q_min_px_m"]); keep = seen.copy()
+    mat_v = np.array([mats.get(int(c), "m0") for c in cid])
+    low = hgt < cfg["synth_contact_m"]                                     # contact band: photographs as floor / shadow
+    for mt in np.unique(mat_v):
+        m = (mat_v == mt) & good; m = m & ~low if (m & ~low).sum() >= 50 else m
+        if m.sum() < 50:
+            continue
+        med = np.median(col[m], 0); mad = 1.4826 * np.median(np.abs(col[m] - med), 0) + 0.02; z_ = (np.abs(col - med) / mad).max(1)
+        out = (mat_v == mt) & seen & ((z_ > cfg["synth_z"]) | (low & (z_ > cfg["synth_z"] / 2)))
+        keep &= ~out; good &= ~out
+    T = {}
+    for c in np.unique(cid):
+        m = cid == c; lo = uv[m].min(0); hi = uv[m].max(0); sh = np.clip(np.ceil((hi - lo) / texel).astype(int) + 1, 1, 1500)
+        mg = m & good; img = np.zeros(tuple(sh) + (3,), np.float32); cnt = np.zeros(tuple(sh), np.float32)
+        if mg.any():
+            ij = np.minimum(np.floor((uv[mg] - lo) / texel).astype(int), sh - 1); np.add.at(img, (ij[:, 0], ij[:, 1]), col[mg]); np.add.at(cnt, (ij[:, 0], ij[:, 1]), 1)
+        ok = cnt > 0; img[ok] /= cnt[ok][:, None]
+        if ok.any():
+            ind = ndimage.distance_transform_edt(~ok, return_distances=False, return_indices=True); img = img[ind[0], ind[1]]
+        T[int(c)] = dict(lo=lo, hi=hi, sh=sh, img=img, ok=ok, cov=float(good[m].mean()), n=int(m.sum()), cls=int(np.bincount(cls[m]).argmax()),
+                         lum=float(np.median(col[mg].mean(1))) if mg.sum() > 20 else None)
+    P = max(2, int(round(cfg["synth_patch_m"] / texel)))
+    for c, t in T.items():
+        tm = (cid == c) & ~keep
+        if not tm.any():
+            continue
+        mc = mats.get(c, "m0")
+        cand = [(5 * (T[k]["cls"] == t["cls"]) + T[k]["cov"], k) for k in T if mats.get(k, "m0") == mc and T[k]["cov"] >= 0.3 and T[k]["n"] >= 50 and T[k]["ok"].mean() > 0.2]
+        if not cand:
+            sm = good & (mat_v == mc); sm = sm if sm.any() else keep
+            col[tm] = np.median(col[sm], 0) if sm.any() else 0.5; info[c] = "median colour of the material"; continue
+        k = max(cand)[1]; S = T[k]; tij = np.floor((uv[tm] - t["lo"]) / texel).astype(int); pid = tij // P
+        src = np.zeros_like(tij)
+        for pp in np.unique(pid, axis=0):                                   # one random source offset per target patch
+            sel = np.all(pid == pp, 1); best = None
+            for _ in range(8):
+                ou = rng.integers(0, max(1, S["sh"][0] - P)); ov = rng.integers(0, max(1, S["sh"][1] - P))
+                if t["cls"] in (1, 2):                                      # vertical / slanted: keep the height (rows stay aligned)
+                    ov = int(np.clip(pp[1] * P + int(round((t["lo"][1] - S["lo"][1]) / texel)), 0, max(0, S["sh"][1] - P)))
+                fr_ = S["ok"][ou:ou + P, ov:ov + P].mean() if S["ok"].size else 0
+                if best is None or fr_ > best[0]:
+                    best = (fr_, ou, ov)
+            src[sel] = np.stack([best[1] + tij[sel, 0] - pp[0] * P, best[2] + tij[sel, 1] - pp[1] * P], 1)
+        src = np.clip(src, 0, S["sh"] - 1); fill = S["img"][src[:, 0], src[:, 1]]
+        ref = [T[j]["lum"] for j in T if mats.get(j, "m0") == mc and T[j]["cls"] == t["cls"] and T[j]["lum"] is not None]
+        if ref and S["lum"]:
+            fill = np.clip(fill * float(np.clip(np.median(ref) / max(S["lum"], 1e-3), 0.7, 1.4)), 0, 1)
+        col[tm] = fill; info[c] = f"synth from face {k} (reliable coverage {S['cov']:.2f}, patch {P * texel:.2f} m)"
+    return col, info, keep
 
 
 def seam_blend(V, col, seen, seam):
@@ -903,7 +1016,11 @@ def candidates(a):
             col, seen, q, gain = bake(Vd, Nd, F, trn, a.splat_depth_dir, s, cfg, height=lambda Pd_: fr.loc(s * (Pd_ @ R.T) + t)[:, 2])
             seen &= L[:, 2] > cfg["base_m"]                                  # the contact line photographs as floor: completed from above instead
             if name == "prim":
-                cid, uv, cls, mats = charts_of(aux["prims"], L, Nl); col, how = fill_same_material(col, seen, cid, uv, cls, mats, cfg["texel_m"])
+                cid, uv, cls, mats = charts_of(aux["prims"], L, Nl)
+                if cfg["unseen_fill"] == "synth":
+                    col, how, seen = fill_synth(col, seen, q, cid, uv, cls, mats, cfg["texel_m"], cfg, np.random.default_rng(oid), L[:, 2])
+                else:
+                    col, how = fill_same_material(col, seen, cid, uv, cls, mats, cfg["texel_m"])
             else:
                 col, how = gen_colours(L, col, seen, aux)
             col = seam_blend(L, col, seen, cfg["seam_m"]); sc = ray_scene(Vd, F)
@@ -911,8 +1028,17 @@ def candidates(a):
             r[name].update(vertices=int(len(L)), planes_snapped=nsnap, seen_share=round(float(seen.mean()), 3), unseen_fill=how, numeric=num,
                            watertight=bool(m.is_watertight), size_m=[round(float(x), 3) for x in np.ptp(L, 0)])
             save_cand(os.path.join(a.dir, "cand", f"obj{oid}_{name}.npz"), m, col, seen, fr, r[name])
-            reals = []
-            for c in val[:: max(1, len(val) // 2)][:2]:
+            reals = []; vs_ = val
+            if a.seg_dir:                                                   # sheet photos go to the API: segmented frames without people only
+                vs_ = []
+                for c in vc[::max(1, len(vc) // 40)]:
+                    pm = person_mask(a.seg_dir, c["name"]); SD_ = depth_of(a.splat_depth_dir, c["name"])
+                    if pm is not None and SD_ is not None:
+                        om = obj_mask(c, SD_, ev, s, R, t)
+                        if not (pm & ndimage_dilate(om, 25)).any():
+                            vs_.append((int(om.sum()), c))
+                vs_ = [c for _, c in sorted(vs_, key=lambda x: -x[0])[:12]]   # most of the object visible first
+            for c in vs_[:: max(1, len(vs_) // 2)][:2]:
                 SD_ = depth_of(a.splat_depth_dir, c["name"]); real = load_img(c) * (obj_mask(c, SD_, ev, s, R, t)[..., None] if SD_ is not None else 0)
                 img, mk, _ = render(sc, F, col, c, bg=np.zeros_like(real)); reals.append((real, img, mk))
             nov = [render(sc, F, col, c, floor=(nd, dd, (0.62, 0.62, 0.6), 0.25 / s)) for c in novel_cams(ev, vc[0], s, R, t)] if vc else []
@@ -955,6 +1081,8 @@ def finalize(a):
         if not have:
             out[oid] = dict(decision="no mesh (object keeps its splat)"); continue
         sf = os.path.join(a.dir, "vlm", f"select_obj{oid}.json"); sel = json.load(open(sf)) if os.path.exists(sf) else None
+        if sel and sel.get("candidate") == "none":                          # the vision-language check: neither shape is this object
+            out[oid] = dict(decision="no mesh (vision-language: neither candidate matches the real object: " + str(sel.get("reason"))[:300] + ")"); continue
         num = {n_: (r[n_].get("numeric") or {}) for n_ in have}; best_num = max(have, key=lambda n_: ((num[n_].get("iou") or 0), (num[n_].get("psnr") or 0)))
         if "prim" in have and (num["prim"].get("iou") or 0) >= max((num[n_].get("iou") or 0) for n_ in have) - cfg["prefer_prim_iou_tol"]:
             best_num = "prim"                                               # as good a silhouette: the primitive shape is clean and closed by construction
@@ -966,6 +1094,13 @@ def finalize(a):
             ch, why = best_num, "numeric check (no vision-language answer)"
         c = load_cand(os.path.join(a.dir, "cand", f"obj{oid}_{ch}.npz")); ev = load_ev(a, int(oid), cfg); L = c["V"].copy(); C = c["C"].copy(); app = []
         vc = [cams[n_] for n_ in ev["views"] if n_ in cams]; val = vc[cfg["val_every"] // 2::cfg["val_every"]][:12]
+        if ch == "gen" and cfg["match_unseen_colour"] and c["seen"].any() and (~c["seen"]).any():
+            # generated texture on the unseen side: colour statistics matched to the RELIABLE seen colours (above the contact band,
+            # robust inliers) -- a pale generated texture / floor pixels at the contact line made backs look white
+            rel = c["seen"] & (L[:, 2] > cfg["synth_contact_m"]); rel = rel if rel.sum() > 50 else c["seen"]
+            med = np.median(C[rel], 0); mad = 1.4826 * np.median(np.abs(C[rel] - med), 0) + 0.02; rel &= (np.abs(C - med) / mad).max(1) <= cfg["synth_z"]
+            un = ~c["seen"]; mu_u, sd_u = np.median(C[un], 0), C[un].std(0) + 1e-3
+            C[un] = np.clip((C[un] - mu_u) * np.clip(C[rel].std(0) / sd_u, 0.5, 2.0) + np.median(C[rel], 0), 0, 1); C = seam_blend(L, C, c["seen"], cfg["seam_m"])
         base_num = numeric(ray_scene(to_ds(c["fr"].met(L)), c["F"]), c["F"], C, val, a.splat_depth_dir, ev, s, R, t)
         for e in edits.get(str(oid), []):                                   # reviewed edits: bounded, kept only if the real frames do not get worse
             L2, C2 = L.copy(), C.copy(); mx = cfg["max_edit_m"]
@@ -976,9 +1111,11 @@ def finalize(a):
             elif e.get("edit") == "material" and (~c["seen"]).any() and c["seen"].any():
                 if e.get("fix") == "mean_colour":
                     C2[~c["seen"]] = C[c["seen"]].mean(0)
-                else:
-                    from scipy.spatial import cKDTree
-                    C2[~c["seen"]] = C[c["seen"]][cKDTree(L[c["seen"]]).query(L[~c["seen"]])[1]]
+                else:                                                       # colour statistics of the completed faces matched to the
+                    un, se = ~c["seen"], c["seen"]                          # seen ones (keeps the synthesised structure; nearest-seen
+                    mu_s, sd_s = np.median(C[se], 0), C[se].std(0) + 1e-3   # copying made faceted patches)
+                    mu_u, sd_u = np.median(C[un], 0), C[un].std(0) + 1e-3
+                    C2[un] = np.clip((C[un] - mu_u) * np.clip(sd_s / sd_u, 0.5, 2.0) + mu_s, 0, 1)
                 C2 = seam_blend(L, C2, c["seen"], cfg["seam_m"])
             else:
                 continue
@@ -988,8 +1125,12 @@ def finalize(a):
             if ok:
                 L, C, base_num = L2, C2, n2
         Vm = c["fr"].met(L); m = trimesh.Trimesh(Vm, c["F"], process=False); Nm = np.asarray(m.vertex_normals); area = np.zeros(len(Vm)); np.add.at(area, c["F"].reshape(-1), np.repeat(m.area_faces / 3, 3))
+        vis = cam_visible(to_ds(Vm), Nm @ R, c["F"], list(cams.values()), cfg, s)   # every training camera, near or far
+        # completed faces that stand in measured free space (cameras looked through there: the mesh is bigger than the object,
+        # LiDAR misregistration) would hide what the cameras saw: counted as seen, never drawn
+        vis = np.where(ev["G"].look(ev["free"], L, fill=False), np.maximum(vis, 99), vis)
         np.savez_compressed(os.path.join(a.dir, f"obj{oid}_mesh.npz"), V=Vm.astype(np.float32), F=c["F"], C=C.astype(np.float32), N=Nm.astype(np.float32), area=area.astype(np.float32),
-                            L=L.astype(np.float32), seen=c["seen"], **{f"fr_{k}": np.asarray(v) for k, v in c["fr"].dump().items()})
+                            L=L.astype(np.float32), seen=c["seen"], vis=vis, **{f"fr_{k}": np.asarray(v) for k, v in c["fr"].dump().items()})
         tm = trimesh.Trimesh(Vm, c["F"], vertex_colors=np.clip(C * 255, 0, 255).astype(np.uint8), process=False); tm.export(os.path.join(a.dir, f"obj{oid}.glb")); meshes.append((oid, tm))
         out[oid] = dict(decision=f"mesh = {ch} ({why})", candidate=ch, numeric_choice=best_num, vlm_choice=None if not sel else sel.get("candidate"), numeric=num, final_numeric=base_num,
                         edits=app, size_m=[round(float(x), 3) for x in np.ptp(L, 0)], vertices=int(len(L)), seen_share=round(float(c["seen"].mean()), 3),
@@ -1034,7 +1175,7 @@ def final_meshes(d):
     out = []
     for f in sorted(glob.glob(os.path.join(d, "obj*_mesh.npz"))):
         z = np.load(f); out.append(dict(id=int(os.path.basename(f)[3:].split("_")[0]), V=z["V"].astype(float), F=z["F"], C=z["C"].astype(float), N=z["N"].astype(float),
-                                        area=z["area"].astype(float), L=z["L"].astype(float), seen=z["seen"].astype(bool), fr=Frame(z["fr_c0"], z["fr_a1"], z["fr_a2"], z["fr_n"], float(z["fr_d"]))))
+                                        area=z["area"].astype(float), L=z["L"].astype(float), seen=z["seen"].astype(bool), vis=(z["vis"] if "vis" in z.files else z["seen"].astype(np.int32) * 99), fr=Frame(z["fr_c0"], z["fr_a1"], z["fr_a2"], z["fr_n"], float(z["fr_d"]))))
     return out
 
 
@@ -1043,10 +1184,18 @@ def accepted_meshes(a, cfg):
     return [m for m in final_meshes(a.dir) if gate_ok(gj.get(str(m["id"]), {}), cfg)]
 
 
-def gate_ok(g, cfg):
+def gate_pass(g, cfg):
     if "face_psnr_mesh" in g:
         return g["face_psnr_mesh"] is None or g["face_psnr_mesh"] >= cfg["min_face_psnr"]
     return g.get("loss_db", 0.0) <= cfg["max_object_loss_db"]
+
+
+def gate_ok(g, cfg):
+    """strict_gates true: a mesh failing the per-object PSNR gate keeps its splat. false (default): the gate is an alarm only
+    (logged in gate.json / the compose report); the unseen-angle look decides."""
+    if cfg["fallback_object_loss_db"] > 0 and g.get("loss_db", 0.0) > cfg["fallback_object_loss_db"]:
+        return False                                                        # breaks its own training frames: keeps its splat
+    return gate_pass(g, cfg) or not cfg["strict_gates"]
 
 
 def floormap(a):
@@ -1094,14 +1243,67 @@ def floormap(a):
                                               object_colour_m2=round(float((colc & hole).sum()) * mc * mc, 3), completed_m2=round(float(hole.sum()) * mc * mc, 3), out=a.out, **info)), flush=True)
 
 
+def mesh_dist(L, F, Q, lo, hi, vox=0.005, signed=False):
+    """distance (m) from the query points to the closed mesh's SOLID (0 inside), object frame, voxel accurate: surface
+    voxels from the (dense, texel-spaced) vertices + edge midpoints, filled (the floor closes the bottom), EDT."""
+    from scipy import ndimage
+    lo = np.asarray(lo, float); lo[2] = min(lo[2], -vox); sh = np.ceil((np.asarray(hi) - lo) / vox).astype(int) + 2
+    P = np.concatenate([L, (L[F[:, 0]] + L[F[:, 1]]) / 2, (L[F[:, 1]] + L[F[:, 2]]) / 2, (L[F[:, 2]] + L[F[:, 0]]) / 2])
+    ij = np.clip(np.floor((P - lo) / vox).astype(int), 0, sh - 1); occ = np.zeros(sh, bool); occ[ij[:, 0], ij[:, 1], ij[:, 2]] = True
+    occ = ndimage.binary_closing(np.pad(occ, 2), iterations=1)[2:-2, 2:-2, 2:-2]; occ = solid_fill(occ)
+    D = ndimage.distance_transform_edt(~occ) * vox
+    if signed:                                                              # negative inside: depth below the surface
+        D = D - ndimage.distance_transform_edt(np.pad(occ, 1, constant_values=False))[1:-1, 1:-1, 1:-1] * vox
+    q = np.floor((Q - lo) / vox).astype(int); ok = np.all((q >= 0) & (q < sh), 1)
+    return np.where(ok, D[np.clip(q[:, 0], 0, sh[0] - 1), np.clip(q[:, 1], 0, sh[1] - 1), np.clip(q[:, 2], 0, sh[2] - 1)], np.inf)
+
+
+def train_weight(a, n):
+    """max blending weight of each splat gaussian over the training views (clean_haze.py stats of that exact PLY), or None."""
+    f = getattr(a, "train_stats", None)
+    if not f or not os.path.exists(f):
+        return None
+    w = np.load(f)["train_max_w"]
+    return w if len(w) == n else None
+
+
 def layer_rows(a, cfg, v, s, R, t):
     """per final mesh: (id, mesh, rows of the base to delete, surface gaussians as rows of the base's dtype)."""
     from scipy.spatial.transform import Rotation
-    Xm = s * (np.stack([v["x"], v["y"], v["z"]], 1).astype(np.float64) @ R.T) + t; out = []
+    Xm = s * (np.stack([v["x"], v["y"], v["z"]], 1).astype(np.float64) @ R.T) + t; out = []; tw = train_weight(a, len(v))
+    if tw is None and cfg["seen_from"] == "splat":
+        print("[layers] no training-weight stats for this PLY: splat gaussians the cameras rely on are not protected", flush=True)
     for m in final_meshes(a.dir):
         Lg = m["fr"].loc(Xm); lo, hi = m["L"].min(0), m["L"].max(0); zn = cfg["zone_m"]
         d_ = (Lg[:, 0] > lo[0] - zn) & (Lg[:, 0] < hi[0] + zn) & (Lg[:, 1] > lo[1] - zn) & (Lg[:, 1] < hi[1] + zn) & (Lg[:, 2] > cfg["floor_m"]) & (Lg[:, 2] < hi[2] + zn)
+        if cfg["zone_mode"] == "sdf":                                       # inside the mesh volume or within a thin shell of it (plus the
+            sm_ = s * np.exp(np.stack([v["scale_0"], v["scale_1"], v["scale_2"]], 1).astype(np.float64)).max(1)   # gaussian's own reach)
+            reach = cfg["shell_m"] + np.minimum(2 * sm_, cfg["extent_cap_m"]); pad = max(cfg["shell_m"] + cfg["extent_cap_m"], cfg["unseen_clear_m"])
+            box = (Lg[:, 0] > lo[0] - pad) & (Lg[:, 0] < hi[0] + pad) & (Lg[:, 1] > lo[1] - pad) & (Lg[:, 1] < hi[1] + pad) & (Lg[:, 2] > cfg["floor_m"]) & (Lg[:, 2] < hi[2] + pad)
+            i = np.nonzero(box)[0]; d_ = np.zeros(len(Lg), bool)
+            if len(i) and cfg["seen_from"] == "splat":                     # the splat keeps drawing what the cameras saw: removed only deep
+                from scipy.spatial import cKDTree                           # inside the solid and around the mesh's UNSEEN faces
+                sd = mesh_dist(m["L"], m["F"], Lg[i], lo - pad, hi + pad, signed=True); uns = (m["vis"] < cfg["min_vis_views"])[cKDTree(m["L"]).query(Lg[i])[1]]
+                # beside a face no camera saw, the splat's content is unconstrained (the glitter seen from behind): cleared up to
+                # unseen_clear_m from that face (above the floor); the mesh's completed face is drawn there instead
+                # (above unseen_clear_min_h only: the fuzzy floor layer behind an object is what cameras see over its top)
+                wide = (sd <= cfg["unseen_clear_m"]) & (Lg[i, 2] > cfg["unseen_clear_min_h"])
+                d_[i] = (sd < -cfg["inner_keep_m"]) | (((sd <= reach[i]) | wide) & uns)
+                if tw is not None:                                          # what the training views draw stays (misregistered mesh)
+                    d_[i] &= tw[i] < cfg["keep_train_w"]
+            elif len(i):
+                d_[i] = mesh_dist(m["L"], m["F"], Lg[i], lo - pad, hi + pad) <= reach[i]
         k = ~((m["L"][:, 2] < 0.004) & ((m["N"] @ m["fr"].n) < -0.5))                 # the underside lies on the floor layer: not drawn
+        if cfg["seen_from"] == "splat":                                     # only faces no training camera could see become gaussians
+            k &= m["vis"] < cfg["min_vis_views"]
+        if cfg["local_floor"]:                                              # the splat's own floor around the object can sit a few cm above
+            sc_ = np.exp(np.stack([v["scale_0"], v["scale_1"], v["scale_2"]], 1).astype(np.float64)); sc_.sort(1)   # the LiDAR floor
+            dx = np.maximum(np.maximum(lo[0] - Lg[:, 0], Lg[:, 0] - hi[0]), 0); dy = np.maximum(np.maximum(lo[1] - Lg[:, 1], Lg[:, 1] - hi[1]), 0)
+            ring = (np.hypot(dx, dy) > 0.04) & (np.hypot(dx, dy) < 0.25) & (np.abs(Lg[:, 2]) < 0.08) & (sc_[:, 0] < 0.3 * sc_[:, 2]) & (v["opacity"] > 0)
+            hf = float(np.median(Lg[ring, 2])) if ring.sum() > 50 else 0.0   # (misregistration): mesh surface under it would show through
+            if hf > 0.003:
+                k &= m["L"][:, 2] > hf + 0.003
+            print(f"[layers] o{m['id']}: splat floor {hf * 100:+.1f} cm vs LiDAR floor ({int(ring.sum())} floor gaussians)", flush=True)
         nn_ = np.linalg.norm(m["N"], axis=1); k &= np.isfinite(m["N"]).all(1) & np.isfinite(m["V"]).all(1) & (nn_ > 1e-6)   # degenerate vertices carry no surface
         Vm, Nm, Cv, sgm = m["V"][k], m["N"][k], m["C"][k], cfg["gauss_sigma"] * np.sqrt(np.maximum(m["area"][k], 1e-10))
         # backing layer: one larger disc per --backing_m cell, just behind the surface -- stays opaque when the fine discs are
@@ -1151,7 +1353,7 @@ def gate(a):
         z = np.load(os.path.join(a.dir, "ev", f"obj{oid}.npz")); names = [str(x) for x in z["views"] if str(x) in fr]; names = names[::max(1, len(names) // cfg["gate_frames"])]
         pk = to_params(np.concatenate([v[~d_], new]), dev); pb, pa = [], []; nb = int((~d_).sum())
         allv = [str(x) for x in z["views"] if str(x) in fr]
-        if cfg["refit_iters"] > 0 and allv:                                 # texture refit through the viewer itself: mesh colours only, geometry frozen
+        if cfg["refit_iters"] > 0 and allv and sr.any():                                 # texture refit through the viewer itself: mesh colours only, geometry frozen
             seen_t = torch.tensor(sr, device=dev)                            # background a training view shows past them would fake see-through holes
             sh0 = torch.nn.Parameter(pk["sh0"][nb:].clone()); opt = torch.optim.Adam([sh0], lr=2.5e-3, eps=1e-15); rng = np.random.default_rng(0)
             for it in range(cfg["refit_iters"]):
@@ -1160,6 +1362,28 @@ def gate(a):
                 l = 0.8 * (img - gt).abs().mean() + 0.2 * (1 - ssim(img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None])); opt.zero_grad(set_to_none=True); l.backward()
                 sh0.grad[~seen_t] = 0; opt.step()                           # unseen faces keep their completed texture: painting them with the
             pk["sh0"] = torch.cat([pk["sh0"][:nb], sh0.detach()]); np.save(os.path.join(a.dir, f"obj{oid}_refit_dc.npy"), sh0.detach()[:, 0].cpu().numpy())
+        if cfg["seen_from"] == "splat" and cfg["vd_refit_iters"] > 0 and allv and pk["shN"].shape[1] > 0 and len(new):
+            # view-dependent refit of the completed faces: the training views see them only THROUGH the splat's semi-transparent
+            # seen surface (they change those pixels). Their SH is fitted so that, seen from the training cameras' side, the
+            # pixels match the photos again, while seen from outside the completed face (directions within vd_cone_deg of its
+            # inward view direction) the colour stays the completed texture.
+            from gsplat import spherical_harmonics
+            q_ = torch.nn.functional.normalize(pk["quats"][nb:], dim=1); w_, x_, y_, z_ = q_.unbind(1)
+            nrm = torch.stack([2 * (x_ * z_ + w_ * y_), 2 * (y_ * z_ - w_ * x_), 1 - 2 * (x_ * x_ + y_ * y_)], 1)   # local z = disc normal
+            nrm = nrm * torch.sign((nrm * pk["means"][nb:] - nrm * pk["means"][nb:].mean(0)).sum(1, keepdim=True) + 1e-9)  # outward
+            K_ = pk["shN"].shape[1]; dgr = int(round(np.sqrt(K_ + 1))) - 1; tgt = (C0 * pk["sh0"][nb:, 0] + 0.5).detach()
+            sh0 = torch.nn.Parameter(pk["sh0"][nb:].clone()); shN = torch.nn.Parameter(pk["shN"][nb:].clone())
+            opt = torch.optim.Adam([sh0, shN], lr=2.5e-3, eps=1e-15); rng = np.random.default_rng(0); cone = np.radians(cfg["vd_cone_deg"])
+            for it in range(cfg["vd_refit_iters"]):
+                n_ = allv[rng.integers(len(allv))]; cam, c2w = fr[n_]; gt = load_rgb(os.path.join(a.dataset, "images", n_), dev).float() / 255
+                pp = dict(pk); pp["sh0"] = torch.cat([pk["sh0"][:nb], sh0]); pp["shN"] = torch.cat([pk["shN"][:nb], shN])
+                img = Rv.render(pp, to_t(np.linalg.inv(c2w), dev), *cam_args(cam), sh_degree=deg)[0]
+                l = 0.8 * (img - gt).abs().mean() + 0.2 * (1 - ssim(img.permute(2, 0, 1)[None], gt.permute(2, 0, 1)[None]))
+                jit = torch.randn_like(nrm) * float(np.tan(cone)) / 1.7; dirs = torch.nn.functional.normalize(-nrm + jit - (jit * nrm).sum(1, keepdim=True) * nrm, dim=1)
+                col = spherical_harmonics(dgr, dirs, torch.cat([sh0, shN], 1)) + 0.5
+                l = l + cfg["vd_lambda"] * (col - tgt).abs().mean(); opt.zero_grad(set_to_none=True); l.backward(); opt.step()
+            pk["sh0"] = torch.cat([pk["sh0"][:nb], sh0.detach()]); pk["shN"] = torch.cat([pk["shN"][:nb], shN.detach()])
+            np.savez(os.path.join(a.dir, f"obj{oid}_refit_sh.npz"), sh0=sh0.detach()[:, 0].cpu().numpy(), shN=shN.detach().cpu().numpy())
         # per-face gate: only pixels where the mesh shows a PHOTO-SEEN face and the original splat shows this object; the completed
         # back and the silhouette change are not judged here (the orbit / behind renders judge them)
         ev = load_ev(a, oid, cfg); pm = {k_: x[nb:].clone() for k_, x in pk.items()}; seen_c = torch.tensor(sr, device=dev, dtype=torch.float32)
@@ -1181,7 +1405,8 @@ def gate(a):
         fpsnr = float(-10 * np.log10(max(np.average(fa, weights=npx), 1e-12))) if npx else None   # absolute: the splat is fitted to these very frames
         out[str(oid)] = dict(frames=len(names), psnr_splat=round(float(np.mean(pb)), 3) if names else None, psnr_mesh=round(float(np.mean(pa)), 3) if names else None,
                              loss_db=round(loss, 3), face_frames=len(npx), face_px=int(np.sum(npx)) if npx else 0, face_loss_db=round(floss, 3),
-                             face_psnr_mesh=None if fpsnr is None else round(fpsnr, 2), accept=bool(fpsnr is None or fpsnr >= cfg["min_face_psnr"]))
+                             face_psnr_mesh=None if fpsnr is None else round(fpsnr, 2), accept=bool(fpsnr is None or fpsnr >= cfg["min_face_psnr"] or not cfg["strict_gates"]),
+                             alarm=bool(fpsnr is not None and fpsnr < cfg["min_face_psnr"]))
         print(f"[layers] gate o{oid}: " + json.dumps(out[str(oid)]), flush=True)
     json.dump(dict(objects=out, min_face_psnr=cfg["min_face_psnr"]), open(os.path.join(a.dir, "gate.json"), "w"), indent=1)
 
@@ -1379,14 +1604,25 @@ def compose(a):
     gf = os.path.join(a.dir, "gate.json"); gj = json.load(open(gf))["objects"] if os.path.exists(gf) else {}; kept = []
     for oid, m, d_, new, _ in layer_rows(a, cfg, v, s, R, t):
         if gj and not gate_ok(gj.get(str(oid), {}), cfg):
-            rep[oid] = dict(decision=f"kept its splat: seen-face PSNR {gj[str(oid)].get('face_psnr_mesh')} dB < {cfg['min_face_psnr']}"); continue
+            rep[oid] = dict(decision=f"kept its splat: own training frames -{gj[str(oid)].get('loss_db')} dB (fallback_object_loss_db "
+                                     f"{cfg['fallback_object_loss_db']}) / seen-face PSNR {gj[str(oid)].get('face_psnr_mesh')} dB"); continue
+        rs = os.path.join(a.dir, f"obj{oid}_refit_sh.npz")                 # view-dependent refit (gate, seen_from splat)
+        if os.path.exists(rs):
+            z_ = np.load(rs); K_ = z_["shN"].shape[1]
+            if len(z_["sh0"]) == len(new) and all(f"f_rest_{c * K_ + k}" in new.dtype.names for c in range(3) for k in range(K_)):
+                for c in range(3):
+                    new[f"f_dc_{c}"] = z_["sh0"][:, c]
+                    for k in range(K_):
+                        new[f"f_rest_{c * K_ + k}"] = z_["shN"][:, k, c]
         rf = os.path.join(a.dir, f"obj{oid}_refit_dc.npy")
-        if os.path.exists(rf):
+        if os.path.exists(rf) and not os.path.exists(rs):
             dc_ = np.load(rf)
             if len(dc_) == len(new):
                 for i in range(3):
                     new[f"f_dc_{i}"] = dc_[:, i]
         dele |= d_; rows.append(new); kept.append(m); rep[oid] = dict(deleted=int(d_.sum()), inserted=int(len(new)))
+        if gj and not gate_pass(gj.get(str(oid), {}), cfg):
+            rep[oid]["alarm"] = f"seen-face PSNR {gj[str(oid)].get('face_psnr_mesh')} dB < {cfg['min_face_psnr']} (strict_gates off: composited anyway)"
     if a.map and os.path.exists(a.map) and kept:                            # completed floor under every meshed object (hidden by the mesh except at its rim)
         z = np.load(a.map); fc = z["foot_cells"] if "foot_cells" in z.files else np.zeros_like(z["occ"]); hi, hj = np.nonzero(fc); mc = float(z["cell"])
         e1, e2, n_, d_ = z["e1"], z["e2"], z["n"], float(z["d"])
@@ -1415,6 +1651,8 @@ def main():
     ap.add_argument("--objects"); ap.add_argument("--sim3-json"); ap.add_argument("--dataset"); ap.add_argument("--splat-depth-dir"); ap.add_argument("--gen-dir", default=None)
     ap.add_argument("--ids", type=int, nargs="*", default=None, help="debug override: only these objects")
     ap.add_argument("--extra-gen-dir", nargs="*", default=None, help="more generated-asset dirs (e.g. Hunyuan3D-2.1); every seed of every generator is registered");
+    ap.add_argument("--train-stats", default=None, help="gate / compose / floorviews: clean_haze.py stats of the --ply (train_max_w): protects the gaussians the training views draw")
+    ap.add_argument("--seg-dir", default=None, help="evidence: detect_objects.py segment output (no VLM crop from a frame with a person in it)")
     ap.add_argument("--apply-detection", action="store_true", help="evidence: split / merge clusters as the vision-language detection check says");
     ap.add_argument("--base-ply", default=None, help="floorviews: the input splat (before)"); ap.add_argument("--cloud", default=None)
     ap.add_argument("--sources", nargs="*", default=None, help="mergeviews: DS:weight ..."); ap.add_argument("--real", default=None, help="mergeviews: real frames first"); ap.add_argument("--no-seed", action="store_true")
