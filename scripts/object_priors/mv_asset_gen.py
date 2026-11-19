@@ -47,6 +47,10 @@ def crops(a):
                 kk = max(3, int(0.06 * Sz)) | 1; mb = cv2.morphologyEx(mi.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((kk, kk), np.uint8)) > 0
             x1, y1, S2 = square_box(mb, 1.2)                               # TRELLIS: object fills 1/1.2 of the square
             out = Image.fromarray(cut(ci_ * mb[..., None], x1, y1, S2)).resize((518, 518), Image.Resampling.LANCZOS)
+            if a.unsharp > 0:                                               # small crops are upsampled a lot: restore edge contrast (masked)
+                from PIL import ImageFilter
+                o_ = np.asarray(out); sh_ = np.asarray(out.filter(ImageFilter.UnsharpMask(radius=2, percent=int(100 * a.unsharp), threshold=2)))
+                out = Image.fromarray(np.where(o_.max(2, keepdims=True) > 0, sh_, 0).astype(np.uint8))
             out.save(os.path.join(C, f"obj{o['id']}_{k}.png")); names.append(name); sheet.append(np.asarray(out.resize((259, 259))))
         Image.fromarray(np.hstack(sheet)).save(os.path.join(a.out_dir, f"obj{o['id']}_cond.jpg"))
         log.append({"id": o["id"], "views": names, "candidates": ncand})
@@ -134,6 +138,9 @@ def main():
     c.add_argument("--splat-tol-rel", type=float, default=0.05); c.add_argument("--support-m", type=float, default=0.03)
     c.add_argument("--max-trunc", type=float, default=0.05); c.add_argument("--min-samples", type=int, default=200)
     c.add_argument("--min-crop-px", type=int, default=40); c.add_argument("--mask-tol-rel", type=float, default=0.05)
+    c.add_argument("--sharp-pow", type=float, default=0.0, help="view score x (Laplacian variance of the object box)^this (0 = off)")
+    c.add_argument("--px-pow", type=float, default=0.0, help="view score x (object pixels)^this: nearer views first (0 = off)")
+    c.add_argument("--unsharp", type=float, default=0.0, help="unsharp-mask strength on the 518 px crop (0 = off)")
     g = sub.add_parser("generate")
     g.add_argument("--out-dir", required=True); g.add_argument("--trellis-dir", default=os.path.join(os.environ.get("CEAR_WS", ""), "TRELLIS"))
     g.add_argument("--model", default="microsoft/TRELLIS-image-large"); g.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
