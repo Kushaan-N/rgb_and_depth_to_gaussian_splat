@@ -193,6 +193,12 @@ def pick_views(S, vis, a, c_obj, A):
         if len(ys) == 0 or max(np.ptp(xs), np.ptp(ys)) < a.min_crop_px:
             continue
         score = len(iv) * (len(iv) / len(ia))                                       # visible area x unoccluded share
+        if getattr(a, "sharp_pow", 0) or getattr(a, "px_pow", 0):                    # sharper / nearer (more object pixels) views first
+            score *= float(m.sum()) ** getattr(a, "px_pow", 0)
+            if getattr(a, "sharp_pow", 0):
+                g = cv2.imread(os.path.join(a.dataset, "images", name), cv2.IMREAD_GRAYSCALE)
+                y0_, y1_, x0_, x1_ = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+                score *= max(float(cv2.Laplacian(g[y0_:y1_, x0_:x1_].astype(np.float32), cv2.CV_32F).var()), 1e-3) ** a.sharp_pow
         Cm = Cw.cpu().numpy()
         cl = (Cm - c_obj) @ A                                                       # camera in object frame (dataset units ok: angle)
         cands.append((score, ci, m.astype(bool), float(np.degrees(np.arctan2(cl[1], cl[0])))))
