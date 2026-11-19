@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse, base64, glob, hashlib, json, os, re, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
-import prompts_v2 as PR  # noqa: E402  (versioned prompts: a new version = a new file)
+import prompts_v3 as PR  # noqa: E402  (versioned prompts: a new version = a new file)
 
 PRICE = {"claude-opus-5-5": (4.0, 20.0)}          # $ / 1M input, output tokens (claude-api reference, 2026-11)
 
@@ -109,8 +109,8 @@ def select(a):
         A, B = num.get("prim", {}), num.get("gen", {})
         p = PR.SELECT.format(iou_a=A.get("iou"), psnr_a=A.get("psnr"), iou_b=B.get("iou"), psnr_b=B.get("psnr"))
         js = c.ask(f"select_obj{i}", p, [os.path.join(a.dir, "cand", f"obj{i}_sheet.jpg")])
-        if js is not None and js.get("choice") in ("A", "B"):
-            js["candidate"] = {"A": "prim", "B": "gen"}[js["choice"]]
+        if js is not None and js.get("choice") in ("A", "B", "N"):
+            js["candidate"] = {"A": "prim", "B": "gen", "N": "none"}[js["choice"]]
             json.dump(js, open(os.path.join(a.dir, "vlm", f"select_obj{i}.json"), "w"), indent=1)
 
 
