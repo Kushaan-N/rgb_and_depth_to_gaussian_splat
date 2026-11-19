@@ -203,8 +203,43 @@ object_layers:
   shadow_reach_m: 1.0         # floor next to an accepted object that no training camera saw unoccluded is completed up to this far
   colour_reach_m: 0.5         # ... and floor cells this close whose colour is nearer the object's material than the floor (smeared object pixels)
   floor_harm_check: false     # true: drop completion discs that change any training view (fill_harm_ply.py); false ships them all
+  strict_gates: false         # false: min_face_psnr / max_object_loss_db only raise an alarm (gate.json, compose report); the unseen-angle
+                              #   look decides. true: an object failing them keeps its splat (old behaviour)
+  fallback_object_loss_db: 0.0  # > 0: an object whose composite costs its own training frames more than this (gate.json loss_db) keeps
+                              #   its splat regardless of strict_gates (on-path breakage guard); 0 = off
+  zone_mode: sdf              # splat gaussians removed per meshed object: sdf = inside the mesh solid or within shell_m (+ the gaussian's
+  shell_m: 0.02               #   own 2-sigma reach, capped at extent_cap_m) of it, above the floor; box = the old zone_m-padded box
+  extent_cap_m: 0.05
+  seen_from: splat            # splat: every face a training camera could see (unoccluded ray, min_vis_views) stays the splat's own
+  min_vis_views: 2            #   gaussians (sharpest, fitted to the photos); the mesh adds only the faces no camera could see, and
+                              #   splat gaussians around those faces are removed. mesh: every face is drawn by the mesh
+                              #   (v14 / v15: -4.9 / -6.2 dB on-path with 22 objects: wrong-shaped bits in front of the real objects)
+  inner_keep_m: 10.0          # splat gaussians deeper than this inside the mesh solid are removed (10 = off: hollow objects such as an
+                              #   A-frame show their inside to the cameras)
+  unseen_clear_m: 0.10        # splat gaussians within this of a completed (unseen) face are removed (unconstrained glitter behind objects),
+  unseen_clear_min_h: 0.05    #   only above this height (the fuzzy floor layer behind an object is what cameras see over its top)
+  unseen_fill: synth          # primitive candidates: synth = unreliable / unseen texels re-synthesised patch-wise from the material's
+  synth_patch_m: 0.06         #   reliable seen texture (outliers > synth_z robust sigmas and photos below synth_q_mult x q_min are
+  synth_z: 3.0                #   treated as unseen); copy = the old same-material face copy
+  synth_q_mult: 1.5
+  detect:                     # image detection merged with the LiDAR clusters (scripts/object_layers/detect_objects.py, venv-seg)
+    enable: true
+    every: 2                  # every 2nd training frame
+    objects: [box, brick, stack of blocks, crate, chair, stool, ramp, board, cone, bin, bucket, bag, toy, cart]
+    exclude: [table, desk, shelf, cabinet, door, wall, window, monitor, floor, ceiling, whiteboard]   # structure: boxes on these are dropped
+    people: [person]          # dynamic: never objects; cells people were segmented on more than objects are dropped
+    min_views: 3              # a floor cell is an object cell when >= min_views frames segmented an object standing there
+    min_ratio: 0.3            #   and those are >= min_ratio of the frames that saw anything standing there (multi-view consistency)
+    max_dist: 3.0             # as find_objects.py: within this of the camera path, footprint diagonal 0.08 - 2 m, >= 0.08 m tall,
+    max_h: 1.2                #   nothing taller than max_h above it (furniture)
+  floaters:                   # after compose: scripts/clean_haze.py on the background rows (meshes / floor discs protected)
+    enable: true              # measured (2026-11-19, trot): LiDAR / camera free-space gaussians carry real training pixels (removing all:
+                              #   -3.6 dB training views, no visible gain); kept = unsupported + isolated + spikes WITH the harm restore
+    args: "--classes freespace,giant,beamfree,viewfree,isolated,spike --iso-m 0.04 --spike-aniso 8 --thr 0.0314 --train-psnr"
+  assets:
+    crop_args: "--views 8 --sharp-pow 0.5 --px-pow 0.5 --unsharp 0.6"   # mv_asset_gen.py crops: more, sharper, nearer views for TRELLIS
   vlm:                        # vision-language stage (scripts/object_layers/vlm.py; needs ~/.config/scan2sim/anthropic_key + internet;
-    enable: true              #   without them the generated mesh is used). Prompts: scripts/object_layers/prompts_v1.py
+    enable: true              #   without them the generated mesh is used). Prompts: scripts/object_layers/prompts_v3.py
     model: claude-opus-5-5
     effort: high
     recipe: true              # shape recipe (primitives) + detection check per object
