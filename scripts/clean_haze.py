@@ -153,6 +153,7 @@ def sub(p, sel):
 
 # ---------------------------------------------------------------- diagnose
 DEPTH = {}                                                           # image name -> LiDAR ray-distance map (.npy)
+DATASET_OF = {}                                                      # image name -> dataset dir
 
 
 def train_stats(p, fr, deg, display_scale, dev, tol_abs=0.0, tol_rel=0.05):
@@ -207,7 +208,7 @@ def load_frames(datasets, every=1):
     out = {}
     for d in datasets:
         for f in frames(d, 0, "all"):
-            out.setdefault(f[0], f)
+            out.setdefault(f[0], f); DATASET_OF.setdefault(f[0], d)
             dp = os.path.join(d, "images", os.path.splitext(f[0])[0] + "_depth.npy")
             if f[0] not in DEPTH and os.path.exists(dp):
                 DEPTH[f[0]] = dp
@@ -366,6 +367,80 @@ def diagnose(args):
 
 
 # ---------------------------------------------------------------- clean + measured harm restore
+def stats(args):
+    from finetune_ply_viewer import load_ply, sh_deg
+    _, p = load_ply(args.ply, "cuda"); fr = load_frames(args.dataset, args.every)
+    st = get_stats(args, p, fr, sh_deg(p), "cuda", args.stats); print(f"[haze] stats of {len(st['train_max_w']):,} gaussians -> {args.stats}", flush=True)
+
+
+def floater_classes(args, p, st, ld, ms):
+    """measured free space (fix for floaters / rainbow spikes that DO blend into some training pixels, so `freespace` keeps them):
+      beamfree  centre in a LiDAR-beam free voxel (build_freespace_grid.py: >= --min-free scans passed through, no return within
+                --grid-dilate voxels) -- the LiDAR proved the space empty
+      viewfree  centre in front of the training camera's LiDAR depth target (beyond 5 cm + 5 %) in >= --front-k views and in
+                >= --front-frac of the views with a target there, and > --front-lidar from every LiDAR point
+      isolated  low support: the --iso-k-th nearest gaussian centre is > --iso-m away, > --iso-lidar from every LiDAR point and
+                max training blending weight < --iso-w
+      spike     needle (largest / middle axis > --spike-aniso, largest 2 sigma > --spike-len): an end point (+-2 sigma along
+                its long axis) lies in LiDAR-beam free space -- the rainbow spikes standing out of the floor / objects
+    All are metric (x_metric = s R x + t of --sim3-json). Classes whose inputs are missing are empty."""
+    import torch
+    N = len(p["means"]); out = {k: np.zeros(N, bool) for k in ("beamfree", "viewfree", "isolated", "spike")}
+    if not args.sim3_json:
+        return out
+    from sim3_utils import load_sim3
+    s, R, t = load_sim3(args.sim3_json); xyz = p["means"].cpu().numpy().astype(np.float64); X = s * xyz @ R.T + t
+    sc = np.exp(p["scales"].cpu().numpy().astype(np.float64)) * s
+    free_at = None
+    if args.freespace_grid and os.path.exists(args.freespace_grid):
+        from scipy import ndimage
+        g = np.load(args.freespace_grid); vox = float(g["voxel"]); o = g["origin"]
+        hitd = ndimage.maximum_filter(g["hit"] > 0, size=2 * args.grid_dilate + 1)
+        conf = (g["free"] >= args.min_free) & ~hitd
+
+        def free_at(P):
+            ij = np.floor((P - o) / vox).astype(int); ok = np.all((ij >= 0) & (ij < np.array(conf.shape)), 1); ij = np.clip(ij, 0, np.array(conf.shape) - 1)
+            return ok & conf[ij[:, 0], ij[:, 1], ij[:, 2]]
+        out["beamfree"] = free_at(X) & (ld > args.front_lidar) & (st["train_max_w"] < args.free_max_w)
+    if "lidar_front" in st:
+        nf, nv = st["lidar_front"].astype(float), st["lidar_nviews"].astype(float)
+        out["viewfree"] = (nf >= args.front_k) & (nf >= args.front_frac * np.maximum(nv, 1)) & (ld > args.front_lidar) & (st["train_max_w"] < args.free_max_w)
+    if args.iso_m > 0:
+        from scipy.spatial import cKDTree
+        d = cKDTree(X).query(X, k=args.iso_k + 1, workers=-1)[0][:, -1]
+        out["isolated"] = (d > args.iso_m) & (ld > args.iso_lidar) & (st["train_max_w"] < args.iso_w)
+    if free_at is not None and args.spike_aniso > 0:
+        srt = np.sort(sc, 1); needle = (srt[:, 2] > args.spike_aniso * srt[:, 1]) & (2 * srt[:, 2] > args.spike_len)
+        i = np.nonzero(needle)[0]
+        if len(i):
+            q = p["quats"].cpu().numpy()[i].astype(np.float64); q /= np.linalg.norm(q, axis=1, keepdims=True); w, x, y, z = q.T
+            Rq = np.stack([np.stack([1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)], 1),
+                           np.stack([2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)], 1),
+                           np.stack([2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)], 1)], 1)   # (n,3,3) local->ply
+            ax = Rq[np.arange(len(i)), :, np.argmax(sc[i], 1)] @ R.T                                     # long axis, metric
+            L = 2 * sc[i].max(1)[:, None]
+            out["spike"][i] = free_at(X[i] + L * ax) | free_at(X[i] - L * ax)
+    return out
+
+
+def train_psnr(R, p, pc, fr, deg, dev, every=4):
+    """mean PSNR vs the training photos, before / after (the measured harm on the frames the splat was fitted to)."""
+    import torch
+    from finetune_ply_viewer import cam_args, to_t
+    from refine_poses_gsplat import load_rgb
+    a, b = [], []
+    with torch.no_grad():
+        for name, cam, c2w in fr[::every]:
+            ds = DATASET_OF.get(name)
+            if ds is None:
+                continue
+            gt = load_rgb(os.path.join(ds, "images", name), dev).float() / 255; w2c = to_t(np.linalg.inv(c2w), dev)
+            for P_, acc in ((p, a), (pc, b)):
+                img = R.render(P_, w2c, *cam_args(cam), sh_degree=deg)[0].clamp(0, 1)
+                acc.append(float(-10 * torch.log10(((img - gt) ** 2).mean().clamp_min(1e-10))))
+    return (round(float(np.mean(a)), 3), round(float(np.mean(b)), 3), len(a)) if a else None
+
+
 def clean(args):
     import torch
     from plyfile import PlyData, PlyElement
@@ -378,6 +453,7 @@ def clean(args):
     smax = np.exp(p["scales"].cpu().numpy()).max(1) * ms
     cls = {"freespace": (st["train_max_w"] < args.max_train_w) & (ld > args.min_lidar_dist),   # unconstrained, off every surface
            "giant": (smax > args.giant_scale) & (ld > args.giant_lidar)}                         # huge background splats
+    cls.update(floater_classes(args, p, st, ld, ms))
     cand = np.zeros(N, bool)
     for c in args.classes.split(","):
         cand |= cls[c]
@@ -428,10 +504,13 @@ def clean(args):
             break
         rm &= ~restore
     keep = (~rm).cpu().numpy()
+    tp = train_psnr(R, p, sub(p, ~rm), fr, deg, dev) if args.train_psnr else None
+    if tp:
+        print(f"[haze] training-view PSNR before {tp[0]} after {tp[1]} ({tp[2]} frames)", flush=True)
     kept_by_class = {c: {"candidates": int((m & cand).sum()), "removed": int((m & cand & ~keep).sum())} for c, m in cls.items()}
     print("[haze] per class:", kept_by_class, flush=True)
     PlyData([PlyElement.describe(vert.data[keep], "vertex")], text=False).write(args.out)
-    json.dump({"in": N, "candidates": int(cand.sum()), "removed": int((~keep).sum()), "iterations": hist, "classes": kept_by_class,
+    json.dump({"in": N, "candidates": int(cand.sum()), "removed": int((~keep).sum()), "iterations": hist, "classes": kept_by_class, "train_psnr": tp,
                "args": {k: v for k, v in vars(args).items() if k != "cmd"},
                "max_train_w": args.max_train_w, "min_lidar_dist": args.min_lidar_dist, "thr": args.thr,
                "display_scale": args.display_scale}, open(os.path.splitext(args.out)[0] + "_haze.json", "w"), indent=2)
@@ -452,6 +531,10 @@ def main():
     a.add_argument("--stats", default=None, help="per-gaussian stats cache (default <out-dir>/stats.npz)")
     a.add_argument("--box", nargs="*", default=[], help="<view>:x0,y0,x1,y1 regions to attribute (e.g. a haze blob)")
     a.add_argument("--pre-remove", default="", help="classes removed before the view analysis (e.g. freespace,giant)")
+    a = s.add_parser("stats", help="per-gaussian training-view stats only (train_max_w, ...) -> --stats npz")
+    a.add_argument("--ply", required=True); a.add_argument("--dataset", required=True, nargs="+"); a.add_argument("--stats", required=True)
+    a.add_argument("--cloud", default=None); a.add_argument("--sim3-json", default=None)
+    a.add_argument("--display-scale", type=float, default=1.8); a.add_argument("--every", type=int, default=1)
     a = s.add_parser("clean"); a.add_argument("--ply", required=True); a.add_argument("--out", required=True)
     a.add_argument("--dataset", required=True, nargs="+", help="training frames (several = union by image name)")
     a.add_argument("--stats", default=None, help="stats cache (diagnose's, or computed here: default <out>_stats.npz)")
@@ -466,8 +549,19 @@ def main():
     a.add_argument("--protect-from", type=int, default=None, help="never remove gaussians with index >= this")
     a.add_argument("--thr", type=float, default=2.0 / 255); a.add_argument("--iters", type=int, default=6)
     a.add_argument("--display-scale", type=float, default=1.8); a.add_argument("--every", type=int, default=1)
+    # measured free-space floaters (classes beamfree, viewfree, isolated, spike; see floater_classes)
+    a.add_argument("--freespace-grid", default=None, help="LiDAR beam free-space grid (build_freespace_grid.py .npz)")
+    a.add_argument("--min-free", type=int, default=3); a.add_argument("--grid-dilate", type=int, default=1)
+    a.add_argument("--front-k", type=int, default=3); a.add_argument("--front-frac", type=float, default=0.5)
+    a.add_argument("--free-max-w", type=float, default=1.0, help="beamfree / viewfree: only gaussians whose max training blending weight is below this")
+    a.add_argument("--front-lidar", type=float, default=0.05, help="beamfree / viewfree: centre farther than this from every LiDAR point (m)")
+    a.add_argument("--iso-m", type=float, default=0.0, help="isolated: k-th neighbour farther than this (m); 0 = off")
+    a.add_argument("--iso-k", type=int, default=4); a.add_argument("--iso-lidar", type=float, default=0.05); a.add_argument("--iso-w", type=float, default=0.05)
+    a.add_argument("--spike-aniso", type=float, default=0.0, help="spike: largest / middle axis above this; 0 = off")
+    a.add_argument("--spike-len", type=float, default=0.06)
+    a.add_argument("--train-psnr", action="store_true", help="report the training-view PSNR before / after (every 4th frame)")
     args = ap.parse_args()
-    {"probe": probe, "diagnose": diagnose, "clean": clean}[args.cmd](args)
+    {"probe": probe, "diagnose": diagnose, "clean": clean, "stats": stats}[args.cmd](args)
 
 
 if __name__ == "__main__":
