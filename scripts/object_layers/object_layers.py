@@ -33,7 +33,9 @@ DEF = dict(voxel_m=0.005, max_voxels=6e6, margin_m=0.08, cam_max_m=4.0, max_view
            min_surf_views=3, texel_m=0.003, crust_m=0.03, carve_tol_m=0.015, max_resid_m=0.03, cos_min=0.2, q_min_px_m=60.0, top_k=4,
            sharp_pow=4.0, mv_floor_z=3.0, mv_black=0.03, seed_m=0.005, lidar_contain=0.0, yaw_free=1, lidar_solid=0, mv_n=24, mv_dist=(0.5, 1.5), mv_h=(0.3, 1.2), mv_floor_m=1.5, mv_clear_m=0.05,
            mv_min_share=0.02, mv_feather_px=3, min_face_psnr=20.0, solid_margin_m=0.015, floor_pixel_m=-1.0, backing_m=0.008, backing_sigma=0.7, backing_inset_m=0.0015, shadow_cams=1000, colour_reach_m=0.15, refit_iters=600, max_object_loss_db=2.0, gate_frames=20, base_m=0.02, prefer_prim_iou_tol=0.03, foot_close_m=0.03, foot_grow_m=0.01, photo_tol_m=0.015, rest_m=0.06, auto_box_resid_m=0.012, seam_m=0.02, val_every=6, zone_m=0.03, floor_m=0.012, gauss_sigma=0.9, gauss_thick_m=0.0005, gauss_opacity=0.985,
-           floor_close_m=0.25, shadow_reach_m=1.0, strict_gates=False, fallback_object_loss_db=0.0, unseen_fill='synth', synth_patch_m=0.06, synth_z=3.0, synth_q_mult=1.5, synth_contact_m=0.06, shell_m=0.02, extent_cap_m=0.05, zone_mode='sdf', seen_from='splat', inner_keep_m=10.0, local_floor=False, unseen_clear_m=0.10, unseen_clear_min_h=0.05, min_vis_views=2, keep_train_w=0.05, match_unseen_colour=True, vd_refit_iters=400, vd_cone_deg=50.0, vd_lambda=2.0, min_prim_confidence=0.3, plane_snap=True, max_edit_m=0.05, vlm_images=4)
+           floor_close_m=0.25, shadow_reach_m=1.0, strict_gates=False, fallback_object_loss_db=0.0, unseen_fill='synth', synth_patch_m=0.06, synth_z=3.0, synth_q_mult=1.5, synth_contact_m=0.06, shell_m=0.02, extent_cap_m=0.05, zone_mode='sdf', seen_from='splat', inner_keep_m=10.0, local_floor=False, unseen_clear_m=0.10, unseen_clear_min_h=0.05, min_vis_views=2, keep_train_w=0.05, match_unseen_colour=True, vd_refit_iters=400, vd_cone_deg=50.0, vd_lambda=2.0, min_prim_confidence=0.3, plane_snap=True, max_edit_m=0.05, vlm_images=4,
+           halo=False, halo_m=0.12, halo_floor_h=0.03, halo_out_m=0.03, halo_min_opacity=0.15, halo_aniso=6.0, halo_vd=0.6, halo_glitter_out_m=0.0, halo_redraw_m=0.0,
+           halo_lidar_m=0.03, halo_lidar_gap_m=0.05, halo_support_m=0.015, halo_support_op=0.3, halo_nomesh=True, halo_nomesh_out_m=0.06, skirt_h=0.0, skirt_m=0.02, crop_min_cov=0.03, crop_rel_cov=0.5)
 
 
 # ------------------------------------------------------------------ small helpers
@@ -91,6 +93,20 @@ def clean_points(X, n, d, cell=0.02):
     ncomp = int((np.asarray(sizes) >= 0.15 * max(np.max(sizes), 1)).sum()) if nl else 1
     keep = ndimage.binary_dilation(g, iterations=2)[ij[:, 0], ij[:, 1]]
     return X[keep], ncomp
+
+
+def drop_skirt(X, n, d, skirt_h, skirt_m, cell=0.01):
+    """floor-level points (below skirt_h) that stick out beyond the footprint of what stands above them (+ skirt_m) are dropped:
+    LiDAR floor noise / misregistered floor returns next to the object would otherwise widen its base into a plinth."""
+    from scipy import ndimage
+    h = X @ n + d; up = h >= skirt_h
+    if up.sum() < 30 or (~up).sum() == 0:
+        return X, 0
+    e1, e2 = floor_basis(n); uv = np.stack([X @ e1, X @ e2], 1); lo = uv.min(0) - 0.1
+    ij = np.floor((uv - lo) / cell).astype(int); g = np.zeros(ij.max(0) + 4, bool); g[ij[up, 0], ij[up, 1]] = True
+    g = ndimage.binary_fill_holes(ndimage.binary_closing(g, iterations=2)); g = ndimage.binary_dilation(g, iterations=max(1, int(round(skirt_m / cell))))
+    keep = up | g[ij[:, 0], ij[:, 1]]
+    return X[keep], int((~keep).sum())
 
 
 def split_points(X, n, d, cell=0.02, min_share=0.1):
@@ -204,7 +220,10 @@ def evidence(a):
     for oid, X0 in work:
         if a.apply_detection and oid in prev and oid not in notes and os.path.exists(os.path.join(a.dir, "ev", f"obj{oid}.npz")):
             rep.append(prev[oid]); continue
-        t0 = time.time(); X, ncomp = clean_points(X0, n, d); fr, half = make_frame(X, n, d); L = fr.loc(X)
+        t0 = time.time(); X, ncomp = clean_points(X0, n, d); nskirt = 0
+        if cfg["skirt_h"] > 0:
+            X, nskirt = drop_skirt(X, n, d, cfg["skirt_h"], cfg["skirt_m"])
+        fr, half = make_frame(X, n, d); L = fr.loc(X)
         hmax = float(np.percentile(L[:, 2], 99.5)) + 0.01; m = cfg["margin_m"]
         lo = np.array([-half[0] - m, -half[1] - m, 0.0]); hi = np.array([half[0] + m, half[1] + m, hmax + m])
         vox = max(cfg["voxel_m"], float(np.cbrt(np.prod(hi - lo) / cfg["max_voxels"]))); lo[2] = -vox
@@ -268,6 +287,23 @@ def evidence(a):
                         continue
                 keep_.append(nm); pm_[nm] = pm
             names = keep_
+        # mostly-hidden test (seg runs) relative to the object's own best view: a thin frame / hollow object never fills 25 % of its
+        # box (o14 chair frame, o2 A-frame got no crops at all -> no recipe, no primitive candidate)
+        cov = {}
+        if a.seg_dir:
+            for nm in names[:4 * cfg["vlm_images"]]:
+                c = byname[nm]; u, v, _, ok = project(c, boxd); SD = depth_of(a.splat_depth_dir, nm)
+                if not ok.all() or SD is None:
+                    continue
+                x0, x1, y0, y1 = u.min(), u.max(), v.min(), v.max()
+                ys, xs = np.mgrid[0:c["H"], 0:c["W"]]
+                ray = np.stack([(xs + 0.5 - c["cx"]) / c["fx"], (ys + 0.5 - c["cy"]) / c["fy"], np.ones_like(xs, float)], -1); ray /= np.linalg.norm(ray, axis=-1, keepdims=True)
+                Pl = fr.loc(s * (((ray * SD[..., None]).reshape(-1, 3) - c["t"]) @ c["R"]) @ R.T + t).reshape(c["H"], c["W"], 3)
+                mk = (np.abs(Pl[..., 0]) < half[0] + 0.03) & (np.abs(Pl[..., 1]) < half[1] + 0.03) & (Pl[..., 2] > 0.015) & (Pl[..., 2] < hmax + 0.03) & (SD > 0)
+                cov[nm] = float(mk.sum()) / max((x1 - x0) * (y1 - y0), 1.0)
+            if cov:
+                thr = max(cfg["crop_min_cov"], min(0.25, cfg["crop_rel_cov"] * max(cov.values())))
+                names = [nm for nm in names if cov.get(nm, 0.0) >= thr]
         names = names[:cfg["vlm_images"]]
         for k, nm in enumerate(names):
             c = byname[nm]; img = load_img(c); u, v, _, ok = project(c, boxd)
@@ -286,13 +322,13 @@ def evidence(a):
                 ray = np.stack([(xs + 0.5 - c["cx"]) / c["fx"], (ys + 0.5 - c["cy"]) / c["fy"], np.ones_like(xs, float)], -1); ray /= np.linalg.norm(ray, axis=-1, keepdims=True)
                 Pl = fr.loc(s * (((ray * SD[..., None]).reshape(-1, 3) - c["t"]) @ c["R"]) @ R.T + t).reshape(c["H"], c["W"], 3)
                 mk = (np.abs(Pl[..., 0]) < half[0] + 0.03) & (np.abs(Pl[..., 1]) < half[1] + 0.03) & (Pl[..., 2] > 0.015) & (Pl[..., 2] < hmax + 0.03) & (SD > 0)
-                if a.seg_dir and mk.sum() < 0.25 * (x1 - x0) * (y1 - y0):   # mostly hidden behind something in this frame: no use
+                if a.seg_dir and not cov and mk.sum() < 0.25 * (x1 - x0) * (y1 - y0):   # mostly hidden behind something in this frame
                     continue
                 cut = cv2.warpAffine(img * mk[..., None], M, (512, 512), flags=cv2.INTER_CUBIC, borderValue=0)
                 cut = np.clip(cut[..., ::-1] * 255, 0, 255).astype(np.uint8)
             cv2.imwrite(os.path.join(a.dir, "vlm_in", f"obj{oid}_cut{k}.jpg"), cut, [cv2.IMWRITE_JPEG_QUALITY, 90])
         fm = free >= cfg["min_free_views"]
-        rep.append(dict(id=oid, lidar_points=int(len(X0)), lidar_points_kept=int(len(X)), core_components=ncomp, box_m=[round(2 * float(half[0]), 3), round(2 * float(half[1]), 3), round(hmax, 3)],
+        rep.append(dict(id=oid, lidar_points=int(len(X0)), lidar_points_kept=int(len(X)), skirt_dropped=nskirt, core_components=ncomp, box_m=[round(2 * float(half[0]), 3), round(2 * float(half[1]), 3), round(hmax, 3)],
                         detector_footprint_m=fpm.get(oid), detection=notes.get(oid), views=len(sel), voxel_m=round(vox, 4), grid=list(G.shape), free_share=round(float(fm.mean()), 3),
                         surface_voxels=int(((surf >= cfg["min_surf_views"]) & ~fm).sum()), azimuth_coverage=round(float(len({int((x + np.pi) / (2 * np.pi) * 16) % 16 for x in az}) / 16), 2),
                         vlm_crops=len(names), seconds=round(time.time() - t0)))
@@ -1267,13 +1303,91 @@ def train_weight(a, n):
     return w if len(w) == n else None
 
 
+def splat_features(v, s):
+    """per gaussian: opacity, needle ratio (largest / middle scale), view-dependent colour swing (SH bands >= 1 norm per channel)."""
+    op = 1 / (1 + np.exp(-np.asarray(v["opacity"], np.float64)))
+    sc = np.sort(s * np.exp(np.stack([v["scale_0"], v["scale_1"], v["scale_2"]], 1).astype(np.float64)), 1)
+    aniso = sc[:, 2] / np.maximum(sc[:, 1], 1e-9); rn = [n for n in v.dtype.names if n.startswith("f_rest_")]
+    vd = np.sqrt(sum(np.asarray(v[n], np.float64) ** 2 for n in rn) / 3) if rn else np.zeros(len(v))
+    return op, aniso, vd, sc[:, 2]
+
+
+def lidar_tree(a, cell=0.01):
+    """metric static LiDAR cloud (1 cm voxels) as a KD-tree, or None."""
+    f = getattr(a, "cloud", None)
+    if not f or not os.path.exists(f):
+        return None, None
+    from plyfile import PlyData
+    from scipy.spatial import cKDTree
+    c = PlyData.read(f)["vertex"].data; L = np.stack([c["x"], c["y"], c["z"]], 1).astype(np.float64)
+    L = L[np.unique(np.floor(L / cell).astype(np.int64), axis=0, return_index=True)[1]]
+    return cKDTree(L), L
+
+
+def halo_mask(cfg, m, Lg, feats, sd_of, box, lt, Xm, others):
+    """object halo (rows of `box`): splat gaussians around a meshed object that are NOT its real seen surface -- farther than
+    halo_out_m outside the mesh solid, or glitter (opacity < halo_min_opacity, needles s_max/s_mid > halo_aniso, view-dependent
+    colour swing > halo_vd) anywhere in the halo volume -- whatever their training blend weight. Protected: gaussians on other
+    real structure (within halo_lidar_m of a LiDAR return that lies > halo_out_m + halo_lidar_gap_m outside this mesh: a wall,
+    a shelf leg, the object itself where the mesh is too small) and on another meshed object (within halo_out_m of its solid)."""
+    i = np.nonzero(box)[0]; h = np.zeros(len(Lg), bool); st = {}
+    if not len(i):
+        return h, st
+    op, an, vd, _ = (f[i] for f in feats); sd = sd_of(Lg[i])
+    glit = (op < cfg["halo_min_opacity"]) | (an > cfg["halo_aniso"]) | (vd > cfg["halo_vd"])
+    far = sd > cfg["halo_out_m"]; cand = far | (glit & (sd > cfg["halo_glitter_out_m"]))     # glitter_out_m < 0: also inside the solid
+    st = dict(box=int(len(i)), far=int(far.sum()), glitter=int(glit.sum()), cand=int(cand.sum()))
+    if lt is not None and cand.any():                                       # other real structure measured by the LiDAR
+        tree, Lm = lt; lo_, hi_ = Xm[i[cand]].min(0) - 0.05, Xm[i[cand]].max(0) + 0.05
+        sel = np.all((Lm >= lo_) & (Lm <= hi_), 1)
+        if sel.any():
+            from scipy.spatial import cKDTree
+            Lsel = Lm[sel]; Ll = m["fr"].loc(Lsel); foreign = (sd_of(Ll) > cfg["halo_out_m"] + cfg["halo_lidar_gap_m"]) & (Ll[:, 2] > cfg["halo_floor_h"])
+            if foreign.any():
+                dl = cKDTree(Lsel[foreign]).query(Xm[i[cand]], distance_upper_bound=cfg["halo_lidar_m"])[0]
+                keep = np.isfinite(dl); ci = np.nonzero(cand)[0]; cand[ci[keep]] = False; st["lidar_kept"] = int(keep.sum())
+    for m2, sd2_of in others:                                               # another meshed object's own surface
+        ci = np.nonzero(cand)[0]
+        if not len(ci):
+            break
+        L2 = m2["fr"].loc(Xm[i[ci]]); lo2, hi2 = m2["L"].min(0) - cfg["halo_out_m"], m2["L"].max(0) + cfg["halo_out_m"]
+        inb = np.all((L2 >= lo2) & (L2 <= hi2), 1)
+        if inb.any():
+            near = sd2_of(L2[inb]) <= cfg["halo_out_m"]; cand[ci[np.nonzero(inb)[0][near]]] = False; st["other_kept"] = st.get("other_kept", 0) + int(near.sum())
+    h[i[cand]] = True; st["removed"] = int(cand.sum())
+    return h, st
+
+
+def mesh_sdf_fn(m, pad, vox=0.005):
+    """signed distance (m) to the mesh solid (negative inside), object frame: one voxel grid built on first use, then lookups
+    (outside the grid: +inf)."""
+    from scipy import ndimage
+    cache = {}
+
+    def f(Q):
+        if "D" not in cache:
+            L, F = m["L"], m["F"]; lo = m["L"].min(0) - pad; lo[2] = min(lo[2], -vox); sh = np.ceil((m["L"].max(0) + pad - lo) / vox).astype(int) + 2
+            P = np.concatenate([L, (L[F[:, 0]] + L[F[:, 1]]) / 2, (L[F[:, 1]] + L[F[:, 2]]) / 2, (L[F[:, 2]] + L[F[:, 0]]) / 2])
+            ij = np.clip(np.floor((P - lo) / vox).astype(int), 0, sh - 1); occ = np.zeros(sh, bool); occ[ij[:, 0], ij[:, 1], ij[:, 2]] = True
+            occ = ndimage.binary_closing(np.pad(occ, 2), iterations=1)[2:-2, 2:-2, 2:-2]; occ = solid_fill(occ)
+            D = (ndimage.distance_transform_edt(~occ) - ndimage.distance_transform_edt(np.pad(occ, 1, constant_values=False))[1:-1, 1:-1, 1:-1]) * vox
+            cache.update(D=D.astype(np.float32), lo=lo, sh=sh)
+        D, lo, sh = cache["D"], cache["lo"], cache["sh"]; q = np.floor((Q - lo) / vox).astype(int); ok = np.all((q >= 0) & (q < sh), 1)
+        return np.where(ok, D[np.clip(q[:, 0], 0, sh[0] - 1), np.clip(q[:, 1], 0, sh[1] - 1), np.clip(q[:, 2], 0, sh[2] - 1)], np.inf)
+    return f
+
+
 def layer_rows(a, cfg, v, s, R, t):
     """per final mesh: (id, mesh, rows of the base to delete, surface gaussians as rows of the base's dtype)."""
     from scipy.spatial.transform import Rotation
     Xm = s * (np.stack([v["x"], v["y"], v["z"]], 1).astype(np.float64) @ R.T) + t; out = []; tw = train_weight(a, len(v))
     if tw is None and cfg["seen_from"] == "splat":
         print("[layers] no training-weight stats for this PLY: splat gaussians the cameras rely on are not protected", flush=True)
-    for m in final_meshes(a.dir):
+    meshes = [m for m in final_meshes(a.dir) if not getattr(a, "ids", None) or m["id"] in a.ids]
+    feats = splat_features(v, s) if cfg["halo"] else None; lt = lidar_tree(a) if cfg["halo"] else (None, None)
+    lt = None if lt[0] is None else lt; sdfs = {m["id"]: mesh_sdf_fn(m, cfg["halo_m"] + 0.02) for m in meshes} if cfg["halo"] else {}
+    a._halo_stats = {}
+    for m in meshes:
         Lg = m["fr"].loc(Xm); lo, hi = m["L"].min(0), m["L"].max(0); zn = cfg["zone_m"]
         d_ = (Lg[:, 0] > lo[0] - zn) & (Lg[:, 0] < hi[0] + zn) & (Lg[:, 1] > lo[1] - zn) & (Lg[:, 1] < hi[1] + zn) & (Lg[:, 2] > cfg["floor_m"]) & (Lg[:, 2] < hi[2] + zn)
         if cfg["zone_mode"] == "sdf":                                       # inside the mesh volume or within a thin shell of it (plus the
@@ -1293,9 +1407,40 @@ def layer_rows(a, cfg, v, s, R, t):
                     d_[i] &= tw[i] < cfg["keep_train_w"]
             elif len(i):
                 d_[i] = mesh_dist(m["L"], m["F"], Lg[i], lo - pad, hi + pad) <= reach[i]
+        d_old = d_.copy(); hp = cfg["halo_m"]
+        if cfg["halo"]:                                                     # object halo: spray / glitter around the object goes, whatever
+            hb = (Lg[:, 0] > lo[0] - hp) & (Lg[:, 0] < hi[0] + hp) & (Lg[:, 1] > lo[1] - hp) & (Lg[:, 1] < hi[1] + hp) \
+                & (Lg[:, 2] > cfg["halo_floor_h"]) & (Lg[:, 2] < hi[2] + hp)   # the training views' weight (the mesh's seen faces take over)
+            hm, st = halo_mask(cfg, m, Lg, feats, sdfs[m["id"]], hb, lt, Xm, [(m2, sdfs[m2["id"]]) for m2 in meshes if m2["id"] != m["id"]])
+            d_ |= hm; a._halo_stats[m["id"]] = st
         k = ~((m["L"][:, 2] < 0.004) & ((m["N"] @ m["fr"].n) < -0.5))                 # the underside lies on the floor layer: not drawn
         if cfg["seen_from"] == "splat":                                     # only faces no training camera could see become gaussians
-            k &= m["vis"] < cfg["min_vis_views"]
+            uns_k = m["vis"] < cfg["min_vis_views"]; dfile = os.path.join(a.dir, f"obj{m['id']}_draw.npy")
+            if cfg["halo"] and os.path.exists(dfile) and len(np.load(dfile)) == len(k):
+                uns_k = np.load(dfile)                                      # decided once (gate, on the input PLY): compose keeps the rows the refit saw
+            elif cfg["halo"]:
+                # seen faces whose splat surface the halo removed: drawn by the mesh (photo texture, refit by the gate) -- only where
+                # the splat HAD an opaque surface within halo_support_m and has none left (no wrong-shaped mesh bits where the
+                # splat never drew anything)
+                from scipy.spatial import cKDTree
+                op_ = feats[0]; hb2 = (Lg[:, 0] > lo[0] - 0.05) & (Lg[:, 0] < hi[0] + 0.05) & (Lg[:, 1] > lo[1] - 0.05) & (Lg[:, 1] < hi[1] + 0.05) \
+                    & (Lg[:, 2] > -0.01) & (Lg[:, 2] < hi[2] + 0.05) & (op_ >= cfg["halo_support_op"])
+                sv = np.nonzero(~uns_k & k)[0]; draw = np.zeros(len(k), bool)
+                if len(sv) and hb2.any():
+                    b_ = np.nonzero(hb2)[0]; before = np.isfinite(cKDTree(Xm[b_]).query(m["V"][sv], distance_upper_bound=cfg["halo_support_m"])[0])
+                    a_ = b_[~d_[b_]]; after = np.isfinite(cKDTree(Xm[a_]).query(m["V"][sv], distance_upper_bound=cfg["halo_support_m"])[0]) if len(a_) else np.zeros(len(sv), bool)
+                    draw[sv[before & ~after]] = True
+                hd = np.nonzero(d_ & ~d_old)[0]                             # ... and every seen face near what the halo removed (any opacity:
+                if len(sv) and len(hd) and cfg["halo_redraw_m"] > 0:        #   semi-transparent surface layers leave see-through holes otherwise)
+                    draw[sv[np.isfinite(cKDTree(Xm[hd]).query(m["V"][sv], distance_upper_bound=cfg["halo_redraw_m"])[0])]] = True
+                uns_k = uns_k | draw
+                if not os.environ.get("NO_DRAW_SAVE"):
+                    np.save(dfile, uns_k)
+                a._halo_stats.setdefault(m["id"], {})["seen_redrawn"] = int(draw.sum())
+            k &= uns_k
+        if cfg["halo"]:
+            print(f"[layers] halo o{m['id']}: " + json.dumps(dict(a._halo_stats.get(m["id"], {}), deleted_old=int(d_old.sum()), deleted=int(d_.sum()),
+                                                                 tw_ge_keep=int((d_ & ~d_old & (tw >= cfg["keep_train_w"])).sum()) if tw is not None else None)), flush=True)
         if cfg["local_floor"]:                                              # the splat's own floor around the object can sit a few cm above
             sc_ = np.exp(np.stack([v["scale_0"], v["scale_1"], v["scale_2"]], 1).astype(np.float64)); sc_.sort(1)   # the LiDAR floor
             dx = np.maximum(np.maximum(lo[0] - Lg[:, 0], Lg[:, 0] - hi[0]), 0); dy = np.maximum(np.maximum(lo[1] - Lg[:, 1], Lg[:, 1] - hi[1]), 0)
@@ -1349,7 +1494,7 @@ def gate(a):
     cfg = load_cfg(a); s, R, t = sim3(a.sim3_json); v = PlyData.read(a.ply)["vertex"].data; dev = "cuda"
     p0 = to_params(v, dev); deg = sh_deg(p0); Rv = ViewerRaster("ss352", "exact", display_scale=1.8)
     fr = {n_: (cam, c2w) for n_, cam, c2w in all_frames([a.dataset])}; out = {}; cams_by = {c_["name"]: c_ for c_ in load_cams(a.dataset)}
-    for oid, m, d_, new, sr in layer_rows(a, cfg, v, s, R, t):
+    def one(oid, m, d_, new, sr):
         z = np.load(os.path.join(a.dir, "ev", f"obj{oid}.npz")); names = [str(x) for x in z["views"] if str(x) in fr]; names = names[::max(1, len(names) // cfg["gate_frames"])]
         pk = to_params(np.concatenate([v[~d_], new]), dev); pb, pa = [], []; nb = int((~d_).sum())
         allv = [str(x) for x in z["views"] if str(x) in fr]
@@ -1408,6 +1553,22 @@ def gate(a):
                              face_psnr_mesh=None if fpsnr is None else round(fpsnr, 2), accept=bool(fpsnr is None or fpsnr >= cfg["min_face_psnr"] or not cfg["strict_gates"]),
                              alarm=bool(fpsnr is not None and fpsnr < cfg["min_face_psnr"]))
         print(f"[layers] gate o{oid}: " + json.dumps(out[str(oid)]), flush=True)
+    nohalo = []
+    for oid, m, d_, new, sr in layer_rows(a, cfg, v, s, R, t):
+        one(oid, m, d_, new, sr)
+        g = out[str(oid)]
+        if cfg["halo"] and cfg["fallback_object_loss_db"] > 0 and g.get("loss_db", 0.0) > cfg["fallback_object_loss_db"]:
+            nohalo.append(oid)                                              # step down: the plain (v19-style) composite before the splat
+    if nohalo:
+        c2 = dict(cfg, halo=False); ids0 = a.ids; a.ids = nohalo
+        for oid, m, d_, new, sr in layer_rows(a, c2, v, s, R, t):
+            first = dict(out[str(oid)]); one(oid, m, d_, new, sr)
+            out[str(oid)]["halo"] = False; out[str(oid)]["halo_loss_db"] = first.get("loss_db")
+            df = os.path.join(a.dir, f"obj{oid}_draw.npy")
+            if os.path.exists(df):
+                os.remove(df)
+            print(f"[layers] gate o{oid}: halo composite -{first.get('loss_db')} dB > fallback {cfg['fallback_object_loss_db']}: no-halo composite -{out[str(oid)]['loss_db']} dB", flush=True)
+        a.ids = ids0
     json.dump(dict(objects=out, min_face_psnr=cfg["min_face_psnr"]), open(os.path.join(a.dir, "gate.json"), "w"), indent=1)
 
 
@@ -1597,12 +1758,53 @@ def floorviews(a):
     print(f"[layers] floor views -> {od}", flush=True)
 
 
+def halo_nomesh(a, cfg, v, s, R, t, kept, rep):
+    """objects with evidence but no mesh (vision-language: neither candidate; failed gates): the splat stays, but its halo goes --
+    gaussians in the object's box farther than halo_nomesh_out_m from every LiDAR return, and glitter (as halo_mask) farther than
+    halo_out_m from it; nothing within halo_out_m of a meshed object's solid."""
+    ef = os.path.join(a.dir, "evidence.json")
+    if not os.path.exists(ef):
+        return np.zeros(len(v), bool)
+    lt = lidar_tree(a)
+    if lt[0] is None:
+        print("[layers] halo (no mesh): no LiDAR cloud (--cloud): skipped", flush=True); return np.zeros(len(v), bool)
+    meshed = {m["id"] for m in final_meshes(a.dir)}; ids = [o["id"] for o in json.load(open(ef))["objects"]]
+    ids = [i for i in ids if i not in meshed and (not a.ids or i in a.ids) and os.path.exists(os.path.join(a.dir, "ev", f"obj{i}.npz"))]
+    out = np.zeros(len(v), bool)
+    if not ids:
+        return out
+    Xm = s * (np.stack([v["x"], v["y"], v["z"]], 1).astype(np.float64) @ R.T) + t; op, an, vd, _ = splat_features(v, s); hp = cfg["halo_m"]
+    sdk = [(m, mesh_sdf_fn(m, cfg["halo_out_m"] + 0.02)) for m in kept]
+    for oid in ids:
+        z = np.load(os.path.join(a.dir, "ev", f"obj{oid}.npz")); fr = Frame(z["fr_c0"], z["fr_a1"], z["fr_a2"], z["fr_n"], float(z["fr_d"]))
+        half, hmax = np.asarray(z["half"], float), float(z["hmax"]); Lg = fr.loc(Xm)
+        i = np.nonzero((np.abs(Lg[:, 0]) < half[0] + hp) & (np.abs(Lg[:, 1]) < half[1] + hp) & (Lg[:, 2] > cfg["halo_floor_h"]) & (Lg[:, 2] < hmax + hp))[0]
+        if not len(i):
+            continue
+        dl = lt[0].query(Xm[i], distance_upper_bound=1.0)[0]
+        glit = (op[i] < cfg["halo_min_opacity"]) | (an[i] > cfg["halo_aniso"]) | (vd[i] > cfg["halo_vd"])
+        cand = (dl > cfg["halo_nomesh_out_m"]) | (glit & (dl > cfg["halo_out_m"]))
+        for m, f in sdk:
+            ci = np.nonzero(cand)[0]
+            if len(ci):
+                cand[ci[f(m["fr"].loc(Xm[i[ci]])) <= cfg["halo_out_m"]]] = False
+        out[i[cand]] = True
+        rep[oid] = dict(decision="no mesh: splat kept, halo cleaned", deleted=int(cand.sum()), box=int(len(i)))
+        print(f"[layers] halo (no mesh) o{oid}: {int(cand.sum())} of {len(i)} gaussians in its box removed", flush=True)
+    return out
+
+
 def compose(a):
     from plyfile import PlyData, PlyElement
     from scipy.spatial.transform import Rotation
     cfg = load_cfg(a); s, R, t = sim3(a.sim3_json); v = PlyData.read(a.ply)["vertex"].data; N0 = len(v); dele = np.zeros(N0, bool); rows = []; rep = {}
     gf = os.path.join(a.dir, "gate.json"); gj = json.load(open(gf))["objects"] if os.path.exists(gf) else {}; kept = []
-    for oid, m, d_, new, _ in layer_rows(a, cfg, v, s, R, t):
+    nh = [int(k) for k, g in gj.items() if g.get("halo") is False] if cfg["halo"] else []
+    ids0 = a.ids; allm = [m["id"] for m in final_meshes(a.dir) if not ids0 or m["id"] in ids0]
+    a.ids = [i for i in allm if i not in nh] or [-1]; rows_h = layer_rows(a, cfg, v, s, R, t)
+    a.ids = [i for i in allm if i in nh] or [-1]; rows_n = layer_rows(a, dict(cfg, halo=False), v, s, R, t) if nh else []
+    a.ids = ids0
+    for oid, m, d_, new, _ in rows_h + rows_n:
         if gj and not gate_ok(gj.get(str(oid), {}), cfg):
             rep[oid] = dict(decision=f"kept its splat: own training frames -{gj[str(oid)].get('loss_db')} dB (fallback_object_loss_db "
                                      f"{cfg['fallback_object_loss_db']}) / seen-face PSNR {gj[str(oid)].get('face_psnr_mesh')} dB"); continue
@@ -1620,9 +1822,11 @@ def compose(a):
             if len(dc_) == len(new):
                 for i in range(3):
                     new[f"f_dc_{i}"] = dc_[:, i]
-        dele |= d_; rows.append(new); kept.append(m); rep[oid] = dict(deleted=int(d_.sum()), inserted=int(len(new)))
+        dele |= d_; rows.append(new); kept.append(m); rep[oid] = dict(deleted=int(d_.sum()), inserted=int(len(new)), **({"halo": a._halo_stats[oid]} if oid in getattr(a, "_halo_stats", {}) else {}))
         if gj and not gate_pass(gj.get(str(oid), {}), cfg):
             rep[oid]["alarm"] = f"seen-face PSNR {gj[str(oid)].get('face_psnr_mesh')} dB < {cfg['min_face_psnr']} (strict_gates off: composited anyway)"
+    if cfg["halo"] and cfg["halo_nomesh"]:
+        dele |= halo_nomesh(a, cfg, v, s, R, t, kept, rep)
     if a.map and os.path.exists(a.map) and kept:                            # completed floor under every meshed object (hidden by the mesh except at its rim)
         z = np.load(a.map); fc = z["foot_cells"] if "foot_cells" in z.files else np.zeros_like(z["occ"]); hi, hj = np.nonzero(fc); mc = float(z["cell"])
         e1, e2, n_, d_ = z["e1"], z["e2"], z["n"], float(z["d"])
