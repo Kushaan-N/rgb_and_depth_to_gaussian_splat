@@ -55,7 +55,10 @@ def crops(a):
         Image.fromarray(np.hstack(sheet)).save(os.path.join(a.out_dir, f"obj{o['id']}_cond.jpg"))
         log.append({"id": o["id"], "views": names, "candidates": ncand})
         print(f"[asset-gen] object {o['id']}: {len(names)} crops of {ncand} candidate views", flush=True)
-    json.dump(log, open(os.path.join(a.out_dir, "crops.json"), "w"), indent=1)
+    cj = os.path.join(a.out_dir, "crops.json")
+    if a.ids and os.path.exists(cj):                                        # a subset: the other objects' crops stay listed
+        log = [c for c in json.load(open(cj)) if c["id"] not in {x["id"] for x in log}] + log
+    json.dump(sorted(log, key=lambda c: c["id"]), open(cj, "w"), indent=1)
 
 
 def generate(a):
