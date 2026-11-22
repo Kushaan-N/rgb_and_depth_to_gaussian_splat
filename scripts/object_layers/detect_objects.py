@@ -31,7 +31,7 @@ DEF = dict(every=2, objects=["box", "brick", "stack of blocks", "crate", "chair"
            exclude=["table", "desk", "shelf", "cabinet", "door", "wall", "window", "monitor", "floor", "ceiling", "whiteboard"],
            people=["person"], box_thr=0.3, text_thr=0.25, max_box_share=0.35, nms_iou=0.7, erode_px=3, cell_m=0.02, min_h=0.03, max_h=1.2,
            min_height=0.08, min_views=3, min_ratio=0.3, max_depth_m=5.0, min_size=0.08, max_size=2.0, max_dist=3.0, tall_share=0.02,
-           min_points=60, merge_iou=0.05, depth_band_m=0.2, frag_gap_m=0.12, grow_m=0.12, height_slack=1.15, frag_area_m2=0.01, gdino="IDEA-Research/grounding-dino-base", sam="facebook/sam2.1-hiera-large")
+           min_points=60, merge_iou=0.05, tall_dilate=1, max_base_h=9.0, clamp_ratio=0.0, prev_match_m=0.2, depth_band_m=0.2, frag_gap_m=0.12, grow_m=0.12, height_slack=1.15, frag_area_m2=0.01, gdino="IDEA-Research/grounding-dino-base", sam="facebook/sam2.1-hiera-large")
 
 
 def load_cfg(path):
@@ -203,7 +203,7 @@ def lift(a):
             why = f"size {diag:.2f} m"
         elif ptree.query(cuv)[0] > cfg["max_dist"]:
             why = "far from the path"
-        elif (ndimage.binary_dilation(cells, iterations=1) & tall).sum() > cfg["tall_share"] * cells.sum():
+        elif ((ndimage.binary_dilation(cells, iterations=cfg["tall_dilate"]) if cfg["tall_dilate"] else cells) & tall).sum() > cfg["tall_share"] * cells.sum():
             why = "under something tall (furniture / structure)"
         # amodal extent: the image votes cover what the cameras segmented (edges below the vote ratio are cut); the LiDAR
         # occupancy components touching the votes (within grow_m of them, not larger than max_size) give the full footprint
@@ -212,6 +212,11 @@ def lift(a):
             cj = (olab == lj) & near
             if cj.any():
                 fd |= cj
+        if cfg["clamp_ratio"] > 0:
+            # the grown LiDAR footprint is clamped to the multi-view mask support: a grown cell stays only when at least
+            # clamp_ratio of the frames that saw something standing there segmented an object there, or when the cameras
+            # never saw it standing (amodal back side: LiDAR only) -- no growth into what the cameras saw as not-this-object
+            fd = ndimage.binary_dilation(cells, iterations=1) | (fd & ((ratio >= cfg["clamp_ratio"]) | (occ_v < cfg["min_views"])))
         li = bidx[fd[bi[:, 0], bi[:, 1]]]; Pl = X[li]
         Pi = Pimg[fd[Pimg_ij[:, 0].clip(0, shape[0] - 1), Pimg_ij[:, 1].clip(0, shape[1] - 1)]] if len(Pimg) else np.zeros((0, 3))
         # nothing above what the cameras segmented: the grown LiDAR components may touch furniture (a desk leg next to a stack)
@@ -222,6 +227,9 @@ def lift(a):
         hh = float(np.percentile(P_ @ n + d, 99)) if len(P_) else 0.0
         if why is None and (len(P_) < cfg["min_points"] or hh < cfg["min_height"]):
             why = f"too low / too few points (h {hh:.2f} m, {len(P_)} pts)"
+        hb_ = float(np.percentile(P_ @ n + d, 3)) if len(P_) else 0.0
+        if why is None and hb_ > cfg["max_base_h"]:                         # not standing on the floor (on a desk / a shelf board)
+            why = f"not on the floor (base {hb_:.2f} m)"
         votes = {}
         for i_, j_ in zip(ii, jj):
             for l_, w in lab_v.get((i_, j_), {}).items():
@@ -241,12 +249,27 @@ def lift(a):
         pts[f"obj{o['id']}"] = lp[f"obj{o['id']}"]
         objs.append(dict(o, source=src, label=comps[hit[0]]["label"] if hit else "", image_views=max([comps[ci]["views"] for ci in hit], default=0)))
     nid = 1 + max([o["id"] for o in meta["objects"]], default=-1)
+    # stable ids across re-runs (--prev: an earlier detection): an image object whose centre lies within prev_match_m of an
+    # earlier image object keeps that id (its assets / review stay valid); new ones are numbered after every earlier id
+    prev = [o for o in json.load(open(a.prev + ".json"))["objects"] if o.get("source") == "image"] if getattr(a, "prev", None) else []
+    pid = {}; taken = set()
+    if prev:
+        nid = max(nid, 1 + max(o["id"] for o in json.load(open(a.prev + ".json"))["objects"]))
+        fp_ = lambda X_: np.asarray(X_) - (np.asarray(X_) @ n + d) * n          # on the floor plane: grown / clamped heights move the 3D centre
+        cand = sorted((float(np.linalg.norm(fp_(cp["P"].mean(0)) - fp_(o["centre_m"]))), ci, o["id"]) for ci, cp in enumerate(comps) if ci not in used for o in prev)
+        for dd, ci, oid in cand:
+            if dd <= cfg["prev_match_m"] and ci not in pid and oid not in taken:
+                pid[ci] = oid; taken.add(oid)
     for ci, cp in enumerate(comps):
         if ci in used:
             continue
-        P_ = cp["P"]; pts[f"obj{nid}"] = P_.astype(np.float64)
-        objs.append(dict(id=nid, points=int(len(P_)), footprint_m=np.round(cp["span"], 3).tolist(), height_m=round(cp["h"], 3), centre_m=np.round(P_.mean(0), 4).tolist(),
-                         source="image", label=cp["label"], image_views=cp["views"], vote_ratio=cp["ratio"], lidar_points=cp["lidar_pts"])); nid += 1
+        P_ = cp["P"]; oid = pid.get(ci)
+        if oid is None:
+            oid = nid; nid += 1
+        pts[f"obj{oid}"] = P_.astype(np.float64)
+        objs.append(dict(id=oid, points=int(len(P_)), footprint_m=np.round(cp["span"], 3).tolist(), height_m=round(cp["h"], 3), centre_m=np.round(P_.mean(0), 4).tolist(),
+                         source="image", label=cp["label"], image_views=cp["views"], vote_ratio=cp["ratio"], lidar_points=cp["lidar_pts"], **({"prev_id": True} if ci in pid else {})))
+    objs.sort(key=lambda o: o["id"])
     np.savez_compressed(a.out + ".npz", **pts)
     json.dump(dict(floor=meta["floor"], axes=meta["axes"], params=dict(meta.get("params", {}), detect=cfg), objects=objs,
                    rejected={str(k): v for k, v in rej.items()}, masks=nmask, frames=len(files)), open(a.out + ".json", "w"), indent=2)
@@ -298,6 +321,7 @@ def main():
     ap.add_argument("--cfg-json", default=None, help="the config's object_layers block as JSON (uses its `detect` sub-block)")
     ap.add_argument("--splat-depth-dir"); ap.add_argument("--sim3-json"); ap.add_argument("--lidar-objects", help="find_objects.py output prefix")
     ap.add_argument("--cloud"); ap.add_argument("--out", help="merged objects prefix")
+    ap.add_argument("--prev", default=None, help="lift: an earlier detection prefix: image objects at the same place keep their ids")
     a = ap.parse_args(); os.makedirs(a.out_dir, exist_ok=True)
     {"segment": segment, "lift": lift}[a.cmd](a)
 
