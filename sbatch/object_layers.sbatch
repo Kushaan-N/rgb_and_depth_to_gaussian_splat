@@ -59,7 +59,8 @@ json.dump(pu.load_config(sys.argv[1]).get("object_layers", {}) or {}, open(sys.a
 PY
 OBJ="$D/objects"; DET="${DET:-$D/objects_det}"   # DET: another detection run (prefix), e.g. a re-lift with new settings
 if [ "$(get object_layers.detect.enable 0)" = 1 ]; then OBJ="$DET"; fi
-SEGA=(); [ "$OBJ" = "$DET" ] && SEGA=(--seg-dir "$D/detect/seg")
+DD="${DETECT_DIR:-$D/detect}"   # DETECT_DIR: a fresh segmentation (e.g. after a vocabulary change); PREV_DET: earlier detection (stable ids)
+SEGA=(); [ "$OBJ" = "$DET" ] && SEGA=(--seg-dir "$DD/seg")
 COMMON=(--dir "$T" --cfg-json "$T/config.json" --objects "$OBJ" "${SEGA[@]}" --sim3-json "$P/sim3.json" --dataset "$DATA" --splat-depth-dir "$D/depth" --gen-dir "$AG")
 VLM=(--dir "$T" --model "$(get object_layers.vlm.model claude-opus-5-5)" --effort "$(get object_layers.vlm.effort high)" --cache-dir "$CEAR_WS/vlm-cache")
 vlm_on() { [ "${VLM_ENABLE:-1}" = 1 ] && [ "$(get object_layers.vlm.enable 1)" = 1 ] && [ "$(get "object_layers.vlm.$1" 1)" != 0 ] && [ -x "$LPY" ]; }
@@ -77,9 +78,10 @@ if has prep; then   # objects + orbit cameras are geometry (taken from REF_NAME'
 fi
 if has detect && [ "$OBJ" = "$DET" ]; then
   [ -x "$SEGPY" ] || bash env/make_seg_venv.sh
-  need "$D/detect/segment.json" && "$SEGPY" scripts/object_layers/detect_objects.py segment --dataset "$DATA" --out-dir "$D/detect" --cfg-json "$T/config.json"
-  needt "$DET.json" && "$CPUPY" scripts/object_layers/detect_objects.py lift --dataset "$DATA" --out-dir "$D/detect" --cfg-json "$T/config.json" \
-    --splat-depth-dir "$D/depth" --sim3-json "$P/sim3.json" --lidar-objects "$D/objects" --cloud "$CLOUD" --out "$DET" | grep -E "DETECT|Error|Traceback" || true
+  need "$DD/segment.json" && "$SEGPY" scripts/object_layers/detect_objects.py segment --dataset "$DATA" --out-dir "$DD" --cfg-json "$T/config.json"
+  needt "$DET.json" && "$CPUPY" scripts/object_layers/detect_objects.py lift --dataset "$DATA" --out-dir "$DD" --cfg-json "$T/config.json" \
+    --splat-depth-dir "$D/depth" --sim3-json "$P/sim3.json" --lidar-objects "$D/objects" --cloud "$CLOUD" --out "$DET" \
+    ${PREV_DET:+--prev "$PREV_DET"} | grep -E "DETECT|Error|Traceback" || true
 fi
 if [ ! -f "$OBJ.json" ]; then   # e.g. STAGES=eval of another PLY: the LiDAR objects are enough
   if has assets || has evidence; then echo "missing $OBJ.json (run the detect stage)"; exit 1; fi
@@ -88,8 +90,14 @@ fi
 GEN_ARGS="${GEN_ARGS:-$(get object_layers.assets.crop_args "")}"
 if has assets; then
   [ -x "$MPY" ] || { echo "venv-mv missing: sbatch/mv_venv.sbatch"; exit 1; }
-  need "$AG/crops.json" && "$MPY" scripts/object_priors/mv_asset_gen.py crops --objects "$OBJ" --sim3-json "$P/sim3.json" --dataset "$DATA" \
-    --splat-depth-dir "$D/depth" --out-dir "$AG" ${GEN_ARGS:-}
+  # incremental: objects without crops yet (new detections in a reused asset dir) get crops + generation; existing ones are reused
+  NEWIDS=""; [ -f "$AG/crops.json" ] && NEWIDS=$("$CPUPY" -c "import json,sys; c={x['id'] for x in json.load(open(sys.argv[1]))}; print(' '.join(str(o['id']) for o in json.load(open(sys.argv[2]))['objects'] if o['id'] not in c))" "$AG/crops.json" "$OBJ.json")
+  if [ ! -f "$AG/crops.json" ] || [ -n "$NEWIDS" ]; then
+    echo "[assets] crops for: ${NEWIDS:-all}"
+    "$MPY" scripts/object_priors/mv_asset_gen.py crops --objects "$OBJ" --sim3-json "$P/sim3.json" --dataset "$DATA" \
+      --splat-depth-dir "$D/depth" --out-dir "$AG" ${GEN_ARGS:-} ${NEWIDS:+--ids $NEWIDS}
+    rm -f "$AG/generate.json" "${HY_GEN:-$D/asset_gen_hunyuan}/generate_hy.json"   # per-object outputs that exist are reused
+  fi
   need "$AG/generate.json" && TORCH_HOME="$CEAR_WS/torch-hub" "$TPY" scripts/object_priors/mv_asset_gen.py generate --out-dir "$AG" ${TRELLIS_ARGS:-}
 fi
 export HY3DGEN_MODELS="$CEAR_WS/hy3dgen-cache"   # Hunyuan3D copies its weights here (default would be ~/.cache: never $HOME)
@@ -124,7 +132,7 @@ if has finalize; then
   if [ -x "$LPY" ] && [ -f "$T/vlm/usage.jsonl" ]; then "$LPY" "$VL" cost "${VLM[@]}" && "$TPY" "$OL" finalize "${COMMON[@]}" --round 9 >/dev/null; fi
 fi
 BG="$T/bg_floor.ply"; [ "$(get object_layers.floor_harm_check 0)" = 1 ] || BG="$T/floor_filled.ply"
-GATE=(--dir "$T" --cfg-json "$T/config.json" --sim3-json "$P/sim3.json" --ply "$IN" --dataset "$DATA" --splat-depth-dir "$D/depth" --train-stats "$T/train_w_in.npz")
+GATE=(--dir "$T" --cfg-json "$T/config.json" --sim3-json "$P/sim3.json" --ply "$IN" --dataset "$DATA" --splat-depth-dir "$D/depth" --train-stats "$T/train_w_in.npz" --cloud "$CLOUD" ${IDS:-})
 # per-gaussian training-view weights of the input / the floor-completed background: compose never removes what the cameras draw
 twstats() { [ -f "$2" ] || "$SPY" scripts/clean_haze.py stats --ply "$1" --dataset "$DATA" --stats "$2" | tail -1; }
 if has floor; then
@@ -150,14 +158,14 @@ if has compose; then
     # compose, then floater removal on the background rows only (the inserted mesh / floor gaussians are protected);
     # object_layers.floaters.args = scripts/clean_haze.py clean flags (measured harm restore unless --no-restore)
     RAW="${OUTPLY%.ply}_nofloat.ply"
-    needt "$RAW" && "$TPY" "$OL" compose --dir "$T" --cfg-json "$T/config.json" --sim3-json "$P/sim3.json" --ply "$BG" "${MAPA[@]}" --train-stats "$T/train_w_bg.npz" --out "$RAW"
+    needt "$RAW" && "$TPY" "$OL" compose --dir "$T" --cfg-json "$T/config.json" --sim3-json "$P/sim3.json" --ply "$BG" "${MAPA[@]}" --train-stats "$T/train_w_bg.npz" --cloud "$CLOUD" ${IDS:-} --out "$RAW"
     PF=$("$CPUPY" -c "import json,sys; j=json.load(open(sys.argv[1])); print(j['rows_out'] - j['inserted'])" "${RAW%.ply}_layers.json")
     # shellcheck disable=SC2046
     needt "$OUTPLY" && "$SPY" scripts/clean_haze.py clean --ply "$RAW" --dataset "$DATA" --cloud "$CLOUD" --sim3-json "$P/sim3.json" \
       --freespace-grid "$P/freespace/grid/onpath.npz" --protect-from "$PF" --stats "$T/floaters_stats.npz" --out "$OUTPLY" \
       $(get object_layers.floaters.args "") | grep -E "\[haze\] (cand|iter|train|removed|per)"
   else
-    needt "$OUTPLY" && "$TPY" "$OL" compose --dir "$T" --cfg-json "$T/config.json" --sim3-json "$P/sim3.json" --ply "$BG" "${MAPA[@]}" --train-stats "$T/train_w_bg.npz" --out "$OUTPLY"
+    needt "$OUTPLY" && "$TPY" "$OL" compose --dir "$T" --cfg-json "$T/config.json" --sim3-json "$P/sim3.json" --ply "$BG" "${MAPA[@]}" --train-stats "$T/train_w_bg.npz" --cloud "$CLOUD" ${IDS:-} --out "$OUTPLY"
   fi
   [ -z "$FRAME" ] || { needt "${OUTPLY%.ply}_refaxes.ply" && "$CPUPY" scripts/sim3_align_splat.py --colmap-model "$P/dataset/sparse/0" \
     --gt-model "$FRAME" --in-ply "$OUTPLY" --out-ply "${OUTPLY%.ply}_refaxes.ply" | tail -1; }
@@ -200,6 +208,22 @@ done
 [ -f "$L/orbit/_viewer.json" ] || "$VPY" "${VS[@]}" --bg black --ply "$OUTPLY" --dataset "$D/orbit" --out-dir "$L/orbit" | tail -1
 "$CPUPY" "$SO" montage --dirs "before=$LI/orbit" "after=$L/orbit" --out-dir "$L/orbit_montage"
 CMP="${COMPARE:-}"; [ -n "$CMP" ] && [ -d "$D/$CMP/live/orbit" ] && "$CPUPY" "$SO" montage --dirs "$CMP=$D/$CMP/live/orbit" "layers=$L/orbit" --out-dir "$L/orbit_montage_vs_$CMP" || true
+# every DETECTED object (image + LiDAR detections, not only the LiDAR clusters of $D/orbit): orbit at two heights, before |
+# [COMPARE's PLY] | after -> $L/orbit_det_montage/o<id>_h*.jpg
+if [ "$(get object_layers.eval_det_orbit 0)" = 1 ] && [ -f "$OBJ.json" ]; then
+  OD="$D/orbit_$(basename "$OBJ")"
+  need "$OD/sparse/0/images.txt" && "$CPUPY" "$SO" orbit --objects "$OBJ" --sim3-json "$P/sim3.json" --dataset "$DATA" --cloud "$CLOUD" --out "$OD" --heights 0.6 1.1 --n-az 6
+  [ -f "$LI/orbit_det/_viewer.json" ] || "$VPY" "${VS[@]}" --bg black --ply "$IN" --dataset "$OD" --out-dir "$LI/orbit_det" | tail -1
+  [ -f "$L/orbit_det/_viewer.json" ] || "$VPY" "${VS[@]}" --bg black --ply "$OUTPLY" --dataset "$OD" --out-dir "$L/orbit_det" | tail -1
+  ODIRS=("before=$LI/orbit_det")
+  if [ -n "${COMPARE:-}" ]; then   # COMPARE=v19: that version's layered PLY on the same cameras (rendered once, kept in its live dir)
+    CPLY="$E/${NAME}_layers_${COMPARE}.ply"; CL="$D/layers_$COMPARE/live/orbit_det"
+    [ -f "$CL/_viewer.json" ] || [ ! -f "$CPLY" ] || "$VPY" "${VS[@]}" --bg black --ply "$CPLY" --dataset "$OD" --out-dir "$CL" | tail -1
+    [ -f "$CL/_viewer.json" ] && ODIRS+=("$COMPARE=$CL")
+  fi
+  ODIRS+=("after=$L/orbit_det")
+  "$CPUPY" "$SO" montage --dirs "${ODIRS[@]}" --out-dir "$L/orbit_det_montage" --w 360 || true
+fi
 "$SPY" "$SO" eval --ply "before=$IN" "after=$OUTPLY" --orbit "$D/orbit" --objects "$D/objects" --sim3-json "$P/sim3.json" \
   --cloud "$CLOUD" --live "before=$LI/orbit" "after=$L/orbit" --json-out "$L/proxies.json" | tail -1 || true
 INR="${IN%.ply}_refaxes.ply"
