@@ -205,7 +205,7 @@ object_layers:
   floor_harm_check: false     # true: drop completion discs that change any training view (fill_harm_ply.py); false ships them all
   strict_gates: false         # false: min_face_psnr / max_object_loss_db only raise an alarm (gate.json, compose report); the unseen-angle
                               #   look decides. true: an object failing them keeps its splat (old behaviour)
-  fallback_object_loss_db: 0.0  # > 0: an object whose composite costs its own training frames more than this (gate.json loss_db) keeps
+  fallback_object_loss_db: 1.5  # > 0: an object whose composite costs its own training frames more than this (gate.json loss_db) keeps
                               #   its splat regardless of strict_gates (on-path breakage guard); 0 = off
   zone_mode: sdf              # splat gaussians removed per meshed object: sdf = inside the mesh solid or within shell_m (+ the gaussian's
   shell_m: 0.02               #   own 2-sigma reach, capped at extent_cap_m) of it, above the floor; box = the old zone_m-padded box
@@ -218,6 +218,23 @@ object_layers:
                               #   A-frame show their inside to the cameras)
   unseen_clear_m: 0.10        # splat gaussians within this of a completed (unseen) face are removed (unconstrained glitter behind objects),
   unseen_clear_min_h: 0.05    #   only above this height (the fuzzy floor layer behind an object is what cameras see over its top)
+  halo: true                  # object halo cleanup (v20): inside every meshed object's halo volume (mesh bounds + halo_m, above
+  halo_m: 0.12                #   halo_floor_h) splat gaussians that are not its real seen surface are removed WHATEVER their training
+  halo_floor_h: 0.03          #   weight: farther than halo_out_m outside the mesh solid, or glitter (opacity < halo_min_opacity, needle
+  halo_out_m: 0.03            #   s_max/s_mid > halo_aniso, SH view-dependent swing > halo_vd). Protected: other real structure (within
+  halo_min_opacity: 0.10      #   halo_lidar_m of a LiDAR return lying outside this mesh), other meshed objects. Seen faces whose splat
+  halo_aniso: 10.0            #   surface went (an opaque gaussian within halo_support_m before, none after) are drawn by the mesh and
+  halo_vd: 0.4                #   refit to the photos by the gate. Objects without a mesh (neither candidate): halo_nomesh -- far
+  halo_lidar_m: 0.03          #   (> halo_nomesh_out_m from every LiDAR return) and glitter (> halo_out_m) gaussians in the box go.
+  halo_support_m: 0.015
+  halo_glitter_out_m: 0.0     # glitter goes only OUTSIDE the mesh solid: inside, the splat's seen surface is the object (v20 smoke: o5 faded)
+  halo_redraw_m: 0.0          # > 0: seen faces within this of any removed gaussian are drawn by the mesh. OFF: 0.03 (v20b) made the
+                              #   meshes draw nearly every seen face -> 0.4-4.5 dB own-frame loss, 10 objects fell back to the splat
+  halo_nomesh: true
+  halo_nomesh_out_m: 0.06
+  skirt_h: 0.06               # evidence: LiDAR points below this height sticking out > skirt_m beyond the footprint of what stands above
+  skirt_m: 0.02               #   them are floor noise (they made a floor-coloured plinth under o16 in v19)
+  eval_det_orbit: true        # eval: orbit montages around EVERY detected object (before | COMPARE | after), not only the LiDAR ones
   unseen_fill: synth          # primitive candidates: synth = unreliable / unseen texels re-synthesised patch-wise from the material's
   synth_patch_m: 0.06         #   reliable seen texture (outliers > synth_z robust sigmas and photos below synth_q_mult x q_min are
   synth_z: 3.0                #   treated as unseen); copy = the old same-material face copy
@@ -225,13 +242,19 @@ object_layers:
   detect:                     # image detection merged with the LiDAR clusters (scripts/object_layers/detect_objects.py, venv-seg)
     enable: true
     every: 2                  # every 2nd training frame
-    objects: [box, brick, stack of blocks, crate, chair, stool, ramp, board, cone, bin, bucket, bag, toy, cart]
+    objects: [box, brick, stack of blocks, crate, chair, stool, ramp, board, cone, bin, bucket, bag, toy, cart, robot, cardboard box]
     exclude: [table, desk, shelf, cabinet, door, wall, window, monitor, floor, ceiling, whiteboard]   # structure: boxes on these are dropped
     people: [person]          # dynamic: never objects; cells people were segmented on more than objects are dropped
     min_views: 3              # a floor cell is an object cell when >= min_views frames segmented an object standing there
     min_ratio: 0.3            #   and those are >= min_ratio of the frames that saw anything standing there (multi-view consistency)
     max_dist: 3.0             # as find_objects.py: within this of the camera path, footprint diagonal 0.08 - 2 m, >= 0.08 m tall,
     max_h: 1.2                #   nothing taller than max_h above it (furniture)
+    tall_dilate: 1            # "under something tall" = > tall_share of the 1-cell dilated footprint under structure taller than max_h
+    tall_share: 0.02          #   (v20 test: own cells / 25 % admitted only 1.0-1.2 m boxes stored at the workbench, no real reject recovered)
+    max_base_h: 0.12          #   ... and an object must stand on the floor (3rd-percentile height below this: not on a desk / shelf board)
+    clamp_ratio: 0.0          # > 0: LiDAR-grown footprint clamped to the multi-view mask support (grown cells need >= this vote ratio,
+                              #   or no camera saw something standing there). OFF: at 0.1 (v20 full run) it cut 30-80 % of the LiDAR
+                              #   points of image objects (their amodal backs) -> 0.1 m deep boxes, -3.8 dB on-path
   floaters:                   # after compose: scripts/clean_haze.py on the background rows (meshes / floor discs protected)
     enable: true              # measured (2026-11-19, trot): LiDAR / camera free-space gaussians carry real training pixels (removing all:
                               #   -3.6 dB training views, no visible gain); kept = unsupported + isolated + spikes WITH the harm restore
